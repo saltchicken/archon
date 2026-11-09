@@ -85,7 +85,7 @@ impl TuiApp {
             messages: Vec::new(),
             streaming_text: String::new(),
             is_streaming: false,
-            status_bar: ("Ready. Press Ctrl+Enter to send prompt, Ctrl+G to Capture.".into(), false),
+            status_bar: ("Ready. Press Ctrl+S to send prompt, Ctrl+G to Capture.".into(), false),
             debug_json: "No API requests sent yet.".into(),
             preset_idx: 0,
             sys_preset_idx: 0,
@@ -359,7 +359,7 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::Enter if ctrl => self.submit_prompt(),
+            KeyCode::Char('s') if ctrl => self.submit_prompt(),
             KeyCode::Char('g') if ctrl => self.needs_capture = true,
             KeyCode::Char('v') if ctrl => { let _ = self.cmd_tx.send(EngineCommand::PasteClipboard); }
             KeyCode::Char('f') if ctrl => {
@@ -663,7 +663,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Ctrl+Enter to Send, Enter for newline) "),
+                        .title(" Prompt (Ctrl+S to Send, Enter for newline) "),
                 ),
             chunks[1],
         );

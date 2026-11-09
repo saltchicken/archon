@@ -43,21 +43,47 @@ pub struct Preset {
     pub prompt: String,
 }
 
-fn default_model() -> String { "qwen3.8:27b".into() }
-fn default_ctx() -> u32 { 32768 }
-fn default_history_dir() -> String { "~/.local/share/archon/sessions".into() }
-fn default_req_cmds() -> Vec<String> { vec!["grim".into(), "slurp".into(), "wl-paste".into()] }
-fn default_allowed_cmds() -> Vec<String> {
-    ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"].iter().map(|s| (*s).into()).collect()
+fn default_model() -> String {
+    "qwen3.8:27b".into()
 }
-fn default_url() -> String { "http://localhost:11434".into() }
-fn default_chat_timeout() -> u64 { 180 }
-fn default_status_timeout() -> u64 { 2 }
+fn default_ctx() -> u32 {
+    32768
+}
+fn default_history_dir() -> String {
+    "~/.local/share/archon/sessions".into()
+}
+fn default_req_cmds() -> Vec<String> {
+    vec!["grim".into(), "slurp".into(), "wl-paste".into()]
+}
+fn default_allowed_cmds() -> Vec<String> {
+    ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
+        .iter()
+        .map(|s| (*s).into())
+        .collect()
+}
+fn default_url() -> String {
+    "http://localhost:11434".into()
+}
+fn default_chat_timeout() -> u64 {
+    180
+}
+fn default_status_timeout() -> u64 {
+    2
+}
 fn default_presets() -> Vec<Preset> {
     vec![
-        Preset { name: "Custom".into(), prompt: "".into() },
-        Preset { name: "Describe in detail".into(), prompt: "Describe this image in detail.".into() },
-        Preset { name: "Extract text".into(), prompt: "Extract all the text from this image.".into() },
+        Preset {
+            name: "Custom".into(),
+            prompt: "".into(),
+        },
+        Preset {
+            name: "Describe in detail".into(),
+            prompt: "Describe this image in detail.".into(),
+        },
+        Preset {
+            name: "Extract text".into(),
+            prompt: "Extract all the text from this image.".into(),
+        },
     ]
 }
 fn default_sys_presets() -> Vec<Preset> {

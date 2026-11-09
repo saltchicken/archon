@@ -77,7 +77,7 @@ pub fn build_payload(
             obj.insert("tools".to_string(), json!(t));
         }
     }
-    
+
     payload
 }
 
@@ -87,7 +87,10 @@ pub async fn stream_chat(
     payload: Value,
     tx: UnboundedSender<EngineEvent>,
 ) {
-    let client = match Client::builder().timeout(Duration::from_secs(timeout_secs)).build() {
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(EngineEvent::StreamError(e.to_string()));
@@ -95,7 +98,12 @@ pub async fn stream_chat(
         }
     };
 
-    let resp = match client.post(format!("{base_url}/api/chat")).json(&payload).send().await {
+    let resp = match client
+        .post(format!("{base_url}/api/chat"))
+        .json(&payload)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(EngineEvent::StreamError(format!("Request failed: {e}")));
@@ -154,7 +162,10 @@ pub async fn stream_chat(
             }
 
             if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-                prompt_tokens = data.get("prompt_eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                prompt_tokens = data
+                    .get("prompt_eval_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 eval_tokens = data.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
             }
         }

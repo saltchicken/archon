@@ -42,7 +42,9 @@ impl SessionManager {
             PathBuf::from(raw_dir)
         };
         fs::create_dir_all(&expanded)?;
-        Ok(Self { history_dir: expanded })
+        Ok(Self {
+            history_dir: expanded,
+        })
     }
 
     pub fn new_id() -> String {

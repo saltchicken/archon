@@ -2,10 +2,7 @@ use crate::core::config::Config;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    env, fs,
-    path::PathBuf,
-};
+use std::{env, fs, path::PathBuf};
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,13 +94,25 @@ impl ToolRegistry {
     pub fn format_approval(&self, call: &ToolCall) -> String {
         let args = &call.function.arguments;
         match call.function.name.as_str() {
-            "execute_command" => format!("$ {}", args.get("command").and_then(|v| v.as_str()).unwrap_or("")),
-            "context" => format!("$ context {}", args.get("target_path").and_then(|v| v.as_str()).unwrap_or("")),
+            "execute_command" => format!(
+                "$ {}",
+                args.get("command").and_then(|v| v.as_str()).unwrap_or("")
+            ),
+            "context" => format!(
+                "$ context {}",
+                args.get("target_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            ),
             "edit_file" => format!(
                 "Edit: {}\n--- SEARCH ---\n{}\n--- REPLACE ---\n{}",
                 args.get("file_path").and_then(|v| v.as_str()).unwrap_or(""),
-                args.get("search_string").and_then(|v| v.as_str()).unwrap_or(""),
-                args.get("replace_string").and_then(|v| v.as_str()).unwrap_or("")
+                args.get("search_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                args.get("replace_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
             ),
             "create_file" => format!(
                 "Create: {}\n--- CONTENT ---\n{}",
@@ -124,7 +133,10 @@ impl ToolRegistry {
         };
 
         match res {
-            Ok(out) => (out.clone(), format!("[Tool Result: {}]\n{}", call.function.name, out)),
+            Ok(out) => (
+                out.clone(),
+                format!("[Tool Result: {}]\n{}", call.function.name, out),
+            ),
             Err(e) => (
                 format!("Error: {e}"),
                 format!("[Tool Error: {}]\n{e}", call.function.name),
@@ -133,7 +145,11 @@ impl ToolRegistry {
     }
 
     async fn exec_cmd(&self, args: &Value) -> Result<String> {
-        let raw = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let raw = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if raw.is_empty() {
             bail!("Empty command");
         }
@@ -169,11 +185,17 @@ impl ToolRegistry {
     }
 
     async fn context_cmd(&self, args: &Value) -> Result<String> {
-        let target = args.get("target_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let target = args
+            .get("target_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if target.starts_with('/') || target.contains("..") {
-            bail!("Path traversal blocked for target '{target}'. Must operate in current directory.");
+            bail!(
+                "Path traversal blocked for target '{target}'. Must operate in current directory."
+            );
         }
-        
+
         let mut cmd = Command::new("context");
         if !target.is_empty() {
             cmd.arg(target);
@@ -193,8 +215,14 @@ impl ToolRegistry {
 
     fn edit_file(&self, args: &Value) -> Result<String> {
         let path_str = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-        let search = args.get("search_string").and_then(|v| v.as_str()).unwrap_or("");
-        let replace = args.get("replace_string").and_then(|v| v.as_str()).unwrap_or("");
+        let search = args
+            .get("search_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let replace = args
+            .get("replace_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
         let path = resolve_secure_path(path_str, true)?;
         let content = fs::read_to_string(&path)?;

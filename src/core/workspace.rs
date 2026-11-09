@@ -27,7 +27,10 @@ impl ImageWorkspace {
         let tmp_dir = tempfile::Builder::new().prefix("archon-").tempdir()?;
         let img_dir = tmp_dir.path().join("images");
         fs::create_dir_all(&img_dir)?;
-        Ok(Self { _tmp_dir: tmp_dir, img_dir })
+        Ok(Self {
+            _tmp_dir: tmp_dir,
+            img_dir,
+        })
     }
 
     pub fn list_attachments(&self) -> Vec<ImageAttachment> {
@@ -38,7 +41,11 @@ impl ImageWorkspace {
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("png"))
             .collect();
 
-        paths.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH));
+        paths.sort_by_key(|p| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        });
 
         paths
             .into_iter()
@@ -63,7 +70,9 @@ impl ImageWorkspace {
 
     pub fn capture_screen_region(&self) -> Result<PathBuf> {
         let out_path = self.gen_path("shot");
-        let slurp = Command::new("slurp").output().context("Failed to run slurp")?;
+        let slurp = Command::new("slurp")
+            .output()
+            .context("Failed to run slurp")?;
         if !slurp.status.success() {
             bail!("Capture cancelled");
         }
@@ -72,7 +81,11 @@ impl ImageWorkspace {
             bail!("Empty region selected");
         }
 
-        let grim = Command::new("grim").arg("-g").arg(&geom).arg(&out_path).status()?;
+        let grim = Command::new("grim")
+            .arg("-g")
+            .arg(&geom)
+            .arg(&out_path)
+            .status()?;
         if !grim.success() || !Self::validate_file(&out_path) {
             bail!("grim failed to capture region");
         }
@@ -97,7 +110,8 @@ impl ImageWorkspace {
 
     pub fn import_file(&self, src: impl AsRef<Path>) -> Result<PathBuf> {
         let src = src.as_ref();
-        let img = image::open(src).with_context(|| format!("Cannot open image: {}", src.display()))?;
+        let img =
+            image::open(src).with_context(|| format!("Cannot open image: {}", src.display()))?;
         let out_path = self.gen_path("file");
         img.save_with_format(&out_path, image::ImageFormat::Png)?;
         Ok(out_path)
@@ -112,7 +126,10 @@ impl ImageWorkspace {
     }
 
     fn gen_path(&self, prefix: &str) -> PathBuf {
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
         self.img_dir.join(format!("{prefix}_{ts}.png"))
     }
 
