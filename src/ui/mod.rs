@@ -529,7 +529,7 @@ impl TuiApp {
         let mut total_visual_lines: u16 = 0;
 
         // Since we explicitly format the word-wrapping beforehand, each Line takes exactly 1 visual height.
-        let mut add_line = |lines_vec: &mut Vec<Line<'static>>, total: &mut u16, l: Line<'static>| {
+        let add_line = |lines_vec: &mut Vec<Line<'static>>, total: &mut u16, l: Line<'static>| {
             *total = total.saturating_add(1);
             lines_vec.push(l);
         };
