@@ -48,7 +48,14 @@ pub struct TuiApp {
     enable_tools: bool,
     num_ctx: u32,
     input_buffer: String,
+    
+    // Global scrolling
     chat_scroll: u16,
+    tool_scroll: u16,
+
+    // Per-message internal scrolling
+    selected_msg_idx: Option<usize>,
+    msg_scroll: usize,
 
     modal: ActiveModal,
     file_path_input: String,
@@ -79,6 +86,9 @@ impl TuiApp {
             num_ctx,
             input_buffer: String::new(),
             chat_scroll: 0,
+            tool_scroll: 0,
+            selected_msg_idx: None,
+            msg_scroll: 0,
             modal: ActiveModal::None,
             file_path_input: String::new(),
             sessions: Vec::new(),
@@ -112,9 +122,12 @@ impl TuiApp {
             terminal.draw(|f| self.draw(f))?;
 
             tokio::select! {
-                Some(Ok(Event::Key(key))) = term_events.next() => {
-                    if self.handle_key(key) {
-                        break;
+                Some(event_res) = term_events.next() => {
+                    // Gracefully ignore Resize and other non-key events so the UI loop just redraws
+                    if let Ok(Event::Key(key)) = event_res {
+                        if self.handle_key(key) {
+                            break;
+                        }
                     }
                 }
                 Some(ev) = ev_rx.recv() => {
@@ -139,11 +152,23 @@ impl TuiApp {
                 self.messages = messages;
                 self.is_streaming = false;
                 self.streaming_text.clear();
+                
+                let count = self.messages.len();
+                if count > 0 {
+                    self.selected_msg_idx = Some(count - 1);
+                } else {
+                    self.selected_msg_idx = None;
+                }
+                self.msg_scroll = 0;
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
                 self.streaming_text.clear();
                 self.status_bar = ("Streaming response from Ollama... (Esc to cancel)".into(), false);
+                
+                let count = self.messages.len() + 1;
+                self.selected_msg_idx = Some(count - 1);
+                self.msg_scroll = 0;
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
             EngineEvent::StreamDone { .. } | EngineEvent::StreamError(_) => {
@@ -152,6 +177,7 @@ impl TuiApp {
             EngineEvent::ToolApprovalRequested { formatted_preview, index, total } => {
                 self.pending_tool = Some((formatted_preview, index, total));
                 self.tool_feedback.clear();
+                self.tool_scroll = 0;
                 self.modal = ActiveModal::ToolApproval;
             }
             EngineEvent::SessionsListed(list) => {
@@ -219,6 +245,8 @@ impl TuiApp {
                     KeyCode::Enter => self.resolve_modal_tool(true),
                     KeyCode::Esc => self.resolve_modal_tool(false),
                     KeyCode::Backspace => { self.tool_feedback.pop(); }
+                    KeyCode::Up => self.tool_scroll = self.tool_scroll.saturating_sub(1),
+                    KeyCode::Down => self.tool_scroll = self.tool_scroll.saturating_add(1),
                     KeyCode::Char(c) => self.tool_feedback.push(c),
                     _ => {}
                 }
@@ -256,8 +284,33 @@ impl TuiApp {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
             }
             KeyCode::F(1) => self.modal = ActiveModal::Debug,
-            KeyCode::PageUp => self.chat_scroll = self.chat_scroll.saturating_add(5),
-            KeyCode::PageDown => self.chat_scroll = self.chat_scroll.saturating_sub(5),
+            
+            // Global chat scrolling
+            KeyCode::Up if !ctrl => self.chat_scroll = self.chat_scroll.saturating_sub(1),
+            KeyCode::Down if !ctrl => self.chat_scroll = self.chat_scroll.saturating_add(1),
+            
+            // Internal scrolling of the selected contained message
+            KeyCode::Up if ctrl => self.msg_scroll = self.msg_scroll.saturating_sub(1),
+            KeyCode::Down if ctrl => self.msg_scroll = self.msg_scroll.saturating_add(1),
+            
+            // Navigate selected message
+            KeyCode::Tab => {
+                let count = self.messages.len() + if self.is_streaming { 1 } else { 0 };
+                if count > 0 {
+                    let current = self.selected_msg_idx.unwrap_or(count.saturating_sub(1));
+                    self.selected_msg_idx = Some((current + 1) % count);
+                    self.msg_scroll = 0;
+                }
+            }
+            KeyCode::BackTab => {
+                let count = self.messages.len() + if self.is_streaming { 1 } else { 0 };
+                if count > 0 {
+                    let current = self.selected_msg_idx.unwrap_or(0);
+                    self.selected_msg_idx = Some(if current == 0 { count.saturating_sub(1) } else { current - 1 });
+                    self.msg_scroll = 0;
+                }
+            }
+
             KeyCode::Enter => self.input_buffer.push('\n'),
             KeyCode::Backspace => { self.input_buffer.pop(); }
             KeyCode::Char(c) if !ctrl => self.input_buffer.push(c),
@@ -277,6 +330,8 @@ impl TuiApp {
         }
         self.input_buffer.clear();
         self.chat_scroll = 0;
+        self.selected_msg_idx = None;
+        self.msg_scroll = 0;
         let sys = self.config.system_presets[self.sys_preset_idx].prompt.clone();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
@@ -300,7 +355,7 @@ impl TuiApp {
         }
     }
 
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let root = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(10), Constraint::Length(1)])
@@ -372,7 +427,9 @@ impl TuiApp {
             Line::from("^F Add File ^X Clear Imgs"),
             Line::from("^S Send     ^L Sessions"),
             Line::from("^R Reset    F1 Debug API"),
-            Line::from("PgUp/PgDn Scroll  ^Q Quit"),
+            Line::from("Up/Dn Scroll Chat"),
+            Line::from("^Up/^Dn Scroll Msg"),
+            Line::from("^Q Quit"),
         ];
         f.render_widget(
             Paragraph::new(keys)
@@ -382,14 +439,18 @@ impl TuiApp {
         );
     }
 
-    fn draw_chat_area(&self, f: &mut Frame, area: Rect) {
+    fn draw_chat_area(&mut self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(8), Constraint::Length(6)])
             .split(area);
 
         let mut lines = Vec::new();
-        for m in &self.messages {
+        let max_lines = 15; // Max height to view at once for a single message
+
+        for (i, m) in self.messages.iter().enumerate() {
+            let is_selected = Some(i) == self.selected_msg_idx;
+            
             let (tag, color) = match m.role.as_str() {
                 "user" => ("USER", Color::Cyan),
                 "assistant" => ("ARCHON", Color::Green),
@@ -397,31 +458,93 @@ impl TuiApp {
                 _ => ("SYS", Color::Gray),
             };
             let img_badge = m.images.as_ref().map(|v| format!(" [+{} img]", v.len())).unwrap_or_default();
+            
+            let prefix = if is_selected { "▶ " } else { "  " };
             lines.push(Line::from(Span::styled(
-                format!("━━ {tag}{img_badge} "),
+                format!("{prefix}━━ {tag}{img_badge} "),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )));
-            for l in m.content.lines() {
-                lines.push(Line::from(l.to_string()));
+
+            let msg_lines: Vec<&str> = m.content.lines().collect();
+
+            if msg_lines.len() > max_lines {
+                let scroll = if is_selected { self.msg_scroll } else { 0 };
+                let max_scroll = msg_lines.len().saturating_sub(max_lines);
+                
+                let scroll = scroll.min(max_scroll);
+                if is_selected {
+                    self.msg_scroll = scroll;
+                }
+
+                let start = scroll;
+                let end = (start + max_lines).min(msg_lines.len());
+
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(format!("    ... ({} lines above, Ctrl+Up to scroll) ...", start), Style::default().fg(Color::DarkGray))));
+                }
+                
+                for l in &msg_lines[start..end] {
+                    lines.push(Line::from(format!("  {l}")));
+                }
+                
+                if end < msg_lines.len() {
+                    let remaining = msg_lines.len() - end;
+                    lines.push(Line::from(Span::styled(format!("    ... ({} lines below, Ctrl+Down to scroll) ...", remaining), Style::default().fg(Color::DarkGray))));
+                }
+            } else {
+                for l in msg_lines {
+                    lines.push(Line::from(format!("  {l}")));
+                }
             }
             lines.push(Line::from(""));
         }
 
         if self.is_streaming {
+            let i = self.messages.len();
+            let is_selected = Some(i) == self.selected_msg_idx;
+            let prefix = if is_selected { "▶ " } else { "  " };
+            
             lines.push(Line::from(Span::styled(
-                "━━ ARCHON (streaming...) ",
+                format!("{prefix}━━ ARCHON (streaming...) "),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )));
-            for l in self.streaming_text.lines() {
-                lines.push(Line::from(l.to_string()));
+            
+            let msg_lines: Vec<&str> = self.streaming_text.lines().collect();
+
+            if msg_lines.len() > max_lines {
+                let scroll = if is_selected { self.msg_scroll } else { 0 };
+                let max_scroll = msg_lines.len().saturating_sub(max_lines);
+                let scroll = scroll.min(max_scroll);
+                if is_selected {
+                    self.msg_scroll = scroll;
+                }
+
+                let start = scroll;
+                let end = (start + max_lines).min(msg_lines.len());
+
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(format!("    ... ({} lines above, Ctrl+Up to scroll) ...", start), Style::default().fg(Color::DarkGray))));
+                }
+                for l in &msg_lines[start..end] {
+                    lines.push(Line::from(format!("  {l}")));
+                }
+                if end < msg_lines.len() {
+                    let remaining = msg_lines.len() - end;
+                    lines.push(Line::from(Span::styled(format!("    ... ({} lines below, Ctrl+Down to scroll) ...", remaining), Style::default().fg(Color::DarkGray))));
+                }
+            } else {
+                for l in msg_lines {
+                    lines.push(Line::from(format!("  {l}")));
+                }
             }
+            lines.push(Line::from(""));
         }
 
         f.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .scroll((self.chat_scroll, 0))
-                .block(Block::default().borders(Borders::ALL).title(" Conversation ")),
+                .block(Block::default().borders(Borders::ALL).title(" Conversation (Tab: Select Msg, Ctrl+Up/Dn: Scroll Msg) ")),
             chunks[0],
         );
 
@@ -503,6 +626,7 @@ impl TuiApp {
         f.render_widget(
             Paragraph::new(text)
                 .wrap(Wrap { trim: false })
+                .scroll((self.tool_scroll, 0))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
