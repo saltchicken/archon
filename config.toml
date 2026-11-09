@@ -2,7 +2,7 @@
 default_model = "qwen3.8:27b"
 default_context = 32768
 history_dir = "~/.local/share/archon/sessions"
-required_commands = ["grim", "slurp", "wl-paste"]
+required_commands = ["wl-paste"]
 allowed_commands = ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
 
 [ollama]

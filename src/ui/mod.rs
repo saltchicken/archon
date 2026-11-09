@@ -7,7 +7,8 @@ use crate::core::{
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -18,7 +19,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
     Frame, Terminal,
 };
 use std::{io, path::PathBuf};
@@ -50,7 +54,7 @@ pub struct TuiApp {
     enable_tools: bool,
     num_ctx: u32,
     input_buffer: String,
-    
+
     // Global scrolling
     chat_scroll: u16,
     tool_scroll: u16,
@@ -59,7 +63,7 @@ pub struct TuiApp {
     // Per-message internal scrolling state
     msg_scrolls: Vec<usize>,
     msg_unfolded: Vec<bool>,
-    
+
     // Mouse tracking UI math
     chat_area: Rect,
     msg_visual_ranges: Vec<(usize, u16, u16, bool)>, // (msg_idx, start_y, end_y, is_truncated)
@@ -70,8 +74,6 @@ pub struct TuiApp {
     session_idx: usize,
     pending_tool: Option<(String, usize, usize)>,
     tool_feedback: String,
-
-    needs_capture: bool,
 }
 
 impl TuiApp {
@@ -85,7 +87,10 @@ impl TuiApp {
             messages: Vec::new(),
             streaming_text: String::new(),
             is_streaming: false,
-            status_bar: ("Ready. Press Ctrl+S to send prompt, Ctrl+G to Capture.".into(), false),
+            status_bar: (
+                "Ready. Press Ctrl+S to send prompt.".into(),
+                false,
+            ),
             debug_json: "No API requests sent yet.".into(),
             preset_idx: 0,
             sys_preset_idx: 0,
@@ -105,7 +110,6 @@ impl TuiApp {
             session_idx: 0,
             pending_tool: None,
             tool_feedback: String::new(),
-            needs_capture: false,
         }
     }
 
@@ -119,17 +123,6 @@ impl TuiApp {
         let mut term_events = EventStream::new();
 
         loop {
-            if self.needs_capture {
-                self.needs_capture = false;
-                disable_raw_mode()?;
-                execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-                let _ = self.cmd_tx.send(EngineCommand::CaptureScreen);
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                enable_raw_mode()?;
-                execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-                terminal.clear()?;
-            }
-
             terminal.draw(|f| self.draw(f))?;
 
             tokio::select! {
@@ -171,20 +164,27 @@ impl TuiApp {
                 self.messages = messages;
                 self.is_streaming = false;
                 self.streaming_text.clear();
-                self.msg_scrolls.clear(); 
+                self.msg_scrolls.clear();
                 self.msg_unfolded.clear();
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
                 self.streaming_text.clear();
-                self.status_bar = ("Streaming response from Ollama... (Esc to cancel)".into(), false);
+                self.status_bar = (
+                    "Streaming response from Ollama... (Esc to cancel)".into(),
+                    false,
+                );
                 self.chat_scroll = u16::MAX; // Auto-scroll down on new streams
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
             EngineEvent::StreamDone { .. } | EngineEvent::StreamError(_) => {
                 self.is_streaming = false;
             }
-            EngineEvent::ToolApprovalRequested { formatted_preview, index, total } => {
+            EngineEvent::ToolApprovalRequested {
+                formatted_preview,
+                index,
+                total,
+            } => {
                 self.pending_tool = Some((formatted_preview, index, total));
                 self.tool_feedback.clear();
                 self.tool_scroll = 0;
@@ -213,15 +213,17 @@ impl TuiApp {
         }
 
         // Check if mouse is hovering over the main chat box
-        if x >= self.chat_area.x && x < self.chat_area.x + self.chat_area.width &&
-           y >= self.chat_area.y && y < self.chat_area.y + self.chat_area.height {
-            
+        if x >= self.chat_area.x
+            && x < self.chat_area.x + self.chat_area.width
+            && y >= self.chat_area.y
+            && y < self.chat_area.y + self.chat_area.height
+        {
             // Designate the rightmost 2 columns as the dedicated "Global Scrollbar Area"
             let is_on_scrollbar = x >= self.chat_area.x + self.chat_area.width.saturating_sub(2);
-            
+
             if mouse.kind == MouseEventKind::ScrollUp || mouse.kind == MouseEventKind::ScrollDown {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
-                
+
                 if is_on_scrollbar {
                     // Force global scroll when on the right edge
                     if is_up {
@@ -230,9 +232,9 @@ impl TuiApp {
                         self.chat_scroll = self.chat_scroll.saturating_add(3);
                     }
                 } else {
-                    let inner_y = y.saturating_sub(self.chat_area.y + 1); 
+                    let inner_y = y.saturating_sub(self.chat_area.y + 1);
                     let visual_y = inner_y as usize + self.chat_scroll as usize;
-                    
+
                     let mut scrolled_internal = false;
                     for (i, start, end, is_truncated) in &self.msg_visual_ranges {
                         // Check which specific message we are hovering over
@@ -249,7 +251,7 @@ impl TuiApp {
                             break;
                         }
                     }
-                    
+
                     // Fall back to main chat scroll if not hovering over a truncated message
                     if !scrolled_internal {
                         if is_up {
@@ -259,13 +261,16 @@ impl TuiApp {
                         }
                     }
                 }
-            } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)) {
+            } else if matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+            ) {
                 if is_on_scrollbar {
                     // Handle clicking and dragging the scrollbar physically
                     let view_height = self.chat_area.height.saturating_sub(2);
                     let inner_y = y.saturating_sub(self.chat_area.y + 1);
                     let max_scroll = self.total_chat_lines.saturating_sub(view_height);
-                    
+
                     if max_scroll > 0 && view_height > 1 {
                         let track_height = view_height.saturating_sub(1);
                         let clamped_y = inner_y.min(track_height);
@@ -276,7 +281,7 @@ impl TuiApp {
                     // Handle clicking anywhere on the message to toggle fold/unfold
                     let inner_y = y.saturating_sub(self.chat_area.y + 1);
                     let visual_y = inner_y as usize + self.chat_scroll as usize;
-                    
+
                     for (i, start, end, _) in &self.msg_visual_ranges {
                         if visual_y >= *start as usize && visual_y < *end as usize {
                             if *i < self.msg_unfolded.len() {
@@ -302,14 +307,22 @@ impl TuiApp {
                 match key.code {
                     KeyCode::Esc => self.modal = ActiveModal::None,
                     KeyCode::Enter => {
-                        let cleaned = self.file_path_input.trim().trim_matches('\'').trim_matches('"');
+                        let cleaned = self
+                            .file_path_input
+                            .trim()
+                            .trim_matches('\'')
+                            .trim_matches('"');
                         if !cleaned.is_empty() {
-                            let _ = self.cmd_tx.send(EngineCommand::ImportFile(PathBuf::from(cleaned)));
+                            let _ = self
+                                .cmd_tx
+                                .send(EngineCommand::ImportFile(PathBuf::from(cleaned)));
                         }
                         self.file_path_input.clear();
                         self.modal = ActiveModal::None;
                     }
-                    KeyCode::Backspace => { self.file_path_input.pop(); }
+                    KeyCode::Backspace => {
+                        self.file_path_input.pop();
+                    }
                     KeyCode::Char(c) => self.file_path_input.push(c),
                     _ => {}
                 }
@@ -319,7 +332,9 @@ impl TuiApp {
                 match key.code {
                     KeyCode::Esc => self.modal = ActiveModal::None,
                     KeyCode::Up if self.session_idx > 0 => self.session_idx -= 1,
-                    KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
+                    KeyCode::Down if self.session_idx + 1 < self.sessions.len() => {
+                        self.session_idx += 1
+                    }
                     KeyCode::Enter => {
                         if let Some(s) = self.sessions.get(self.session_idx).cloned() {
                             self.num_ctx = s.num_ctx;
@@ -329,7 +344,9 @@ impl TuiApp {
                     }
                     KeyCode::Char('d') | KeyCode::Delete => {
                         if let Some(s) = self.sessions.get(self.session_idx) {
-                            let _ = self.cmd_tx.send(EngineCommand::DeleteSession(s.file_path.clone()));
+                            let _ = self
+                                .cmd_tx
+                                .send(EngineCommand::DeleteSession(s.file_path.clone()));
                         }
                     }
                     _ => {}
@@ -346,7 +363,9 @@ impl TuiApp {
                 match key.code {
                     KeyCode::Enter => self.resolve_modal_tool(true),
                     KeyCode::Esc => self.resolve_modal_tool(false),
-                    KeyCode::Backspace => { self.tool_feedback.pop(); }
+                    KeyCode::Backspace => {
+                        self.tool_feedback.pop();
+                    }
                     KeyCode::Char(c) => self.tool_feedback.push(c),
                     _ => {}
                 }
@@ -360,18 +379,23 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
             KeyCode::Char('s') if ctrl => self.submit_prompt(),
-            KeyCode::Char('g') if ctrl => self.needs_capture = true,
-            KeyCode::Char('v') if ctrl => { let _ = self.cmd_tx.send(EngineCommand::PasteClipboard); }
+            KeyCode::Char('v') if ctrl => {
+                let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
+            }
             KeyCode::Char('f') if ctrl => {
                 self.file_path_input.clear();
                 self.modal = ActiveModal::AddFile;
             }
-            KeyCode::Char('x') if ctrl => { let _ = self.cmd_tx.send(EngineCommand::ClearImages); }
+            KeyCode::Char('x') if ctrl => {
+                let _ = self.cmd_tx.send(EngineCommand::ClearImages);
+            }
             KeyCode::Char('l') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
                 self.modal = ActiveModal::Sessions;
             }
-            KeyCode::Char('r') if ctrl => { let _ = self.cmd_tx.send(EngineCommand::ResetChat); }
+            KeyCode::Char('r') if ctrl => {
+                let _ = self.cmd_tx.send(EngineCommand::ResetChat);
+            }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
             KeyCode::Char('p') if ctrl => {
                 self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
@@ -384,9 +408,11 @@ impl TuiApp {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
             }
             KeyCode::F(1) => self.modal = ActiveModal::Debug,
-            
+
             KeyCode::Enter => self.input_buffer.push('\n'),
-            KeyCode::Backspace => { self.input_buffer.pop(); }
+            KeyCode::Backspace => {
+                self.input_buffer.pop();
+            }
             KeyCode::Char(c) if !ctrl => self.input_buffer.push(c),
             _ => {}
         }
@@ -404,7 +430,9 @@ impl TuiApp {
         }
         self.input_buffer.clear();
         self.chat_scroll = u16::MAX; // Jump to the bottom of the chat when sending a new prompt
-        let sys = self.config.system_presets[self.sys_preset_idx].prompt.clone();
+        let sys = self.config.system_presets[self.sys_preset_idx]
+            .prompt
+            .clone();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
             system_prompt: sys,
@@ -416,7 +444,9 @@ impl TuiApp {
     fn resolve_modal_tool(&mut self, approved: bool) {
         if self.pending_tool.take().is_some() {
             self.modal = ActiveModal::None;
-            let sys = self.config.system_presets[self.sys_preset_idx].prompt.clone();
+            let sys = self.config.system_presets[self.sys_preset_idx]
+                .prompt
+                .clone();
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
                 approved,
                 feedback: std::mem::take(&mut self.tool_feedback),
@@ -446,7 +476,10 @@ impl TuiApp {
         } else {
             Style::default().fg(Color::Cyan)
         };
-        f.render_widget(Paragraph::new(format!(" {}", self.status_bar.0)).style(status_style), root[1]);
+        f.render_widget(
+            Paragraph::new(format!(" {}", self.status_bar.0)).style(status_style),
+            root[1],
+        );
 
         match self.modal {
             ActiveModal::AddFile => self.draw_file_modal(f),
@@ -460,20 +493,31 @@ impl TuiApp {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(6), Constraint::Length(8)])
+            .constraints([
+                Constraint::Length(10),
+                Constraint::Min(6),
+                Constraint::Length(8),
+            ])
             .split(area);
 
         let preset_name = &self.config.presets[self.preset_idx].name;
         let sys_name = &self.config.system_presets[self.sys_preset_idx].name;
         let settings_text = vec![
-            Line::from(vec![Span::raw("Model:   "), Span::styled(&self.model, Style::default().fg(Color::Green))]),
+            Line::from(vec![
+                Span::raw("Model:   "),
+                Span::styled(&self.model, Style::default().fg(Color::Green)),
+            ]),
             Line::from(format!("Context: {}", self.num_ctx)),
-            Line::from(format!("Tools:   {} (^T)", if self.enable_tools { "ON" } else { "OFF" })),
+            Line::from(format!(
+                "Tools:   {} (^T)",
+                if self.enable_tools { "ON" } else { "OFF" }
+            )),
             Line::from(format!("Preset:  {} (^P)", preset_name)),
             Line::from(format!("System:  {} (^Y)", sys_name)),
         ];
         f.render_widget(
-            Paragraph::new(settings_text).block(Block::default().borders(Borders::ALL).title(" Config ")),
+            Paragraph::new(settings_text)
+                .block(Block::default().borders(Borders::ALL).title(" Config ")),
             chunks[0],
         );
 
@@ -482,7 +526,12 @@ impl TuiApp {
         } else {
             self.attachments
                 .iter()
-                .map(|a| ListItem::new(format!("• {} ({}x{}, {}KB)", a.name, a.dimensions.0, a.dimensions.1, a.size_kb)))
+                .map(|a| {
+                    ListItem::new(format!(
+                        "• {} ({}x{}, {}KB)",
+                        a.name, a.dimensions.0, a.dimensions.1, a.size_kb
+                    ))
+                })
                 .collect()
         };
         f.render_widget(
@@ -495,8 +544,8 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("^G Capture  ^V Paste"),
-            Line::from("^F Add File ^X Clear Imgs"),
+            Line::from("^V Paste    ^F Add File"),
+            Line::from("^X Clear    ^L Sessions"),
             Line::from("^⏎ Send     ^L Sessions"),
             Line::from("^R Reset    F1 Debug API"),
             Line::from("^Q Quit"),
@@ -536,23 +585,35 @@ impl TuiApp {
 
         for (i, m) in self.messages.iter().enumerate() {
             let start_visual = total_visual_lines;
-            
+
             let is_unfolded = self.msg_unfolded[i];
-            let max_lines = if is_unfolded { usize::MAX } else { default_max_lines };
-            
+            let max_lines = if is_unfolded {
+                usize::MAX
+            } else {
+                default_max_lines
+            };
+
             let (tag, color) = match m.role.as_str() {
                 "user" => ("USER", Color::Cyan),
                 "assistant" => ("ARCHON", Color::Green),
                 "tool" => ("TOOL", Color::Magenta),
                 _ => ("SYS", Color::Gray),
             };
-            let img_badge = m.images.as_ref().map(|v| format!(" [+{} img]", v.len())).unwrap_or_default();
+            let img_badge = m
+                .images
+                .as_ref()
+                .map(|v| format!(" [+{} img]", v.len()))
+                .unwrap_or_default();
             let toggle_hint = if is_unfolded { " [Click to fold]" } else { "" };
-            
-            add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(
-                format!("━━ {tag}{img_badge}{toggle_hint} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )));
+
+            add_line(
+                &mut lines,
+                &mut total_visual_lines,
+                Line::from(Span::styled(
+                    format!("━━ {tag}{img_badge}{toggle_hint} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )),
+            );
 
             let msg_content_lines = reflow_text(&m.content, available_width);
             let total_content = msg_content_lines.len();
@@ -562,46 +623,79 @@ impl TuiApp {
                 let scroll = self.msg_scrolls[i];
                 let max_scroll = total_content.saturating_sub(max_lines);
                 let scroll = scroll.min(max_scroll);
-                self.msg_scrolls[i] = scroll; 
+                self.msg_scrolls[i] = scroll;
 
                 let start = scroll;
                 let end = (start + max_lines).min(total_content);
 
                 if start > 0 {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(format!("    ... ({} lines above) ...", start), Style::default().fg(Color::DarkGray))));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(Span::styled(
+                            format!("    ... ({} lines above) ...", start),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    );
                 }
-                
+
                 for l in &msg_content_lines[start..end] {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(format!("  {l}")));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(format!("  {l}")),
+                    );
                 }
-                
+
                 if end < total_content {
                     let remaining = total_content - end;
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(format!("    ... ({} lines below - Click to unfold) ...", remaining), Style::default().fg(Color::DarkGray))));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(Span::styled(
+                            format!("    ... ({} lines below - Click to unfold) ...", remaining),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    );
                 }
             } else {
                 for l in msg_content_lines {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(format!("  {l}")));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(format!("  {l}")),
+                    );
                 }
             }
             add_line(&mut lines, &mut total_visual_lines, Line::from(""));
             let end_visual = total_visual_lines;
-            self.msg_visual_ranges.push((i, start_visual, end_visual, is_truncated));
+            self.msg_visual_ranges
+                .push((i, start_visual, end_visual, is_truncated));
         }
 
         if self.is_streaming {
             let i = self.messages.len();
             let start_visual = total_visual_lines;
-            
+
             let is_unfolded = self.msg_unfolded[i];
-            let max_lines = if is_unfolded { usize::MAX } else { default_max_lines };
+            let max_lines = if is_unfolded {
+                usize::MAX
+            } else {
+                default_max_lines
+            };
             let toggle_hint = if is_unfolded { " [Click to fold]" } else { "" };
-            
-            add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(
-                format!("━━ ARCHON (streaming...){toggle_hint} "),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
-            
+
+            add_line(
+                &mut lines,
+                &mut total_visual_lines,
+                Line::from(Span::styled(
+                    format!("━━ ARCHON (streaming...){toggle_hint} "),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            );
+
             let msg_content_lines = reflow_text(&self.streaming_text, available_width);
             let total_content = msg_content_lines.len();
             let is_truncated = total_content > max_lines;
@@ -616,23 +710,46 @@ impl TuiApp {
                 let end = (start + max_lines).min(total_content);
 
                 if start > 0 {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(format!("    ... ({} lines above) ...", start), Style::default().fg(Color::DarkGray))));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(Span::styled(
+                            format!("    ... ({} lines above) ...", start),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    );
                 }
                 for l in &msg_content_lines[start..end] {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(format!("  {l}")));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(format!("  {l}")),
+                    );
                 }
                 if end < total_content {
                     let remaining = total_content - end;
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(Span::styled(format!("    ... ({} lines below - Click to unfold) ...", remaining), Style::default().fg(Color::DarkGray))));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(Span::styled(
+                            format!("    ... ({} lines below - Click to unfold) ...", remaining),
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    );
                 }
             } else {
                 for l in msg_content_lines {
-                    add_line(&mut lines, &mut total_visual_lines, Line::from(format!("  {l}")));
+                    add_line(
+                        &mut lines,
+                        &mut total_visual_lines,
+                        Line::from(format!("  {l}")),
+                    );
                 }
             }
             add_line(&mut lines, &mut total_visual_lines, Line::from(""));
             let end_visual = total_visual_lines;
-            self.msg_visual_ranges.push((i, start_visual, end_visual, is_truncated));
+            self.msg_visual_ranges
+                .push((i, start_visual, end_visual, is_truncated));
         }
 
         // Clamp global scrolling based on total height
@@ -643,17 +760,19 @@ impl TuiApp {
 
         // Render main chat paragraph (Wrap removed! We manage it fully in reflow_text)
         f.render_widget(
-            Paragraph::new(lines)
-                .scroll((self.chat_scroll, 0))
-                .block(Block::default().borders(Borders::ALL).title(" Conversation (Scroll near right edge for global chat) ")),
+            Paragraph::new(lines).scroll((self.chat_scroll, 0)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Conversation (Scroll near right edge for global chat) "),
+            ),
             chunks[0],
         );
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
-        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize)
-            .position(self.chat_scroll as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll as usize).position(self.chat_scroll as usize);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
         f.render_widget(
@@ -677,7 +796,11 @@ impl TuiApp {
                 "Enter or drag-and-drop image path:\n\n> {}\n\n[Enter] Import    [Esc] Cancel",
                 self.file_path_input
             ))
-            .block(Block::default().borders(Borders::ALL).title(" Add Image File ")),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Add Image File "),
+            ),
             area,
         );
     }
@@ -691,7 +814,12 @@ impl TuiApp {
             .enumerate()
             .map(|(i, s)| {
                 let prefix = if i == self.session_idx { ">> " } else { "   " };
-                ListItem::new(format!("{prefix}[{}] {} ({} msgs)", s.updated_at, s.title, s.messages.len()))
+                ListItem::new(format!(
+                    "{prefix}[{}] {} ({} msgs)",
+                    s.updated_at,
+                    s.title,
+                    s.messages.len()
+                ))
             })
             .collect();
 
@@ -711,7 +839,11 @@ impl TuiApp {
         f.render_widget(
             Paragraph::new(self.debug_json.as_str())
                 .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::ALL).title(" Last API Request Payload (Esc to Close) ")),
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Last API Request Payload (Esc to Close) "),
+                ),
             area,
         );
     }
@@ -739,14 +871,16 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Yellow))
-                        .title(format!(" ⚠️ Tool Execution Approval Required ({idx}/{total}) ")),
+                        .title(format!(
+                            " ⚠️ Tool Execution Approval Required ({idx}/{total}) "
+                        )),
                 ),
             area,
         );
     }
 }
 
-// Custom manual text wrap to predict accurate heights while preserving indentation 
+// Custom manual text wrap to predict accurate heights while preserving indentation
 fn reflow_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.lines().map(|s| s.to_string()).collect();
@@ -757,10 +891,10 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
             out.push(String::new());
             continue;
         }
-        
+
         let mut current_line = String::new();
         let mut word_buf = String::new();
-        
+
         for c in line.chars() {
             word_buf.push(c);
             if c.is_whitespace() {
@@ -794,7 +928,7 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
             out.push(current_line);
         }
     }
-    
+
     // Aggressive line-chopping pass to catch strings/words exceeding bounds (avoids sideways cutoffs)
     let mut chopped = Vec::new();
     for l in out {
@@ -804,7 +938,11 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
         }
         let mut rem = l.as_str();
         while rem.chars().count() > width {
-            let split_byte = rem.char_indices().nth(width).map(|(i, _)| i).unwrap_or(rem.len());
+            let split_byte = rem
+                .char_indices()
+                .nth(width)
+                .map(|(i, _)| i)
+                .unwrap_or(rem.len());
             let (chunk, rest) = rem.split_at(split_byte);
             chopped.push(chunk.to_string());
             rem = rest;

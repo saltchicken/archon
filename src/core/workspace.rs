@@ -68,30 +68,6 @@ impl ImageWorkspace {
         Ok(STANDARD.encode(bytes))
     }
 
-    pub fn capture_screen_region(&self) -> Result<PathBuf> {
-        let out_path = self.gen_path("shot");
-        let slurp = Command::new("slurp")
-            .output()
-            .context("Failed to run slurp")?;
-        if !slurp.status.success() {
-            bail!("Capture cancelled");
-        }
-        let geom = String::from_utf8_lossy(&slurp.stdout).trim().to_string();
-        if geom.is_empty() {
-            bail!("Empty region selected");
-        }
-
-        let grim = Command::new("grim")
-            .arg("-g")
-            .arg(&geom)
-            .arg(&out_path)
-            .status()?;
-        if !grim.success() || !Self::validate_file(&out_path) {
-            bail!("grim failed to capture region");
-        }
-        Ok(out_path)
-    }
-
     pub fn paste_clipboard(&self) -> Result<PathBuf> {
         let out_path = self.gen_path("paste");
         let file = fs::File::create(&out_path)?;

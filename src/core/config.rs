@@ -53,7 +53,7 @@ fn default_history_dir() -> String {
     "~/.local/share/archon/sessions".into()
 }
 fn default_req_cmds() -> Vec<String> {
-    vec!["grim".into(), "slurp".into(), "wl-paste".into()]
+    vec!["wl-paste".into()]
 }
 fn default_allowed_cmds() -> Vec<String> {
     ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]

@@ -19,7 +19,6 @@ use workspace::{ImageAttachment, ImageWorkspace};
 
 #[derive(Debug)]
 pub enum EngineCommand {
-    CaptureScreen,
     PasteClipboard,
     ImportFile(PathBuf),
     ClearImages,
@@ -154,15 +153,6 @@ impl CoreEngine {
         internal_tx: &UnboundedSender<EngineEvent>,
     ) {
         match cmd {
-            EngineCommand::CaptureScreen => {
-                match self.workspace.capture_screen_region() {
-                    Ok(_) => self.notify("Screen region captured.", false),
-                    Err(e) => self.notify(format!("Capture failed: {e}"), true),
-                }
-                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(
-                    self.workspace.list_attachments(),
-                ));
-            }
             EngineCommand::PasteClipboard => {
                 match self.workspace.paste_clipboard() {
                     Ok(_) => self.notify("Image pasted from clipboard.", false),
