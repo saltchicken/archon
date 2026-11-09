@@ -45,7 +45,6 @@ pub enum EngineEvent {
     Notification { message: String, is_error: bool },
     WorkspaceUpdated(Vec<ImageAttachment>),
     ChatUpdated {
-        session_id: String,
         messages: Vec<ChatMessage>,
     },
     StreamStarted,
@@ -356,7 +355,6 @@ impl CoreEngine {
 
     fn emit_chat(&self) {
         let _ = self.tx.send(EngineEvent::ChatUpdated {
-            session_id: self.session_id.clone(),
             messages: self.messages.clone(),
         });
     }
