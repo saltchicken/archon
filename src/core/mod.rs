@@ -66,7 +66,6 @@ pub enum EngineEvent {
         total: usize,
     },
     SessionsListed(Vec<SessionData>),
-    DebugPayloadUpdated(String),
 }
 
 pub struct CoreEngine {
@@ -415,22 +414,6 @@ impl CoreEngine {
             tools_schema,
         );
 
-        let mut debug_clone = payload.clone();
-        if let Some(msgs) = debug_clone
-            .get_mut("messages")
-            .and_then(|v| v.as_array_mut())
-        {
-            for m in msgs {
-                if let Some(imgs) = m.get_mut("images").and_then(|v| v.as_array_mut()) {
-                    for img in imgs {
-                        *img = serde_json::Value::String("<base64_image_omitted>".into());
-                    }
-                }
-            }
-        }
-        let _ = self.tx.send(EngineEvent::DebugPayloadUpdated(
-            serde_json::to_string_pretty(&debug_clone).unwrap_or_default(),
-        ));
         let _ = self.tx.send(EngineEvent::StreamStarted);
 
         let url = self.config.ollama.base_url.clone();

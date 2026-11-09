@@ -33,7 +33,6 @@ enum ActiveModal {
     None,
     AddFile,
     Sessions,
-    Debug,
     ToolApproval,
 }
 
@@ -47,7 +46,6 @@ pub struct TuiApp {
     streaming_text: String,
     is_streaming: bool,
     status_bar: (String, bool),
-    debug_json: String,
 
     preset_idx: usize,
     sys_preset_idx: usize,
@@ -91,7 +89,6 @@ impl TuiApp {
                 "Ready. Press Ctrl+S to send prompt.".into(),
                 false,
             ),
-            debug_json: "No API requests sent yet.".into(),
             preset_idx: 0,
             sys_preset_idx: 0,
             enable_tools: true,
@@ -194,7 +191,6 @@ impl TuiApp {
                 self.sessions = list;
                 self.session_idx = 0;
             }
-            EngineEvent::DebugPayloadUpdated(json) => self.debug_json = json,
         }
     }
 
@@ -353,12 +349,6 @@ impl TuiApp {
                 }
                 return false;
             }
-            ActiveModal::Debug => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-                    self.modal = ActiveModal::None;
-                }
-                return false;
-            }
             ActiveModal::ToolApproval => {
                 match key.code {
                     KeyCode::Enter => self.resolve_modal_tool(true),
@@ -407,7 +397,6 @@ impl TuiApp {
             KeyCode::Char('y') if ctrl => {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
             }
-            KeyCode::F(1) => self.modal = ActiveModal::Debug,
 
             KeyCode::Enter => self.input_buffer.push('\n'),
             KeyCode::Backspace => {
@@ -484,7 +473,6 @@ impl TuiApp {
         match self.modal {
             ActiveModal::AddFile => self.draw_file_modal(f),
             ActiveModal::Sessions => self.draw_sessions_modal(f),
-            ActiveModal::Debug => self.draw_debug_modal(f),
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::None => {}
         }
@@ -547,7 +535,7 @@ impl TuiApp {
             Line::from("^V Paste    ^F Add File"),
             Line::from("^X Clear    ^L Sessions"),
             Line::from("^⏎ Send     ^L Sessions"),
-            Line::from("^R Reset    F1 Debug API"),
+            Line::from("^R Reset"),
             Line::from("^Q Quit"),
         ];
         f.render_widget(
@@ -829,21 +817,6 @@ impl TuiApp {
                     .borders(Borders::ALL)
                     .title(" Saved Sessions (Enter=Load, D=Delete, Esc=Close) "),
             ),
-            area,
-        );
-    }
-
-    fn draw_debug_modal(&self, f: &mut Frame) {
-        let area = centered_rect(80, 80, f.area());
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new(self.debug_json.as_str())
-                .wrap(Wrap { trim: false })
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(" Last API Request Payload (Esc to Close) "),
-                ),
             area,
         );
     }
