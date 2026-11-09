@@ -532,10 +532,9 @@ impl TuiApp {
         );
 
         let keys = vec![
+            Line::from("^S Send     ^L Sessions"),
             Line::from("^V Paste    ^F Add File"),
-            Line::from("^X Clear    ^L Sessions"),
-            Line::from("^⏎ Send     ^L Sessions"),
-            Line::from("^R Reset"),
+            Line::from("^X Clear    ^R Reset"),
             Line::from("^Q Quit"),
         ];
         f.render_widget(
