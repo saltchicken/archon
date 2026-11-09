@@ -365,6 +365,10 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                // Alt+Enter inserts a newline instead of sending
+                self.input_buffer.push('\n');
+            }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
@@ -529,6 +533,7 @@ impl TuiApp {
 
         let keys = vec![
             Line::from("Enter Send    ^S Sessions"),
+            Line::from("Alt+Enter \n Newline"),
             Line::from("^V Paste    ^F Add File"),
             Line::from("^X Clear    ^R Reset"),
             Line::from("^Q Quit"),
@@ -544,7 +549,7 @@ impl TuiApp {
     fn draw_chat_area(&mut self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(8), Constraint::Length(6)])
+            .constraints([Constraint::Min(8), Constraint::Length(8)])
             .split(area);
 
         // Store chat rect for mouse hit-testing later
@@ -765,7 +770,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Enter to Send) "),
+                        .title(" Prompt (Enter=Send  Alt+Enter=Newline) "),
                 ),
             chunks[1],
         );
