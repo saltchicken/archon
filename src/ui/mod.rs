@@ -85,7 +85,7 @@ impl TuiApp {
             messages: Vec::new(),
             streaming_text: String::new(),
             is_streaming: false,
-            status_bar: ("Ready. Press Enter to send prompt.".into(), false),
+            status_bar: ("Ready. Press ⏎ to send prompt.".into(), false),
             preset_idx: 0,
             sys_preset_idx: 0,
             enable_tools: true,
@@ -532,8 +532,8 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("Enter Send    ^S Sessions"),
-            Line::from("Alt+Enter \n Newline"),
+            Line::from("⏎ Send    ^S Sessions"),
+            Line::from("Alt+⏎ \n Newline"),
             Line::from("^V Paste    ^F Add File"),
             Line::from("^X Clear    ^R Reset"),
             Line::from("^Q Quit"),
@@ -770,7 +770,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Enter=Send  Alt+Enter=Newline) "),
+                        .title(" Prompt (⏎=Send  Alt+⏎=Newline) "),
                 ),
             chunks[1],
         );
@@ -781,7 +781,7 @@ impl TuiApp {
         f.render_widget(Clear, area);
         f.render_widget(
             Paragraph::new(format!(
-                "Enter or drag-and-drop image path:\n\n> {}\n\n[Enter] Import    [Esc] Cancel",
+                "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
                 self.file_path_input
             ))
             .block(
@@ -815,7 +815,7 @@ impl TuiApp {
             List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Saved Sessions (Enter=Load, D=Delete, Esc=Close) "),
+                    .title(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "),
             ),
             area,
         );
@@ -832,7 +832,7 @@ impl TuiApp {
             .unwrap_or(("", 1, 1));
 
         let text = format!(
-            "{preview}\n\nOptional Feedback / Note:\n> {}\n\n[Enter] Approve & Run    [Esc] Decline",
+            "{preview}\n\nOptional Feedback / Note:\n> {}\n\n[⏎] Approve & Run    [Esc] Decline",
             self.tool_feedback
         );
 
