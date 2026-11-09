@@ -85,10 +85,7 @@ impl TuiApp {
             messages: Vec::new(),
             streaming_text: String::new(),
             is_streaming: false,
-            status_bar: (
-                "Ready. Press Ctrl+S to send prompt.".into(),
-                false,
-            ),
+            status_bar: ("Ready. Press Enter to send prompt.".into(), false),
             preset_idx: 0,
             sys_preset_idx: 0,
             enable_tools: true,
@@ -368,7 +365,7 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::Char('s') if ctrl => self.submit_prompt(),
+            KeyCode::Enter => self.submit_prompt(),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }
@@ -379,7 +376,7 @@ impl TuiApp {
             KeyCode::Char('x') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::ClearImages);
             }
-            KeyCode::Char('l') if ctrl => {
+            KeyCode::Char('s') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
                 self.modal = ActiveModal::Sessions;
             }
@@ -398,7 +395,6 @@ impl TuiApp {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
             }
 
-            KeyCode::Enter => self.input_buffer.push('\n'),
             KeyCode::Backspace => {
                 self.input_buffer.pop();
             }
@@ -532,7 +528,7 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("^S Send     ^L Sessions"),
+            Line::from("Enter Send    ^S Sessions"),
             Line::from("^V Paste    ^F Add File"),
             Line::from("^X Clear    ^R Reset"),
             Line::from("^Q Quit"),
@@ -769,7 +765,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Ctrl+S to Send, Enter for newline) "),
+                        .title(" Prompt (Enter to Send) "),
                 ),
             chunks[1],
         );
