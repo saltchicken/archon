@@ -16,10 +16,10 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tools::{ToolCall, ToolRegistry};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 use workspace::{ImageAttachment, ImageWorkspace};
 
 #[derive(Debug)]
@@ -87,6 +87,7 @@ pub struct CoreEngine {
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
     active_task: Option<JoinHandle<()>>,
+    bg_tasks: JoinSet<()>,
     pending_tools: VecDeque<ToolCall>,
     pending_batch_total: usize,
     tx: UnboundedSender<EngineEvent>,
@@ -121,6 +122,7 @@ impl CoreEngine {
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
             active_task: None,
+            bg_tasks: JoinSet::new(),
             pending_tools: VecDeque::new(),
             pending_batch_total: 0,
             tx,
@@ -192,11 +194,29 @@ impl CoreEngine {
 
         loop {
             tokio::select! {
-                Some(cmd) = cmd_rx.recv() => self.handle_command(cmd, &internal_tx).await,
-                Some(ev) = internal_rx.recv() => self.handle_internal_event(ev).await,
-                else => break,
+                cmd_opt = cmd_rx.recv() => {
+                    let Some(cmd) = cmd_opt else { break };
+                    self.handle_command(cmd, &internal_tx).await;
+                }
+                ev_opt = internal_rx.recv() => {
+                    let Some(ev) = ev_opt else { break };
+                    self.handle_internal_event(ev).await;
+                }
+                Some(res) = self.bg_tasks.join_next(), if !self.bg_tasks.is_empty() => {
+                    if let Err(e) = res {
+                        error!("Background task error: {e}");
+                    }
+                }
             }
         }
+
+        if let Some(h) = self.active_task.take() {
+            h.abort();
+        }
+
+        info!("Shutting down CoreEngine, awaiting remaining background tasks...");
+        while self.bg_tasks.join_next().await.is_some() {}
+        info!("All background tasks completely flushed.");
     }
 
     async fn handle_command(
@@ -426,12 +446,12 @@ impl CoreEngine {
         }
     }
 
-    fn save_and_emit_chat(&self) {
+    fn save_and_emit_chat(&mut self) {
         self.save_session_bg();
         self.emit_chat();
     }
 
-    fn save_session_bg(&self) {
+    fn save_session_bg(&mut self) {
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
         let model = self.model.clone();
@@ -443,7 +463,7 @@ impl CoreEngine {
             .map(ChatMessage::without_images)
             .collect();
 
-        tokio::task::spawn_blocking(move || {
+        self.bg_tasks.spawn_blocking(move || {
             let _ = sessions.save(&id, &model, &sys, ctx, &msgs);
         });
     }

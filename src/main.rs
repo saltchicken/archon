@@ -17,13 +17,11 @@ async fn main() -> Result<()> {
         original_hook(panic_info);
     }));
 
-    // 1. Global config location. Completely removes local fallback.
     let base_config_path = dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon")
         .join("config.toml");
 
-    // 2. Local project override location
     let local_config_path = PathBuf::from(".archon.toml");
 
     let config = Config::load(&base_config_path, &local_config_path);
@@ -49,7 +47,10 @@ async fn main() -> Result<()> {
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
 
     let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
-    tokio::spawn(engine.run(cmd_rx));
+    let engine_handle = tokio::spawn(engine.run(cmd_rx));
 
-    TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await
+    TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await?;
+
+    let _ = engine_handle.await;
+    Ok(())
 }

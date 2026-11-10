@@ -1,9 +1,12 @@
+use figment::{
+    providers::{Env, Format, Serialized, Toml},
+    Figment,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use toml::Value;
 
 pub fn expand_tilde(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
@@ -121,31 +124,11 @@ impl Config {
             }
         }
 
-        let mut merged = Value::Table(toml::Table::new());
-        for path in [base_path, local_path.as_ref()] {
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(val) = toml::from_str::<Value>(&content) {
-                    Self::merge_values(&mut merged, val);
-                }
-            }
-        }
-
-        merged.try_into().unwrap_or_default()
-    }
-
-    fn merge_values(base: &mut Value, override_val: Value) {
-        match (base, override_val) {
-            (Value::Table(base_map), Value::Table(override_map)) => {
-                for (k, v) in override_map {
-                    match base_map.get_mut(&k) {
-                        Some(base_v) => Self::merge_values(base_v, v),
-                        None => {
-                            base_map.insert(k, v);
-                        }
-                    }
-                }
-            }
-            (base, override_val) => *base = override_val,
-        }
+        Figment::from(Serialized::defaults(Self::default()))
+            .merge(Toml::file(base_path))
+            .merge(Toml::file(local_path.as_ref()))
+            .merge(Env::prefixed("ARCHON_"))
+            .extract()
+            .unwrap_or_default()
     }
 }

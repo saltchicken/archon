@@ -320,7 +320,7 @@ impl TuiApp {
                     KeyCode::Char(c) => self.file_path_input.push(c),
                     _ => {}
                 }
-                return false;
+                false
             }
             ActiveModal::Sessions => {
                 match key.code {
@@ -345,7 +345,7 @@ impl TuiApp {
                     }
                     _ => {}
                 }
-                return false;
+                false
             }
             ActiveModal::ToolApproval => {
                 match key.code {
@@ -361,51 +361,51 @@ impl TuiApp {
                     KeyCode::Char(c) => self.tool_feedback.push(c),
                     _ => {}
                 }
-                return false;
+                false
             }
-            ActiveModal::None => {}
-        }
-
-        match key.code {
-            KeyCode::Esc if self.is_streaming => {
-                let _ = self.cmd_tx.send(EngineCommand::CancelStream);
-            }
-            KeyCode::Enter if ctrl => self.submit_prompt(),
-            KeyCode::Char('v') if ctrl => {
-                let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
-            }
-            KeyCode::Char('f') if ctrl => {
-                self.file_path_input.clear();
-                self.modal = ActiveModal::AddFile;
-            }
-            KeyCode::Char('x') if ctrl => {
-                let _ = self.cmd_tx.send(EngineCommand::ClearImages);
-            }
-            KeyCode::Char('s') if ctrl => {
-                let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
-                self.modal = ActiveModal::Sessions;
-            }
-            KeyCode::Char('r') if ctrl => {
-                let _ = self.cmd_tx.send(EngineCommand::ResetChat);
-            }
-            KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
-            KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
-            KeyCode::Char('p') if ctrl && !self.config.presets.is_empty() => {
-                self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
-                let prompt = &self.config.presets[self.preset_idx].prompt;
-                if !prompt.is_empty() {
-                    self.text_area = create_text_area();
-                    self.text_area.insert_str(prompt);
+            ActiveModal::None => {
+                match key.code {
+                    KeyCode::Esc if self.is_streaming => {
+                        let _ = self.cmd_tx.send(EngineCommand::CancelStream);
+                    }
+                    KeyCode::Enter if ctrl => self.submit_prompt(),
+                    KeyCode::Char('v') if ctrl => {
+                        let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
+                    }
+                    KeyCode::Char('f') if ctrl => {
+                        self.file_path_input.clear();
+                        self.modal = ActiveModal::AddFile;
+                    }
+                    KeyCode::Char('x') if ctrl => {
+                        let _ = self.cmd_tx.send(EngineCommand::ClearImages);
+                    }
+                    KeyCode::Char('s') if ctrl => {
+                        let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
+                        self.modal = ActiveModal::Sessions;
+                    }
+                    KeyCode::Char('r') if ctrl => {
+                        let _ = self.cmd_tx.send(EngineCommand::ResetChat);
+                    }
+                    KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
+                    KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
+                    KeyCode::Char('p') if ctrl && !self.config.presets.is_empty() => {
+                        self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
+                        let prompt = &self.config.presets[self.preset_idx].prompt;
+                        if !prompt.is_empty() {
+                            self.text_area = create_text_area();
+                            self.text_area.insert_str(prompt);
+                        }
+                    }
+                    KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
+                        self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                    }
+                    _ => {
+                        self.text_area.input(key);
+                    }
                 }
-            }
-            KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
-                self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
-            }
-            _ => {
-                self.text_area.input(key);
+                false
             }
         }
-        false
     }
 
     fn current_system_prompt(&self) -> String {
@@ -778,7 +778,7 @@ impl TuiApp {
             Line::from(format!("> {}", self.tool_feedback)),
             Line::from(""),
             Line::from(Span::styled(
-                "[⏎] Approve & Run     [Esc] Decline     [↑/↓/PgUp/PgDn] Scroll",
+                "[⏎] Approve & Run      [Esc] Decline      [↑/↓/PgUp/PgDn] Scroll",
                 Style::default().fg(Color::Yellow),
             )),
         ]);

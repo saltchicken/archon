@@ -9,6 +9,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dirs = "5.0"
+figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
 image = "0.25"
 ratatui = "0.29"
