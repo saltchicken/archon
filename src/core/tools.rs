@@ -1,7 +1,5 @@
 use crate::core::config::Config;
-use crate::tools::{
-    context, create_file, edit_file, execute_command, format_process_output,
-};
+use crate::tools::{context, create_file, edit_file, execute_command, format_process_output};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -202,12 +200,7 @@ impl ToolRegistry {
         }
     }
 
-    async fn exec_dynamic(
-        &self,
-        bin_path: &Path,
-        is_python: bool,
-        args: &Value,
-    ) -> Result<String> {
+    async fn exec_dynamic(&self, bin_path: &Path, is_python: bool, args: &Value) -> Result<String> {
         let cwd = env::current_dir()?;
         let envelope = json!({
             "arguments": args,

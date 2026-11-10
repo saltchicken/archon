@@ -238,10 +238,10 @@ impl TuiApp {
                 };
 
                 if !is_on_scrollbar {
-                    if let Some((i, _, _, true)) = self
-                        .msg_visual_ranges
-                        .iter()
-                        .find(|(_, start, end, _)| visual_y >= *start as usize && visual_y < *end as usize)
+                    if let Some((i, _, _, true)) =
+                        self.msg_visual_ranges.iter().find(|(_, start, end, _)| {
+                            visual_y >= *start as usize && visual_y < *end as usize
+                        })
                     {
                         let cur = self.msg_scrolls.get(*i).copied().unwrap_or(0);
                         self.msg_scrolls[*i] = if is_up {
@@ -266,10 +266,10 @@ impl TuiApp {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((i, _, _, _)) = self
-                    .msg_visual_ranges
-                    .iter()
-                    .find(|(_, start, end, _)| visual_y >= *start as usize && visual_y < *end as usize)
+                if let Some((i, _, _, _)) =
+                    self.msg_visual_ranges.iter().find(|(_, start, end, _)| {
+                        visual_y >= *start as usize && visual_y < *end as usize
+                    })
                 {
                     if let Some(unfolded) = self.msg_unfolded.get_mut(*i) {
                         *unfolded = !*unfolded;
@@ -328,10 +328,7 @@ impl TuiApp {
                 match key.code {
                     KeyCode::Esc => self.modal = ActiveModal::None,
                     KeyCode::Enter => {
-                        let cleaned = self
-                            .file_path_input
-                            .trim()
-                            .trim_matches(['\'', '"']);
+                        let cleaned = self.file_path_input.trim().trim_matches(['\'', '"']);
                         if !cleaned.is_empty() {
                             let _ = self
                                 .cmd_tx
@@ -860,7 +857,12 @@ fn compute_cursor_coords(text: &str, cursor_byte: usize, width: usize) -> (u16, 
     (row, col as u16)
 }
 
-fn flush_word(out: &mut Vec<String>, current_line: &mut String, word_buf: &mut String, width: usize) {
+fn flush_word(
+    out: &mut Vec<String>,
+    current_line: &mut String,
+    word_buf: &mut String,
+    width: usize,
+) {
     if word_buf.is_empty() {
         return;
     }

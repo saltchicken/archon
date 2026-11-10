@@ -90,7 +90,8 @@ impl SessionManager {
             return Ok(());
         }
 
-        let clean_msgs: Vec<ChatMessage> = messages.iter().map(ChatMessage::without_images).collect();
+        let clean_msgs: Vec<ChatMessage> =
+            messages.iter().map(ChatMessage::without_images).collect();
 
         let title = clean_msgs
             .iter()

@@ -51,7 +51,9 @@ pub fn validate_relative_path(raw: &str) -> Result<&Path> {
     }
     let rel_path = Path::new(trimmed);
     if rel_path.is_absolute() {
-        bail!("Security violation: path must be relative to current working directory: '{trimmed}'");
+        bail!(
+            "Security violation: path must be relative to current working directory: '{trimmed}'"
+        );
     }
     for comp in rel_path.components() {
         match comp {
@@ -87,7 +89,10 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     let target = cwd.join(rel_path);
 
     if target.exists() {
-        bail!("File already exists: {}. Use edit_file instead.", raw.trim());
+        bail!(
+            "File already exists: {}. Use edit_file instead.",
+            raw.trim()
+        );
     }
 
     let mut ancestor = target.parent();
