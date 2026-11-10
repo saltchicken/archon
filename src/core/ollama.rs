@@ -5,6 +5,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::{debug, error, info};
 
 pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
     for cmd in &config.app.required_commands {
@@ -87,14 +88,19 @@ pub async fn stream_chat(
     payload: Value,
     tx: UnboundedSender<EngineEvent>,
 ) {
+    let url = format!("{base_url}/api/chat");
+    info!("Initiating stream request to {}", url);
+    debug!("Payload: {}", serde_json::to_string(&payload).unwrap_or_default());
+
     let resp = match client
-        .post(format!("{base_url}/api/chat"))
+        .post(&url)
         .json(&payload)
         .send()
         .await
     {
         Ok(r) => r,
         Err(e) => {
+            error!("HTTP Request failed: {}", e);
             let _ = tx.send(EngineEvent::StreamError(format!("Request failed: {e}")));
             return;
         }
@@ -103,9 +109,12 @@ pub async fn stream_chat(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        error!("API returned error status {}: {}", status, text);
         let _ = tx.send(EngineEvent::StreamError(format!("HTTP {status}: {text}")));
         return;
     }
+
+    info!("Stream connection established successfully.");
 
     let mut stream = resp.bytes_stream();
     let mut byte_buffer: Vec<u8> = Vec::new();
@@ -158,6 +167,16 @@ pub async fn stream_chat(
                 eval_tokens = data.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
             }
         }
+    }
+
+    info!(
+        "Stream completed. Prompt tokens: {}, Eval tokens: {}, Tool calls: {}",
+        prompt_tokens,
+        eval_tokens,
+        collected_tools.len()
+    );
+    if !collected_tools.is_empty() {
+        debug!("Captured tool calls: {:?}", collected_tools);
     }
 
     let _ = tx.send(EngineEvent::StreamDone {

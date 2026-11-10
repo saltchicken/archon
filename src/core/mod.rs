@@ -1,4 +1,5 @@
 pub mod config;
+pub mod logger;
 pub mod ollama;
 pub mod session;
 pub mod tools;
@@ -18,6 +19,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tools::{ToolCall, ToolRegistry};
+use tracing::{debug, info};
 use workspace::{ImageAttachment, ImageWorkspace};
 
 #[derive(Debug)]
@@ -190,6 +192,7 @@ impl CoreEngine {
     ) {
         match cmd {
             EngineCommand::PasteClipboard => {
+                info!("Pasting image from clipboard");
                 self.update_workspace(
                     |ws| ws.paste_clipboard(),
                     "Image pasted from clipboard.".into(),
@@ -197,11 +200,13 @@ impl CoreEngine {
                 .await;
             }
             EngineCommand::ImportFile(path) => {
+                info!("Importing file: {}", path.display());
                 let msg = format!("Added {}", path.display());
                 self.update_workspace(move |ws| ws.import_file(&path), msg)
                     .await;
             }
             EngineCommand::ClearImages => {
+                info!("Clearing attached images");
                 let ws = Arc::clone(&self.workspace);
                 let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
                 self.notify("Cleared attached images.", false);
@@ -213,6 +218,9 @@ impl CoreEngine {
                 num_ctx,
                 enable_tools,
             } => {
+                info!("User submitted prompt. Enable tools: {}", enable_tools);
+                debug!("Prompt content: {}", prompt.replace('\n', " "));
+                
                 self.active_system_prompt = system_prompt.clone();
                 self.active_num_ctx = num_ctx;
 
@@ -244,6 +252,7 @@ impl CoreEngine {
                 self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone());
             }
             EngineCommand::CancelStream => {
+                info!("User cancelled stream");
                 if let Some(handle) = self.active_task.take() {
                     handle.abort();
                     if !self.stream_buffer.trim().is_empty() {
@@ -272,6 +281,8 @@ impl CoreEngine {
                     return;
                 };
 
+                info!("Resolving tool call: {}. Approved: {}", call.function.name, approved);
+
                 let (mut internal_out, _) = if approved {
                     self.tools.execute(&call).await
                 } else {
@@ -293,6 +304,8 @@ impl CoreEngine {
 
                 self.messages.push(ChatMessage::new("tool", internal_out));
                 self.save_and_emit_chat();
+                
+                info!("Tool execution resolved and recorded to chat history.");
 
                 if self.pending_tools.is_empty() {
                     self.pending_batch_total = 0;
@@ -307,12 +320,14 @@ impl CoreEngine {
                 }
             }
             EngineCommand::RefreshSessions => {
+                info!("Refreshing sessions list");
                 let sessions = Arc::clone(&self.sessions);
                 if let Ok(list) = tokio::task::spawn_blocking(move || sessions.list()).await {
                     let _ = self.tx.send(EngineEvent::SessionsListed(list));
                 }
             }
             EngineCommand::LoadSession(data) => {
+                info!("Loading session: {}", data.id);
                 self.abort_active_state();
                 self.session_id = data.id;
                 self.active_system_prompt = data.system_prompt;
@@ -331,6 +346,7 @@ impl CoreEngine {
                 }
             }
             EngineCommand::DeleteSession(path) => {
+                info!("Deleting session at path: {}", path.display());
                 let sessions = Arc::clone(&self.sessions);
                 if let Ok(list) = tokio::task::spawn_blocking(move || {
                     let _ = sessions.delete(&path);
@@ -342,6 +358,7 @@ impl CoreEngine {
                 }
             }
             EngineCommand::ResetChat => {
+                info!("Resetting chat session");
                 self.abort_active_state();
                 self.session_id = SessionManager::new_id();
                 self.messages.clear();

@@ -2,6 +2,7 @@ use crate::core::config::Config;
 use crate::tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -76,14 +77,24 @@ impl ToolRegistry {
         let args = call.function.arguments.clone();
         let allowed = self.allowed_commands.clone();
 
+        info!("Executing tool: {}", name);
+        debug!("Tool arguments: {}", args);
+
         let name_clone = name.clone();
         let res = tokio::task::spawn_blocking(move || tools::execute(&name_clone, &args, &allowed))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("Tool task panicked: {e}")));
 
         match res {
-            Ok(out) => (out.clone(), format!("[Tool Result: {name}]\n{out}")),
-            Err(e) => (format!("Error: {e}"), format!("[Tool Error: {name}]\n{e}")),
+            Ok(out) => {
+                info!("Tool '{}' executed successfully.", name);
+                debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
+                (out.clone(), format!("[Tool Result: {name}]\n{out}"))
+            },
+            Err(e) => {
+                error!("Tool '{}' failed: {}", name, e);
+                (format!("Error: {e}"), format!("[Tool Error: {name}]\n{e}"))
+            },
         }
     }
 }

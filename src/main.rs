@@ -6,6 +6,7 @@ use anyhow::Result;
 use core::{config::Config, ollama::run_preflight, CoreEngine};
 use std::{env, path::PathBuf};
 use tokio::sync::mpsc;
+use tracing::{info, error};
 use ui::TuiApp;
 
 #[tokio::main]
@@ -26,14 +27,20 @@ async fn main() -> Result<()> {
     let local_config_path = PathBuf::from(".archon.toml");
 
     let config = Config::load(&base_config_path, &local_config_path);
-    
+
+    let _guard = core::logger::init(&config.app.history_dir);
+    info!("Archon starting up. Config loaded successfully.");
+
     let args: Vec<String> = env::args().collect();
     let target_model = args
         .get(1)
         .cloned()
         .unwrap_or_else(|| config.app.default_model.clone());
 
+    info!("Targeting model: {}", target_model);
+
     if let Err(e) = run_preflight(&target_model, &config).await {
+        error!("Preflight failed: {}", e);
         eprintln!("{e}");
         std::process::exit(1);
     }
