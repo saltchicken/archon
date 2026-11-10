@@ -34,12 +34,6 @@ struct StreamMessageChunk {
 }
 
 pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
-    for cmd in &config.app.required_commands {
-        if which::which(cmd).is_err() {
-            bail!("[Missing Dependency] Required binary '{cmd}' is not installed in PATH.");
-        }
-    }
-
     let ollama = Ollama::try_new(&config.ollama.base_url)
         .context("Invalid Ollama base_url in configuration")?;
 

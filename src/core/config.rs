@@ -32,7 +32,6 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub max_tool_output_size: usize,
     pub history_dir: String,
-    pub required_commands: Vec<String>,
     pub allowed_commands: Vec<String>,
 }
 
@@ -67,7 +66,6 @@ impl Default for AppSettings {
             max_msg_lines: 25,
             max_tool_output_size: 131072,
             history_dir: "~/.local/share/archon/sessions".into(),
-            required_commands: Vec::new(),
             allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
                 .into_iter()
                 .map(String::from)
