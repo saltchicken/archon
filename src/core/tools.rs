@@ -104,14 +104,25 @@ impl ToolRegistry {
                     ));
                 }
 
-                info!("Tool '{}' executed successfully. Truncated: {}", name, truncated);
+                info!(
+                    "Tool '{}' executed successfully. Truncated: {}",
+                    name, truncated
+                );
                 debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
-                (out.clone(), format!("[Tool Result: {name}]\n{out}"), truncated)
-            },
+                (
+                    out.clone(),
+                    format!("[Tool Result: {name}]\n{out}"),
+                    truncated,
+                )
+            }
             Err(e) => {
                 error!("Tool '{}' failed: {}", name, e);
-                (format!("Error: {e}"), format!("[Tool Error: {name}]\n{e}"), false)
-            },
+                (
+                    format!("Error: {e}"),
+                    format!("[Tool Error: {name}]\n{e}"),
+                    false,
+                )
+            }
         }
     }
 }

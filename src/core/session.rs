@@ -45,10 +45,13 @@ impl ChatMessage {
     }
 
     pub fn with_ui_image_placeholders(&self) -> Self {
-        let count = self.images.as_ref().map(|imgs| imgs.len())
+        let count = self
+            .images
+            .as_ref()
+            .map(|imgs| imgs.len())
             .or_else(|| self.image_paths.as_ref().map(|paths| paths.len()))
             .unwrap_or(0);
-            
+
         Self {
             images: (count > 0).then(|| vec![String::new(); count]),
             ..self.without_images()

@@ -90,14 +90,12 @@ pub async fn stream_chat(
 ) {
     let url = format!("{base_url}/api/chat");
     info!("Initiating stream request to {}", url);
-    debug!("Payload: {}", serde_json::to_string(&payload).unwrap_or_default());
+    debug!(
+        "Payload: {}",
+        serde_json::to_string(&payload).unwrap_or_default()
+    );
 
-    let resp = match client
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await
-    {
+    let resp = match client.post(&url).json(&payload).send().await {
         Ok(r) => r,
         Err(e) => {
             error!("HTTP Request failed: {}", e);

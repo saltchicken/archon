@@ -7,10 +7,9 @@ use crate::core::{
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
-        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-        DisableBracketedPaste, EnableBracketedPaste,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+        MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -36,7 +35,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
-    let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
+    let _ = execute!(
+        out,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     if keyboard_enhanced {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
@@ -132,7 +136,12 @@ impl TuiApp {
         let mut stdout = io::stdout();
 
         let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         if keyboard_enhanced {
             execute!(
                 stdout,
@@ -615,9 +624,7 @@ impl TuiApp {
         if truncated {
             header_spans.push(Span::styled(
                 "⚠ TRUNCATED",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
         lines.push(Line::from(header_spans));
@@ -845,13 +852,17 @@ impl TuiApp {
                     section_color = Color::LightGreen;
                     lines.push(Line::from(Span::styled(
                         line,
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     )));
                 } else {
                     section_color = Color::White;
                     lines.push(Line::from(Span::styled(
                         line,
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     )));
                 }
             } else {
@@ -865,7 +876,9 @@ impl TuiApp {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Optional Feedback / Note:",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!("> {}", self.tool_feedback)));
         lines.push(Line::from(""));

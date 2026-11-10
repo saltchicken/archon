@@ -220,7 +220,7 @@ impl CoreEngine {
             } => {
                 info!("User submitted prompt. Enable tools: {}", enable_tools);
                 debug!("Prompt content: {}", prompt.replace('\n', " "));
-                
+
                 self.active_system_prompt = system_prompt.clone();
                 self.active_num_ctx = num_ctx;
 
@@ -234,13 +234,13 @@ impl CoreEngine {
 
                 let mut new_imgs = Vec::new();
                 let mut new_img_paths = Vec::new();
-                
+
                 for att in attachments {
                     if !self.sent_images.contains(&att.path) {
                         let p = att.path.clone();
                         let dest = asset_dir.join(p.file_name().unwrap_or_default());
                         let dest_clone = dest.clone();
-                        
+
                         if let Ok(Ok(b64)) = tokio::task::spawn_blocking(move || {
                             let _ = std::fs::copy(&p, &dest_clone);
                             ImageWorkspace::encode_image(&p)
@@ -261,7 +261,8 @@ impl CoreEngine {
                 });
 
                 self.save_and_emit_chat();
-                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone()).await;
+                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone())
+                    .await;
             }
             EngineCommand::CancelStream => {
                 info!("User cancelled stream");
@@ -293,7 +294,10 @@ impl CoreEngine {
                     return;
                 };
 
-                info!("Resolving tool call: {}. Approved: {}", call.function.name, approved);
+                info!(
+                    "Resolving tool call: {}. Approved: {}",
+                    call.function.name, approved
+                );
 
                 let (mut internal_out, _, truncated) = if approved {
                     self.tools.execute(&call).await
@@ -319,7 +323,7 @@ impl CoreEngine {
                 msg.truncated = truncated;
                 self.messages.push(msg);
                 self.save_and_emit_chat();
-                
+
                 info!("Tool execution resolved and recorded to chat history.");
 
                 if self.pending_tools.is_empty() {
@@ -329,7 +333,8 @@ impl CoreEngine {
                         num_ctx,
                         enable_tools,
                         internal_tx.clone(),
-                    ).await;
+                    )
+                    .await;
                 } else {
                     self.prompt_next_tool();
                 }
@@ -458,7 +463,7 @@ impl CoreEngine {
     ) {
         self.stream_buffer.clear();
         let tools_schema = enable_tools.then(|| self.tools.schemas());
-        
+
         // Lazy encode base64 for images that were restored from session history
         let mut msgs = self.messages.clone();
         if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
@@ -478,7 +483,9 @@ impl CoreEngine {
                 }
             }
             msgs
-        }).await {
+        })
+        .await
+        {
             self.messages = updated_msgs; // Cache the base64 string back into state for subsequent turns
         }
 

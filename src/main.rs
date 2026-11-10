@@ -6,7 +6,7 @@ use anyhow::Result;
 use core::{config::Config, ollama::run_preflight, CoreEngine};
 use std::{env, path::PathBuf};
 use tokio::sync::mpsc;
-use tracing::{info, error};
+use tracing::{error, info};
 use ui::TuiApp;
 
 #[tokio::main]
