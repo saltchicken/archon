@@ -433,11 +433,7 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Enter if ctrl => {
                 self.submit_prompt();
             }
             KeyCode::Enter => self.insert_char('\n'),
@@ -626,7 +622,7 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("Ctrl/Alt+⏎ Send   ^S Sessions"),
+            Line::from("Ctrl+⏎ Send   ^S Sessions"),
             Line::from("⏎ Newline"),
             Line::from("^V Paste   ^F Add File"),
             Line::from("^X Clear   ^R Reset"),
@@ -878,7 +874,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Ctrl/Alt+⏎=Send  ⏎=Newline) "),
+                        .title(" Prompt (Ctrl+⏎=Send  ⏎=Newline) "),
                 ),
             chunks[1],
         );
