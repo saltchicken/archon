@@ -11,6 +11,8 @@ use std::{
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -22,6 +24,7 @@ impl ChatMessage {
         Self {
             role: role.into(),
             content: content.into(),
+            truncated: false,
             images: None,
             tool_calls: None,
         }
@@ -31,6 +34,7 @@ impl ChatMessage {
         Self {
             role: self.role.clone(),
             content: self.content.clone(),
+            truncated: self.truncated,
             images: None,
             tool_calls: self.tool_calls.clone(),
         }

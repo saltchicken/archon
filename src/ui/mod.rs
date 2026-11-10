@@ -592,6 +592,7 @@ impl TuiApp {
         idx: usize,
         header_label: &str,
         color: Color,
+        truncated: bool,
         content_lines: &[String],
         is_unfolded: bool,
         max_folded_lines: usize,
@@ -607,10 +608,19 @@ impl TuiApp {
         };
         let toggle_hint = if is_unfolded { " [Click to fold]" } else { "" };
 
-        lines.push(Line::from(Span::styled(
+        let mut header_spans = vec![Span::styled(
             format!("━━ {header_label}{toggle_hint} "),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
+        )];
+        if truncated {
+            header_spans.push(Span::styled(
+                "⚠ TRUNCATED",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(header_spans));
 
         let total_content = content_lines.len();
         let is_truncated = total_content > max_lines;
@@ -691,6 +701,7 @@ impl TuiApp {
                 i,
                 &header,
                 color,
+                m.truncated,
                 &self.msg_wrap_cache[i],
                 self.msg_unfolded[i],
                 self.config.app.max_msg_lines,
@@ -707,6 +718,7 @@ impl TuiApp {
                 i,
                 "ARCHON (streaming...)",
                 Color::Yellow,
+                false,
                 &stream_lines,
                 self.msg_unfolded[i],
                 self.config.app.max_msg_lines,

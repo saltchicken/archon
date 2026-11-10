@@ -283,12 +283,13 @@ impl CoreEngine {
 
                 info!("Resolving tool call: {}. Approved: {}", call.function.name, approved);
 
-                let (mut internal_out, _) = if approved {
+                let (mut internal_out, _, truncated) = if approved {
                     self.tools.execute(&call).await
                 } else {
                     (
                         "The user declined to run this command.".into(),
-                        "Declined.".into(),
+                        String::new(),
+                        false,
                     )
                 };
 
@@ -302,7 +303,9 @@ impl CoreEngine {
                     internal_out.push_str(&format!("{prefix} {trimmed_fb}"));
                 }
 
-                self.messages.push(ChatMessage::new("tool", internal_out));
+                let mut msg = ChatMessage::new("tool", internal_out);
+                msg.truncated = truncated;
+                self.messages.push(msg);
                 self.save_and_emit_chat();
                 
                 info!("Tool execution resolved and recorded to chat history.");

@@ -74,7 +74,7 @@ impl ToolRegistry {
         out.trim_end().to_string()
     }
 
-    pub async fn execute(&self, call: &ToolCall) -> (String, String) {
+    pub async fn execute(&self, call: &ToolCall) -> (String, String, bool) {
         let name = call.function.name.clone();
         let args = call.function.arguments.clone();
         let allowed = self.allowed_commands.clone();
@@ -90,22 +90,27 @@ impl ToolRegistry {
 
         match res {
             Ok(mut out) => {
+                let mut truncated = false;
                 if out.len() > max_size {
+                    truncated = true;
                     let mut truncate_at = max_size;
                     while truncate_at > 0 && !out.is_char_boundary(truncate_at) {
                         truncate_at -= 1;
                     }
+                    let dropped = out.len() - truncate_at;
                     out.truncate(truncate_at);
-                    out.push_str("\n\n[TRUNCATED: Output exceeded size limit]");
+                    out.push_str(&format!(
+                        "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
+                    ));
                 }
 
-                info!("Tool '{}' executed successfully.", name);
+                info!("Tool '{}' executed successfully. Truncated: {}", name, truncated);
                 debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
-                (out.clone(), format!("[Tool Result: {name}]\n{out}"))
+                (out.clone(), format!("[Tool Result: {name}]\n{out}"), truncated)
             },
             Err(e) => {
                 error!("Tool '{}' failed: {}", name, e);
-                (format!("Error: {e}"), format!("[Tool Error: {name}]\n{e}"))
+                (format!("Error: {e}"), format!("[Tool Error: {name}]\n{e}"), false)
             },
         }
     }
