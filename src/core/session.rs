@@ -16,6 +16,8 @@ pub struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_paths: Option<Vec<PathBuf>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
@@ -26,6 +28,7 @@ impl ChatMessage {
             content: content.into(),
             truncated: false,
             images: None,
+            image_paths: None,
             tool_calls: None,
         }
     }
@@ -36,16 +39,18 @@ impl ChatMessage {
             content: self.content.clone(),
             truncated: self.truncated,
             images: None,
+            image_paths: self.image_paths.clone(),
             tool_calls: self.tool_calls.clone(),
         }
     }
 
     pub fn with_ui_image_placeholders(&self) -> Self {
+        let count = self.images.as_ref().map(|imgs| imgs.len())
+            .or_else(|| self.image_paths.as_ref().map(|paths| paths.len()))
+            .unwrap_or(0);
+            
         Self {
-            images: self
-                .images
-                .as_ref()
-                .map(|imgs| vec![String::new(); imgs.len()]),
+            images: (count > 0).then(|| vec![String::new(); count]),
             ..self.without_images()
         }
     }
@@ -80,6 +85,10 @@ impl SessionManager {
 
     pub fn new_id() -> String {
         Local::now().format("%Y%m%d_%H%M%S").to_string()
+    }
+
+    pub fn asset_dir(&self, id: &str) -> PathBuf {
+        self.history_dir.join("assets").join(id)
     }
 
     pub fn save(
@@ -148,6 +157,12 @@ impl SessionManager {
 
     pub fn delete(&self, path: &Path) -> Result<()> {
         if path.exists() {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Some(id) = stem.strip_prefix("session_") {
+                    let asset_dir = self.asset_dir(id);
+                    let _ = fs::remove_dir_all(asset_dir);
+                }
+            }
             fs::remove_file(path)?;
         }
         Ok(())

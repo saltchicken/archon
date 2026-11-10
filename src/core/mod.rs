@@ -224,20 +224,31 @@ impl CoreEngine {
                 self.active_system_prompt = system_prompt.clone();
                 self.active_num_ctx = num_ctx;
 
+                let asset_dir = self.sessions.asset_dir(&self.session_id);
+                let _ = std::fs::create_dir_all(&asset_dir);
+
                 let ws = Arc::clone(&self.workspace);
                 let attachments = tokio::task::spawn_blocking(move || ws.list_attachments())
                     .await
                     .unwrap_or_default();
 
                 let mut new_imgs = Vec::new();
+                let mut new_img_paths = Vec::new();
+                
                 for att in attachments {
                     if !self.sent_images.contains(&att.path) {
                         let p = att.path.clone();
-                        if let Ok(Ok(b64)) =
-                            tokio::task::spawn_blocking(move || ImageWorkspace::encode_image(&p))
-                                .await
+                        let dest = asset_dir.join(p.file_name().unwrap_or_default());
+                        let dest_clone = dest.clone();
+                        
+                        if let Ok(Ok(b64)) = tokio::task::spawn_blocking(move || {
+                            let _ = std::fs::copy(&p, &dest_clone);
+                            ImageWorkspace::encode_image(&p)
+                        })
+                        .await
                         {
                             new_imgs.push(b64);
+                            new_img_paths.push(dest);
                             self.sent_images.insert(att.path);
                         }
                     }
@@ -245,11 +256,12 @@ impl CoreEngine {
 
                 self.messages.push(ChatMessage {
                     images: (!new_imgs.is_empty()).then_some(new_imgs),
+                    image_paths: (!new_img_paths.is_empty()).then_some(new_img_paths),
                     ..ChatMessage::new("user", prompt)
                 });
 
                 self.save_and_emit_chat();
-                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone());
+                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone()).await;
             }
             EngineCommand::CancelStream => {
                 info!("User cancelled stream");
@@ -317,7 +329,7 @@ impl CoreEngine {
                         num_ctx,
                         enable_tools,
                         internal_tx.clone(),
-                    );
+                    ).await;
                 } else {
                     self.prompt_next_tool();
                 }
@@ -437,7 +449,7 @@ impl CoreEngine {
         });
     }
 
-    fn spawn_ollama_turn(
+    async fn spawn_ollama_turn(
         &mut self,
         system_prompt: &str,
         num_ctx: u32,
@@ -446,6 +458,30 @@ impl CoreEngine {
     ) {
         self.stream_buffer.clear();
         let tools_schema = enable_tools.then(|| self.tools.schemas());
+        
+        // Lazy encode base64 for images that were restored from session history
+        let mut msgs = self.messages.clone();
+        if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
+            for msg in &mut msgs {
+                if msg.images.is_none() {
+                    if let Some(paths) = &msg.image_paths {
+                        let mut b64s = Vec::new();
+                        for path in paths {
+                            if let Ok(b64) = ImageWorkspace::encode_image(path) {
+                                b64s.push(b64);
+                            }
+                        }
+                        if !b64s.is_empty() {
+                            msg.images = Some(b64s);
+                        }
+                    }
+                }
+            }
+            msgs
+        }).await {
+            self.messages = updated_msgs; // Cache the base64 string back into state for subsequent turns
+        }
+
         let payload = ollama::build_payload(
             &self.model,
             &self.messages,
