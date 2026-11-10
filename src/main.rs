@@ -16,13 +16,18 @@ async fn main() -> Result<()> {
         original_hook(panic_info);
     }));
 
-    let config_path = dirs::config_dir()
-        .map(|dir| dir.join("archon").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
+    // 1. Global config location. Completely removes local fallback.
+    let base_config_path = dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("archon")
+        .join("config.toml");
 
-    let config = Config::load(&config_path);
+    // 2. Local project override location
+    let local_config_path = PathBuf::from(".archon.toml");
+
+    let config = Config::load(&base_config_path, &local_config_path);
+    
     let args: Vec<String> = env::args().collect();
-
     let target_model = args
         .get(1)
         .cloned()

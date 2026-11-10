@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
+use toml::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -96,10 +97,51 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(path: impl AsRef<Path>) -> Self {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+    pub fn load(base_path: impl AsRef<Path>, local_path: impl AsRef<Path>) -> Self {
+        let base_path = base_path.as_ref();
+
+        // 1. If base config doesn't exist, create it with defaults
+        if !base_path.exists() {
+            if let Some(parent) = base_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(toml_str) = toml::to_string_pretty(&Config::default()) {
+                let _ = fs::write(base_path, toml_str);
+            }
+        }
+
+        let mut merged_val = Value::Table(toml::Table::new());
+
+        // 2. Merge in base config
+        if let Ok(base_str) = fs::read_to_string(base_path) {
+            if let Ok(base_val) = toml::from_str::<Value>(&base_str) {
+                Self::merge_values(&mut merged_val, base_val);
+            }
+        }
+
+        // 3. Merge in local project overrides if they exist
+        if let Ok(local_str) = fs::read_to_string(local_path) {
+            if let Ok(local_val) = toml::from_str::<Value>(&local_str) {
+                Self::merge_values(&mut merged_val, local_val);
+            }
+        }
+
+        let merged_str = toml::to_string(&merged_val).unwrap_or_default();
+        toml::from_str(&merged_str).unwrap_or_default()
+    }
+
+    fn merge_values(base: &mut Value, override_val: Value) {
+        match (base, override_val) {
+            (Value::Table(base_map), Value::Table(override_map)) => {
+                for (k, v) in override_map {
+                    if let Some(base_v) = base_map.get_mut(&k) {
+                        Self::merge_values(base_v, v);
+                    } else {
+                        base_map.insert(k, v);
+                    }
+                }
+            }
+            (base, override_val) => *base = override_val,
+        }
     }
 }
