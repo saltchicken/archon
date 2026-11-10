@@ -16,8 +16,7 @@ pub fn init(history_dir: &str) -> tracing_appender::non_blocking::WorkerGuard {
             fmt::layer()
                 .with_writer(non_blocking)
                 .with_ansi(false)
-                .with_target(true)
-                .with_thread_ids(true),
+                .with_target(true),
         )
         .init();
 
