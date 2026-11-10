@@ -18,10 +18,10 @@ SCHEMA = {
     }
 }
 
-def resolve_secure_path(rel):
+def resolve_secure_path(rel, workspace_root):
     if not rel or rel.startswith('/') or '..' in rel:
         raise ValueError("Security violation: path must be relative to current working directory")
-    cwd = os.path.abspath(os.getcwd())
+    cwd = os.path.abspath(workspace_root)
     target = os.path.abspath(os.path.join(cwd, rel))
     if not target.startswith(cwd):
         raise ValueError("Security violation: path escapes workspace")
@@ -36,14 +36,24 @@ def main():
         print("Error: Missing JSON arguments", file=sys.stderr)
         sys.exit(1)
 
-    args = json.loads(sys.argv[1])
+    payload = json.loads(sys.argv[1])
+    
+    # Unpack the JSON envelope (with fallback for direct arguments)
+    if isinstance(payload, dict) and "arguments" in payload and "context" in payload:
+        args = payload["arguments"]
+        context = payload["context"]
+    else:
+        args = payload
+        context = {}
+
+    workspace_root = context.get("workspace_root") or os.getcwd()
     path_str = args.get("file_path", "")
     content = args.get("content", "")
 
     try:
-        target_path = resolve_secure_path(path_str)
+        target_path = resolve_secure_path(path_str, workspace_root)
         if os.path.exists(target_path):
-            print(f"Error: File already exists. Use edit_file instead.", file=sys.stderr)
+            print("Error: File already exists. Use edit_file instead.", file=sys.stderr)
             sys.exit(1)
             
         parent = os.path.dirname(target_path)

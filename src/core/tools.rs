@@ -1,7 +1,8 @@
 use crate::core::config::Config;
+use crate::tools::{context, edit_file, execute_command};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{collections::HashSet, env, fs, path::PathBuf};
 use tokio::process::Command;
 
@@ -27,16 +28,14 @@ impl ToolRegistry {
         }
     }
 
-    /// Returns the tool directories in order of priority:
+    /// Returns the external tool directories in order of priority:
     /// 1. Project-specific ./tools/python
-    /// 2. Project-specific ./tools/rust
-    /// 3. Legacy flat ./tools
-    /// 4. Global ~/.local/share/archon/tools
+    /// 2. Legacy flat ./tools
+    /// 3. Global ~/.local/share/archon/tools
     pub fn tool_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Ok(cwd) = env::current_dir() {
             dirs.push(cwd.join("tools").join("python"));
-            dirs.push(cwd.join("tools").join("rust"));
             dirs.push(cwd.join("tools"));
         }
         if let Some(home) = dirs::home_dir() {
@@ -45,37 +44,69 @@ impl ToolRegistry {
         dirs
     }
 
+    pub fn builtin_schema(name: &str) -> Option<Value> {
+        match name {
+            "context" => Some(context::schema()),
+            "edit_file" => Some(edit_file::schema()),
+            "execute_command" => Some(execute_command::schema()),
+            _ => None,
+        }
+    }
+
+    pub fn execute_builtin(
+        name: &str,
+        args: &Value,
+        allowed_commands: &[String],
+    ) -> Option<Result<String>> {
+        match name {
+            "context" => Some(context::execute(args)),
+            "edit_file" => Some(edit_file::execute(args)),
+            "execute_command" => Some(execute_command::execute(args, allowed_commands)),
+            _ => None,
+        }
+    }
+
     pub fn schemas(&self) -> Vec<Value> {
         let mut schemas = Vec::new();
         let mut loaded_tools = HashSet::new();
 
+        // 1. Load built-in compiled Rust tools directly from memory
+        for name in ["context", "edit_file", "execute_command"] {
+            if let Some(schema) = Self::builtin_schema(name) {
+                schemas.push(schema);
+                loaded_tools.insert(name.to_string());
+            }
+        }
+
+        // 2. Discover external scripts/binaries (e.g., Python tools)
         for dir in Self::tool_dirs() {
             fs::create_dir_all(&dir).ok();
 
             if let Ok(entries) = fs::read_dir(&dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    
+
                     if path.is_dir() {
                         continue;
                     }
 
                     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    if ext == "json" || ext == "toml" || ext == "md" {
+                    if matches!(ext, "json" | "toml" | "md" | "rs") {
                         continue;
                     }
 
-                    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    
-                    // Determine tool name and language backend
-                    let (base_name, is_python, is_rust) = if file_name.ends_with(".py") {
-                        (file_name.strip_suffix(".py").unwrap().to_string(), true, false)
-                    } else if file_name.ends_with(".rs") {
-                        (file_name.strip_suffix(".rs").unwrap().to_string(), false, true)
-                    } else if file_name.ends_with(".exe") {
-                        (file_name.strip_suffix(".exe").unwrap().to_string(), false, false)
+                    let file_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    let (base_name, is_python) = if let Some(stripped) = file_name.strip_suffix(".py") {
+                        (stripped.to_string(), true)
+                    } else if let Some(stripped) = file_name.strip_suffix(".exe") {
+                        (stripped.to_string(), false)
                     } else {
-                        (file_name.clone(), false, false)
+                        (file_name.clone(), false)
                     };
 
                     if loaded_tools.contains(&base_name) {
@@ -86,24 +117,6 @@ impl ToolRegistry {
                         let mut c = std::process::Command::new("python3");
                         c.arg(&path);
                         c
-                    } else if is_rust {
-                        // Resolve the compiled binary path instead of trying to run the .rs source file
-                        let cwd = env::current_dir().unwrap_or_default();
-                        let debug_bin = cwd.join("target").join("debug").join(&base_name);
-                        let release_bin = cwd.join("target").join("release").join(&base_name);
-                        
-                        let compiled_path = if debug_bin.exists() {
-                            debug_bin
-                        } else if debug_bin.with_extension("exe").exists() {
-                            debug_bin.with_extension("exe")
-                        } else if release_bin.exists() {
-                            release_bin
-                        } else if release_bin.with_extension("exe").exists() {
-                            release_bin.with_extension("exe")
-                        } else {
-                            continue; // Skip if it hasn't been compiled yet
-                        };
-                        std::process::Command::new(compiled_path)
                     } else {
                         std::process::Command::new(&path)
                     };
@@ -133,15 +146,35 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> (String, String) {
-        let name = &call.function.name;
-        
+        let name = call.function.name.clone();
+        let args = call.function.arguments.clone();
+        let allowed = self.allowed_commands.clone();
+
+        // 1. Check and run built-in Rust tools first
+        if Self::builtin_schema(&name).is_some() {
+            let name_clone = name.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                Self::execute_builtin(&name_clone, &args, &allowed).unwrap()
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("Tool task panicked: {e}")));
+
+            return match res {
+                Ok(out) => (out.clone(), format!("[Tool Result: {}]\n{}", name, out)),
+                Err(e) => (
+                    format!("Error: {e}"),
+                    format!("[Tool Error: {}]\n{e}", name),
+                ),
+            };
+        }
+
+        // 2. Otherwise, look for external Python/binary tools
         let mut found_target = None;
         for dir in Self::tool_dirs() {
-            let unix_cand = dir.join(name);
+            let unix_cand = dir.join(&name);
             let win_cand = dir.join(format!("{name}.exe"));
             let py_cand = dir.join(format!("{name}.py"));
-            let rs_cand = dir.join(format!("{name}.rs"));
-            
+
             if unix_cand.exists() && unix_cand.is_file() {
                 found_target = Some((unix_cand, false));
                 break;
@@ -151,39 +184,20 @@ impl ToolRegistry {
             } else if py_cand.exists() && py_cand.is_file() {
                 found_target = Some((py_cand, true));
                 break;
-            } else if rs_cand.exists() && rs_cand.is_file() {
-                // Find corresponding compiled rust binary
-                let cwd = env::current_dir().unwrap_or_default();
-                let debug_bin = cwd.join("target").join("debug").join(name);
-                let release_bin = cwd.join("target").join("release").join(name);
-                
-                if debug_bin.exists() {
-                    found_target = Some((debug_bin, false));
-                    break;
-                } else if debug_bin.with_extension("exe").exists() {
-                    found_target = Some((debug_bin.with_extension("exe"), false));
-                    break;
-                } else if release_bin.exists() {
-                    found_target = Some((release_bin, false));
-                    break;
-                } else if release_bin.with_extension("exe").exists() {
-                    found_target = Some((release_bin.with_extension("exe"), false));
-                    break;
-                }
             }
         }
 
         let res = if let Some((bin_path, is_python)) = found_target {
-            self.exec_dynamic(&bin_path, is_python, &call.function.arguments).await
+            self.exec_dynamic(&bin_path, is_python, &call.function.arguments)
+                .await
         } else {
-            Err(anyhow::anyhow!("Unknown tool: '{name}'. Could not find compiled binary or .py script in tool directories."))
+            Err(anyhow::anyhow!(
+                "Unknown tool: '{name}'. Could not find built-in tool or external script."
+            ))
         };
 
         match res {
-            Ok(out) => (
-                out.clone(),
-                format!("[Tool Result: {}]\n{}", name, out),
-            ),
+            Ok(out) => (out.clone(), format!("[Tool Result: {}]\n{}", name, out)),
             Err(e) => (
                 format!("Error: {e}"),
                 format!("[Tool Error: {}]\n{e}", name),
@@ -191,10 +205,23 @@ impl ToolRegistry {
         }
     }
 
-    async fn exec_dynamic(&self, bin_path: &PathBuf, is_python: bool, args: &Value) -> Result<String> {
-        let args_json = serde_json::to_string(args)?;
+    async fn exec_dynamic(
+        &self,
+        bin_path: &PathBuf,
+        is_python: bool,
+        args: &Value,
+    ) -> Result<String> {
         let cwd = env::current_dir()?;
-        let allowed_cmds_str = self.allowed_commands.join(",");
+
+        // Pass configuration context directly inside a JSON envelope instead of environment variables
+        let envelope = json!({
+            "arguments": args,
+            "context": {
+                "allowed_commands": self.allowed_commands,
+                "workspace_root": cwd.to_string_lossy(),
+            }
+        });
+        let payload_json = serde_json::to_string(&envelope)?;
 
         let mut cmd = if is_python {
             let mut c = Command::new("python3");
@@ -204,10 +231,7 @@ impl ToolRegistry {
             Command::new(bin_path)
         };
 
-        // Inject allowed commands into the environment so scripts can still respect them
-        cmd.current_dir(cwd)
-           .env("ARCHON_ALLOWED_COMMANDS", allowed_cmds_str)
-           .arg(&args_json);
+        cmd.current_dir(cwd).arg(&payload_json);
 
         let out = cmd.output().await?;
 
@@ -221,7 +245,7 @@ impl ToolRegistry {
         }
 
         if combined.trim().is_empty() {
-            Ok(format!("Tool executed successfully (no output)."))
+            Ok("Tool executed successfully (no output).".to_string())
         } else {
             Ok(combined)
         }

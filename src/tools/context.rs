@@ -1,7 +1,8 @@
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::{env, process};
+use std::process;
 
-fn schema() -> Value {
+pub fn schema() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -17,24 +18,15 @@ fn schema() -> Value {
     })
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && args[1] == "--schema" {
-        println!("{}", serde_json::to_string(&schema()).unwrap());
-        return;
-    }
-
-    if args.len() < 2 {
-        eprintln!("Error: Missing JSON arguments");
-        process::exit(1);
-    }
-
-    let json_args: Value = serde_json::from_str(&args[1]).unwrap_or(json!({}));
-    let target = json_args.get("target_path").and_then(|v| v.as_str()).unwrap_or("").trim();
+pub fn execute(json_args: &Value) -> Result<String> {
+    let target = json_args
+        .get("target_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
 
     if target.starts_with('/') || target.contains("..") {
-        eprintln!("Error: Path traversal blocked for target '{}'", target);
-        process::exit(1);
+        bail!("Path traversal blocked for target '{}'", target);
     }
 
     let mut cmd = process::Command::new("context");
@@ -42,22 +34,19 @@ fn main() {
         cmd.arg(target);
     }
 
-    match cmd.output() {
-        Ok(out) => {
-            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-            if !out.stderr.is_empty() {
-                combined.push_str("\n[STDERR]\n");
-                combined.push_str(&String::from_utf8_lossy(&out.stderr));
-            }
-            if combined.trim().is_empty() {
-                println!("Context executed successfully (no output).");
-            } else {
-                println!("{}", combined);
-            }
+    let out = cmd.output().context("Error executing context")?;
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
         }
-        Err(e) => {
-            eprintln!("Error executing context: {}", e);
-            process::exit(1);
-        }
+        combined.push_str("[STDERR]\n");
+        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    }
+
+    if combined.trim().is_empty() {
+        Ok("Context executed successfully (no output).".into())
+    } else {
+        Ok(combined)
     }
 }
