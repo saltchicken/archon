@@ -33,7 +33,7 @@ use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const DEFAULT_MAX_MSG_LINES: usize = 15;
+const DEFAULT_MAX_MSG_LINES: usize = 25;
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
@@ -703,7 +703,7 @@ impl TuiApp {
             Paragraph::new(lines).scroll((self.chat_scroll, 0)).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Conversation (Scroll near right edge for global chat) "),
+                    .title(" Conversation "),
             ),
             chunks[0],
         );
