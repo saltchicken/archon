@@ -31,7 +31,7 @@ use ratatui::{
 };
 use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
