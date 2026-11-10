@@ -93,7 +93,7 @@ impl TuiApp {
             messages: Vec::new(),
             streaming_text: String::new(),
             is_streaming: false,
-            status_bar: ("Ready. Press ⏎ to send prompt.".into(), false),
+            status_bar: ("Ready. Press Ctrl+⏎ to send prompt.".into(), false),
             preset_idx: 0,
             sys_preset_idx: 0,
             enable_tools: true,
@@ -438,9 +438,9 @@ impl TuiApp {
                     .modifiers
                     .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
             {
-                self.insert_char('\n');
+                self.submit_prompt();
             }
-            KeyCode::Enter => self.submit_prompt(),
+            KeyCode::Enter => self.insert_char('\n'),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }
@@ -626,8 +626,8 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("⏎ Send   ^S Sessions"),
-            Line::from("Alt/Ctrl+⏎ Newline"),
+            Line::from("Ctrl/Alt+⏎ Send   ^S Sessions"),
+            Line::from("⏎ Newline"),
             Line::from("^V Paste   ^F Add File"),
             Line::from("^X Clear   ^R Reset"),
             Line::from("^Q Quit"),
@@ -878,7 +878,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (⏎=Send  Alt/Ctrl+⏎=Newline) "),
+                        .title(" Prompt (Ctrl/Alt+⏎=Send  ⏎=Newline) "),
                 ),
             chunks[1],
         );
