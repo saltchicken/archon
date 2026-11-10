@@ -10,6 +10,7 @@ use crossterm::{
         DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
         KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, EnableBracketedPaste,
     },
     execute,
     terminal::{
@@ -35,7 +36,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
-    let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
     if keyboard_enhanced {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
@@ -128,7 +129,7 @@ impl TuiApp {
         let mut stdout = io::stdout();
 
         let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
         if keyboard_enhanced {
             execute!(
                 stdout,
@@ -148,6 +149,13 @@ impl TuiApp {
                     match event {
                         Event::Key(key) if self.handle_key(key) => break,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Paste(text) => {
+                            for c in text.chars() {
+                                if c != '\r' {
+                                    self.insert_char(c);
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
