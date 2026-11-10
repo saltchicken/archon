@@ -849,7 +849,7 @@ impl TuiApp {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     )));
                 } else if line.contains("REPLACE") || line.contains("CONTENT") {
-                    section_color = Color::LightGreen;
+                    section_color = Color::Cyan;
                     lines.push(Line::from(Span::styled(
                         line,
                         Style::default()
@@ -877,7 +877,7 @@ impl TuiApp {
         lines.push(Line::from(Span::styled(
             "Optional Feedback / Note:",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!("> {}", self.tool_feedback)));
