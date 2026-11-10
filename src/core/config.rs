@@ -17,6 +17,7 @@ pub struct AppSettings {
     pub default_model: String,
     pub default_context: u32,
     pub max_msg_lines: usize,
+    pub max_tool_output_size: usize,
     pub history_dir: String,
     pub required_commands: Vec<String>,
     pub allowed_commands: Vec<String>,
@@ -51,6 +52,7 @@ impl Default for AppSettings {
             default_model: "qwen3.8:27b".into(),
             default_context: 32768,
             max_msg_lines: 25,
+            max_tool_output_size: 131072,
             history_dir: "~/.local/share/archon/sessions".into(),
             required_commands: vec!["wl-paste".into()],
             allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]

@@ -18,6 +18,7 @@ pub struct ToolFunction {
 pub struct ToolRegistry {
     allowed_commands: Vec<String>,
     schemas: Vec<Value>,
+    max_output_size: usize,
 }
 
 impl ToolRegistry {
@@ -25,6 +26,7 @@ impl ToolRegistry {
         Self {
             allowed_commands: config.app.allowed_commands.clone(),
             schemas: tools::schemas(),
+            max_output_size: config.app.max_tool_output_size,
         }
     }
 
@@ -76,6 +78,7 @@ impl ToolRegistry {
         let name = call.function.name.clone();
         let args = call.function.arguments.clone();
         let allowed = self.allowed_commands.clone();
+        let max_size = self.max_output_size;
 
         info!("Executing tool: {}", name);
         debug!("Tool arguments: {}", args);
@@ -86,7 +89,16 @@ impl ToolRegistry {
             .unwrap_or_else(|e| Err(anyhow::anyhow!("Tool task panicked: {e}")));
 
         match res {
-            Ok(out) => {
+            Ok(mut out) => {
+                if out.len() > max_size {
+                    let mut truncate_at = max_size;
+                    while truncate_at > 0 && !out.is_char_boundary(truncate_at) {
+                        truncate_at -= 1;
+                    }
+                    out.truncate(truncate_at);
+                    out.push_str("\n\n[TRUNCATED: Output exceeded size limit]");
+                }
+
                 info!("Tool '{}' executed successfully.", name);
                 debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
                 (out.clone(), format!("[Tool Result: {name}]\n{out}"))
