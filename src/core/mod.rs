@@ -157,7 +157,7 @@ impl CoreEngine {
         self.prompt_next_tool();
     }
 
-    async fn update_workspace<F>(&self, op: F, success_msg: String)
+    async fn update_workspace<F>(&self, op: F, success_msg: impl Into<String>)
     where
         F: FnOnce(&ImageWorkspace) -> anyhow::Result<PathBuf> + Send + 'static,
     {
@@ -170,6 +170,20 @@ impl CoreEngine {
                 Err(e) => self.notify(e.to_string(), true),
             }
             let _ = self.tx.send(EngineEvent::WorkspaceUpdated(list));
+        }
+    }
+
+    async fn emit_sessions(&self, delete_first: Option<PathBuf>) {
+        let sessions = Arc::clone(&self.sessions);
+        if let Ok(list) = tokio::task::spawn_blocking(move || {
+            if let Some(path) = delete_first {
+                let _ = sessions.delete(&path);
+            }
+            sessions.list()
+        })
+        .await
+        {
+            let _ = self.tx.send(EngineEvent::SessionsListed(list));
         }
     }
 
@@ -193,11 +207,8 @@ impl CoreEngine {
         match cmd {
             EngineCommand::PasteClipboard => {
                 info!("Pasting image from clipboard");
-                self.update_workspace(
-                    |ws| ws.paste_clipboard(),
-                    "Image pasted from clipboard.".into(),
-                )
-                .await;
+                self.update_workspace(|ws| ws.paste_clipboard(), "Image pasted from clipboard.")
+                    .await;
             }
             EngineCommand::ImportFile(path) => {
                 info!("Importing file: {}", path.display());
@@ -225,35 +236,32 @@ impl CoreEngine {
                 self.active_num_ctx = num_ctx;
 
                 let asset_dir = self.sessions.asset_dir(&self.session_id);
-                let _ = std::fs::create_dir_all(&asset_dir);
-
                 let ws = Arc::clone(&self.workspace);
-                let attachments = tokio::task::spawn_blocking(move || ws.list_attachments())
-                    .await
-                    .unwrap_or_default();
+                let already_sent = self.sent_images.clone();
 
-                let mut new_imgs = Vec::new();
-                let mut new_img_paths = Vec::new();
+                let (new_imgs, new_img_paths, newly_sent) = tokio::task::spawn_blocking(move || {
+                    let _ = std::fs::create_dir_all(&asset_dir);
+                    let mut imgs = Vec::new();
+                    let mut paths = Vec::new();
+                    let mut sent = Vec::new();
 
-                for att in attachments {
-                    if !self.sent_images.contains(&att.path) {
-                        let p = att.path.clone();
-                        let dest = asset_dir.join(p.file_name().unwrap_or_default());
-                        let dest_clone = dest.clone();
-
-                        if let Ok(Ok(b64)) = tokio::task::spawn_blocking(move || {
-                            let _ = std::fs::copy(&p, &dest_clone);
-                            ImageWorkspace::encode_image(&p)
-                        })
-                        .await
-                        {
-                            new_imgs.push(b64);
-                            new_img_paths.push(dest);
-                            self.sent_images.insert(att.path);
+                    for att in ws.list_attachments() {
+                        if !already_sent.contains(&att.path) {
+                            let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
+                            let _ = std::fs::copy(&att.path, &dest);
+                            if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
+                                imgs.push(b64);
+                                paths.push(dest);
+                                sent.push(att.path);
+                            }
                         }
                     }
-                }
+                    (imgs, paths, sent)
+                })
+                .await
+                .unwrap_or_default();
 
+                self.sent_images.extend(newly_sent);
                 self.messages.push(ChatMessage {
                     images: (!new_imgs.is_empty()).then_some(new_imgs),
                     image_paths: (!new_img_paths.is_empty()).then_some(new_img_paths),
@@ -269,9 +277,10 @@ impl CoreEngine {
                 if let Some(handle) = self.active_task.take() {
                     handle.abort();
                     if !self.stream_buffer.trim().is_empty() {
+                        let text = std::mem::take(&mut self.stream_buffer);
                         self.messages.push(ChatMessage::new(
                             "assistant",
-                            format!("{}\n\n*[Generation cancelled]*", self.stream_buffer),
+                            format!("{text}\n\n*[Generation cancelled]*"),
                         ));
                         self.save_session_bg();
                     }
@@ -299,14 +308,10 @@ impl CoreEngine {
                     call.function.name, approved
                 );
 
-                let (mut internal_out, _, truncated) = if approved {
+                let (mut internal_out, truncated) = if approved {
                     self.tools.execute(&call).await
                 } else {
-                    (
-                        "The user declined to run this command.".into(),
-                        String::new(),
-                        false,
-                    )
+                    ("The user declined to run this command.".into(), false)
                 };
 
                 let trimmed_fb = feedback.trim();
@@ -341,10 +346,7 @@ impl CoreEngine {
             }
             EngineCommand::RefreshSessions => {
                 info!("Refreshing sessions list");
-                let sessions = Arc::clone(&self.sessions);
-                if let Ok(list) = tokio::task::spawn_blocking(move || sessions.list()).await {
-                    let _ = self.tx.send(EngineEvent::SessionsListed(list));
-                }
+                self.emit_sessions(None).await;
             }
             EngineCommand::LoadSession(data) => {
                 info!("Loading session: {}", data.id);
@@ -367,15 +369,7 @@ impl CoreEngine {
             }
             EngineCommand::DeleteSession(path) => {
                 info!("Deleting session at path: {}", path.display());
-                let sessions = Arc::clone(&self.sessions);
-                if let Ok(list) = tokio::task::spawn_blocking(move || {
-                    let _ = sessions.delete(&path);
-                    sessions.list()
-                })
-                .await
-                {
-                    let _ = self.tx.send(EngineEvent::SessionsListed(list));
-                }
+                self.emit_sessions(Some(path)).await;
             }
             EngineCommand::ResetChat => {
                 info!("Resetting chat session");
@@ -464,18 +458,15 @@ impl CoreEngine {
         self.stream_buffer.clear();
         let tools_schema = enable_tools.then(|| self.tools.schemas());
 
-        // Lazy encode base64 for images that were restored from session history
         let mut msgs = self.messages.clone();
         if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
             for msg in &mut msgs {
                 if msg.images.is_none() {
                     if let Some(paths) = &msg.image_paths {
-                        let mut b64s = Vec::new();
-                        for path in paths {
-                            if let Ok(b64) = ImageWorkspace::encode_image(path) {
-                                b64s.push(b64);
-                            }
-                        }
+                        let b64s: Vec<String> = paths
+                            .iter()
+                            .filter_map(|p| ImageWorkspace::encode_image(p).ok())
+                            .collect();
                         if !b64s.is_empty() {
                             msg.images = Some(b64s);
                         }
@@ -486,7 +477,7 @@ impl CoreEngine {
         })
         .await
         {
-            self.messages = updated_msgs; // Cache the base64 string back into state for subsequent turns
+            self.messages = updated_msgs;
         }
 
         let payload = ollama::build_payload(
@@ -498,7 +489,6 @@ impl CoreEngine {
         );
 
         let _ = self.tx.send(EngineEvent::StreamStarted);
-
         let client = self.client.clone();
         let url = self.config.ollama.base_url.clone();
 

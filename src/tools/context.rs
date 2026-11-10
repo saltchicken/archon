@@ -1,10 +1,9 @@
 use crate::tools::{
-    format_process_output, function_schema, parse_args, resolve_existing_path, workspace_root,
+    function_schema, parse_args, resolve_existing_path, run_workspace_command,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::process;
 
 #[derive(Deserialize)]
 struct ContextArgs {
@@ -30,18 +29,16 @@ pub fn execute(json_args: &Value) -> Result<String> {
     let args: ContextArgs = parse_args(json_args, "context")?;
     let target = args.target_path.trim();
 
-    let cwd = workspace_root()?;
-    let mut cmd = process::Command::new("context");
-    cmd.current_dir(&cwd);
-
-    if !target.is_empty() {
+    let cmd_args: Vec<&str> = if target.is_empty() {
+        vec![]
+    } else {
         resolve_existing_path(target)?;
-        cmd.arg(target);
-    }
+        vec![target]
+    };
 
-    let out = cmd.output().context("Error executing context")?;
-    Ok(format_process_output(
-        &out,
+    run_workspace_command(
+        "context",
+        cmd_args,
         "Context executed successfully (no output).",
-    ))
+    )
 }

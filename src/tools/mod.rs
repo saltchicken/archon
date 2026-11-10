@@ -9,8 +9,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
     env,
+    ffi::OsStr,
     path::{Component, Path, PathBuf},
-    process::Output,
+    process::{Command, Output},
 };
 
 pub fn schemas() -> Vec<Value> {
@@ -77,24 +78,26 @@ pub fn validate_relative_path(raw: &str) -> Result<&Path> {
             "Security violation: path must be relative to current working directory: '{trimmed}'"
         );
     }
-    for comp in rel_path.components() {
-        match comp {
-            Component::Normal(_) | Component::CurDir => {}
-            _ => bail!("Security violation: path traversal blocked for '{trimmed}'"),
-        }
+    if rel_path
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        bail!("Security violation: path traversal blocked for '{trimmed}'");
     }
     Ok(rel_path)
 }
 
-pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
+fn resolve_workspace_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     let rel_path = validate_relative_path(raw)?;
     let cwd = workspace_root()?;
-    let target = cwd.join(rel_path);
+    Ok((cwd.clone(), cwd.join(rel_path)))
+}
 
+pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
+    let (cwd, target) = resolve_workspace_path(raw)?;
     if !target.exists() {
         bail!("Target path does not exist: '{}'", raw.trim());
     }
-
     let canon = target.canonicalize()?;
     if !canon.starts_with(&cwd) {
         bail!(
@@ -106,10 +109,7 @@ pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
 }
 
 pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
-    let rel_path = validate_relative_path(raw)?;
-    let cwd = workspace_root()?;
-    let target = cwd.join(rel_path);
-
+    let (cwd, target) = resolve_workspace_path(raw)?;
     if target.exists() {
         bail!(
             "File already exists: {}. Use edit_file instead.",
@@ -117,19 +117,27 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
         );
     }
 
-    let mut ancestor = target.parent();
-    while let Some(p) = ancestor {
-        if p.exists() {
-            let canon_parent = p.canonicalize()?;
-            if !canon_parent.starts_with(&cwd) {
-                bail!("Security violation: target directory escapes workspace via symlink");
-            }
-            break;
+    if let Some(existing_ancestor) = target.ancestors().skip(1).find(|p| p.exists()) {
+        if !existing_ancestor.canonicalize()?.starts_with(&cwd) {
+            bail!("Security violation: target directory escapes workspace via symlink");
         }
-        ancestor = p.parent();
     }
 
     Ok((cwd, target))
+}
+
+pub fn run_workspace_command<I, S>(program: &str, args: I, empty_msg: &str) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let cwd = workspace_root()?;
+    let out = Command::new(program)
+        .current_dir(&cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("Error executing {program}"))?;
+    Ok(format_process_output(&out, empty_msg))
 }
 
 pub fn format_process_output(out: &Output, empty_msg: &str) -> String {

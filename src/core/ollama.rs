@@ -18,9 +18,8 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
         .timeout(Duration::from_secs(config.ollama.status_timeout))
         .build()?;
 
-    let tags_url = format!("{}/api/tags", config.ollama.base_url);
     let resp: Value = client
-        .get(&tags_url)
+        .get(format!("{}/api/tags", config.ollama.base_url))
         .send()
         .await
         .context("Ollama server is not reachable on localhost:11434")?
@@ -35,12 +34,11 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
 
     let installed = resp["models"]
         .as_array()
-        .map(|arr| {
+        .is_some_and(|arr| {
             arr.iter()
                 .filter_map(|m| m["name"].as_str())
                 .any(|name| name == target || name == model)
-        })
-        .unwrap_or(false);
+        });
 
     if !installed {
         bail!("Model '{model}' is not installed. Run: ollama pull {model}");
@@ -60,11 +58,7 @@ pub fn build_payload(
     if !system_prompt.trim().is_empty() {
         api_msgs.push(json!({ "role": "system", "content": system_prompt }));
     }
-    for m in messages {
-        if let Ok(val) = serde_json::to_value(m) {
-            api_msgs.push(val);
-        }
-    }
+    api_msgs.extend(messages.iter().filter_map(|m| serde_json::to_value(m).ok()));
 
     let mut payload = json!({
         "model": model,
@@ -74,9 +68,7 @@ pub fn build_payload(
     });
 
     if let Some(t) = tools {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("tools".to_string(), json!(t));
-        }
+        payload["tools"] = json!(t);
     }
 
     payload
@@ -115,8 +107,8 @@ pub async fn stream_chat(
     info!("Stream connection established successfully.");
 
     let mut stream = resp.bytes_stream();
-    let mut byte_buffer: Vec<u8> = Vec::new();
-    let mut collected_tools: Vec<ToolCall> = Vec::new();
+    let mut byte_buffer = Vec::new();
+    let mut collected_tools = Vec::new();
     let mut prompt_tokens = 0;
     let mut eval_tokens = 0;
 
@@ -130,25 +122,21 @@ pub async fn stream_chat(
 
         while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = byte_buffer.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
-
-            if line.is_empty() {
-                continue;
-            }
-
-            let Ok(data) = serde_json::from_str::<Value>(&line) else {
+            let Ok(data) = serde_json::from_slice::<Value>(&line_bytes) else {
                 continue;
             };
 
-            if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+            if let Some(err) = data["error"].as_str() {
                 let _ = tx.send(EngineEvent::StreamError(err.to_string()));
                 return;
             }
 
-            if let Some(content) = data.pointer("/message/content").and_then(|v| v.as_str()) {
-                if !content.is_empty() {
-                    let _ = tx.send(EngineEvent::StreamChunk(content.to_string()));
-                }
+            if let Some(content) = data
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = tx.send(EngineEvent::StreamChunk(content.to_string()));
             }
 
             if let Some(tc_val) = data.pointer("/message/tool_calls") {
@@ -157,12 +145,9 @@ pub async fn stream_chat(
                 }
             }
 
-            if data.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-                prompt_tokens = data
-                    .get("prompt_eval_count")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                eval_tokens = data.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            if data["done"].as_bool().unwrap_or(false) {
+                prompt_tokens = data["prompt_eval_count"].as_u64().unwrap_or(0);
+                eval_tokens = data["eval_count"].as_u64().unwrap_or(0);
             }
         }
     }

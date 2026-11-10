@@ -1,4 +1,4 @@
-use crate::core::tools::ToolCall;
+use crate::core::{config::expand_tilde, tools::ToolCall};
 use anyhow::Result;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -35,12 +35,8 @@ impl ChatMessage {
 
     pub fn without_images(&self) -> Self {
         Self {
-            role: self.role.clone(),
-            content: self.content.clone(),
-            truncated: self.truncated,
             images: None,
-            image_paths: self.image_paths.clone(),
-            tool_calls: self.tool_calls.clone(),
+            ..self.clone()
         }
     }
 
@@ -48,8 +44,8 @@ impl ChatMessage {
         let count = self
             .images
             .as_ref()
-            .map(|imgs| imgs.len())
-            .or_else(|| self.image_paths.as_ref().map(|paths| paths.len()))
+            .map(Vec::len)
+            .or_else(|| self.image_paths.as_ref().map(Vec::len))
             .unwrap_or(0);
 
         Self {
@@ -78,10 +74,7 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(raw_dir: &str) -> Result<Self> {
-        let history_dir = match raw_dir.strip_prefix("~/") {
-            Some(stripped) => dirs::home_dir().unwrap_or_default().join(stripped),
-            None => PathBuf::from(raw_dir),
-        };
+        let history_dir = expand_tilde(raw_dir);
         fs::create_dir_all(&history_dir)?;
         Ok(Self { history_dir })
     }
@@ -145,11 +138,12 @@ impl SessionManager {
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
-            .filter_map(|e| {
-                let text = fs::read_to_string(e.path()).ok()?;
-                let mut data: SessionData = serde_json::from_str(&text).ok()?;
-                data.file_path = e.path();
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter_map(|path| {
+                let mut data: SessionData =
+                    serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+                data.file_path = path;
                 Some(data)
             })
             .collect();
@@ -160,11 +154,12 @@ impl SessionManager {
 
     pub fn delete(&self, path: &Path) -> Result<()> {
         if path.exists() {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if let Some(id) = stem.strip_prefix("session_") {
-                    let asset_dir = self.asset_dir(id);
-                    let _ = fs::remove_dir_all(asset_dir);
-                }
+            if let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("session_"))
+            {
+                let _ = fs::remove_dir_all(self.asset_dir(id));
             }
             fs::remove_file(path)?;
         }

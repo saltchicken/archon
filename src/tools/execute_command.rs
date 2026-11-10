@@ -1,10 +1,10 @@
 use crate::tools::{
-    format_process_output, function_schema, parse_args, validate_relative_path, workspace_root,
+    function_schema, parse_args, run_workspace_command, validate_relative_path, workspace_root,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{path::Path, process};
+use std::path::Path;
 
 #[derive(Deserialize)]
 struct ExecuteCommandArgs {
@@ -26,9 +26,7 @@ fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
     if candidate.is_empty() {
         return Ok(());
     }
-    let rel_path = validate_relative_path(candidate)?;
-
-    let joined = cwd.join(rel_path);
+    let joined = cwd.join(validate_relative_path(candidate)?);
     if joined.exists() && !joined.canonicalize()?.starts_with(cwd) {
         bail!("Security violation: argument '{candidate}' resolves outside workspace");
     }
@@ -59,10 +57,8 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
     }
 
     let cwd = workspace_root()?;
-
     for arg in rest {
         validate_arg_path(arg, &cwd)?;
-
         if let Some((_, val)) = arg.split_once('=') {
             validate_arg_path(val, &cwd)?;
         } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
@@ -70,14 +66,5 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
         }
     }
 
-    let out = process::Command::new(base)
-        .current_dir(&cwd)
-        .args(rest)
-        .output()
-        .context("Error executing command")?;
-
-    Ok(format_process_output(
-        &out,
-        "Command executed successfully (no output).",
-    ))
+    run_workspace_command(base, rest, "Command executed successfully (no output).")
 }

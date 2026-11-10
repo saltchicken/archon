@@ -52,9 +52,7 @@ impl ToolRegistry {
             match v.as_str() {
                 Some(s)
                     if s.contains('\n')
-                        || k == "search_string"
-                        || k == "replace_string"
-                        || k == "content" =>
+                        || matches!(k.as_str(), "search_string" | "replace_string" | "content") =>
                 {
                     multiline_blocks.push((k, s));
                 }
@@ -63,18 +61,16 @@ impl ToolRegistry {
             }
         }
 
-        // Sort reverse-alphabetically so `search_string` appears before `replace_string`
         multiline_blocks.sort_by(|a, b| b.0.cmp(a.0));
 
         for (k, s) in multiline_blocks {
-            let header = k.to_uppercase();
-            out.push_str(&format!("\n--- {header} ---\n{s}\n"));
+            out.push_str(&format!("\n--- {} ---\n{s}\n", k.to_uppercase()));
         }
 
         out.trim_end().to_string()
     }
 
-    pub async fn execute(&self, call: &ToolCall) -> (String, String, bool) {
+    pub async fn execute(&self, call: &ToolCall) -> (String, bool) {
         let name = call.function.name.clone();
         let args = call.function.arguments.clone();
         let allowed = self.allowed_commands.clone();
@@ -90,13 +86,12 @@ impl ToolRegistry {
 
         match res {
             Ok(mut out) => {
-                let mut truncated = false;
-                if out.len() > max_size {
-                    truncated = true;
-                    let mut truncate_at = max_size;
-                    while truncate_at > 0 && !out.is_char_boundary(truncate_at) {
-                        truncate_at -= 1;
-                    }
+                let truncated = out.len() > max_size;
+                if truncated {
+                    let truncate_at = (0..=max_size)
+                        .rev()
+                        .find(|&i| out.is_char_boundary(i))
+                        .unwrap_or(0);
                     let dropped = out.len() - truncate_at;
                     out.truncate(truncate_at);
                     out.push_str(&format!(
@@ -109,19 +104,11 @@ impl ToolRegistry {
                     name, truncated
                 );
                 debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
-                (
-                    out.clone(),
-                    format!("[Tool Result: {name}]\n{out}"),
-                    truncated,
-                )
+                (out, truncated)
             }
             Err(e) => {
                 error!("Tool '{}' failed: {}", name, e);
-                (
-                    format!("Error: {e}"),
-                    format!("[Tool Error: {name}]\n{e}"),
-                    false,
-                )
+                (format!("Error: {e}"), false)
             }
         }
     }

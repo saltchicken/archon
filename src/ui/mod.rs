@@ -1,5 +1,5 @@
 use crate::core::{
-    config::Config,
+    config::{Config, Preset},
     session::{ChatMessage, SessionData},
     workspace::ImageAttachment,
     EngineCommand, EngineEvent,
@@ -25,7 +25,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Wrap,
+        ScrollbarState, Widget, Wrap,
     },
     Frame, Terminal,
 };
@@ -149,8 +149,7 @@ impl TuiApp {
             )?;
         }
 
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         let mut term_events = EventStream::new();
 
         loop {
@@ -162,10 +161,8 @@ impl TuiApp {
                         Event::Key(key) if self.handle_key(key) => break,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         Event::Paste(text) => {
-                            for c in text.chars() {
-                                if c != '\r' {
-                                    self.insert_char(c);
-                                }
+                            for c in text.chars().filter(|&c| c != '\r') {
+                                self.insert_char(c);
                             }
                         }
                         _ => {}
@@ -224,6 +221,13 @@ impl TuiApp {
         }
     }
 
+    fn find_msg_at(&self, visual_y: usize) -> Option<(usize, bool)> {
+        self.msg_visual_ranges
+            .iter()
+            .find(|(_, start, end, _)| visual_y >= *start as usize && visual_y < *end as usize)
+            .map(|&(i, _, _, truncated)| (i, truncated))
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (x, y) = (mouse.column, mouse.row);
 
@@ -247,22 +251,10 @@ impl TuiApp {
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
-                let step = |val: u16| {
-                    if is_up {
-                        val.saturating_sub(3)
-                    } else {
-                        val.saturating_add(3)
-                    }
-                };
-
                 if !is_on_scrollbar {
-                    if let Some((i, _, _, true)) =
-                        self.msg_visual_ranges.iter().find(|(_, start, end, _)| {
-                            visual_y >= *start as usize && visual_y < *end as usize
-                        })
-                    {
-                        let cur = self.msg_scrolls.get(*i).copied().unwrap_or(0);
-                        self.msg_scrolls[*i] = if is_up {
+                    if let Some((i, true)) = self.find_msg_at(visual_y) {
+                        let cur = self.msg_scrolls.get(i).copied().unwrap_or(0);
+                        self.msg_scrolls[i] = if is_up {
                             cur.saturating_sub(3)
                         } else {
                             cur.saturating_add(3)
@@ -270,7 +262,11 @@ impl TuiApp {
                         return;
                     }
                 }
-                self.chat_scroll = step(self.chat_scroll);
+                self.chat_scroll = if is_up {
+                    self.chat_scroll.saturating_sub(3)
+                } else {
+                    self.chat_scroll.saturating_add(3)
+                };
             }
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
                 if is_on_scrollbar =>
@@ -284,12 +280,8 @@ impl TuiApp {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((i, _, _, _)) =
-                    self.msg_visual_ranges.iter().find(|(_, start, end, _)| {
-                        visual_y >= *start as usize && visual_y < *end as usize
-                    })
-                {
-                    if let Some(unfolded) = self.msg_unfolded.get_mut(*i) {
+                if let Some((i, _)) = self.find_msg_at(visual_y) {
+                    if let Some(unfolded) = self.msg_unfolded.get_mut(i) {
                         *unfolded = !*unfolded;
                     }
                 }
@@ -502,16 +494,10 @@ impl TuiApp {
             .constraints([Constraint::Min(10), Constraint::Length(1)])
             .split(f.area());
 
+        let sidebar_width = if self.sidebar_expanded { 36 } else { 0 };
         let main_panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                if self.sidebar_expanded {
-                    Constraint::Length(36)
-                } else {
-                    Constraint::Length(0)
-                },
-                Constraint::Min(40),
-            ])
+            .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(root[0]);
 
         if self.sidebar_expanded {
@@ -543,34 +529,22 @@ impl TuiApp {
             .constraints([Constraint::Length(10), Constraint::Min(6)])
             .split(area);
 
-        let preset_name = self
-            .config
-            .presets
-            .get(self.preset_idx)
-            .map(|p| p.name.as_str())
-            .unwrap_or("None");
-        let sys_name = self
-            .config
-            .system_presets
-            .get(self.sys_preset_idx)
-            .map(|p| p.name.as_str())
-            .unwrap_or("None");
+        let preset_name = preset_label(&self.config.presets, self.preset_idx);
+        let sys_name = preset_label(&self.config.system_presets, self.sys_preset_idx);
+        let tools_label = if self.enable_tools { "ON" } else { "OFF" };
+
         let settings_text = vec![
             Line::from(vec![
                 Span::raw("Model:   "),
                 Span::styled(&self.model, Style::default().fg(Color::Green)),
             ]),
             Line::from(format!("Context: {}", self.num_ctx)),
-            Line::from(format!(
-                "Tools:   {} (^T)",
-                if self.enable_tools { "ON" } else { "OFF" }
-            )),
+            Line::from(format!("Tools:   {tools_label} (^T)")),
             Line::from(format!("Preset:  {preset_name} (^P)")),
             Line::from(format!("System:  {sys_name} (^Y)")),
         ];
         f.render_widget(
-            Paragraph::new(settings_text)
-                .block(Block::default().borders(Borders::ALL).title(" Config ")),
+            Paragraph::new(settings_text).block(titled_block(" Config ")),
             chunks[0],
         );
 
@@ -588,11 +562,7 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" Images ({}) ", self.attachments.len())),
-            ),
+            List::new(items).block(titled_block(format!(" Images ({}) ", self.attachments.len()))),
             chunks[1],
         );
     }
@@ -633,8 +603,7 @@ impl TuiApp {
         let is_truncated = total_content > max_lines;
 
         if is_truncated {
-            let max_scroll = total_content.saturating_sub(max_lines);
-            *scroll = (*scroll).min(max_scroll);
+            *scroll = (*scroll).min(total_content.saturating_sub(max_lines));
             let start = *scroll;
             let end = (start + max_lines).min(total_content);
 
@@ -644,20 +613,18 @@ impl TuiApp {
                     Style::default().fg(Color::DarkGray),
                 )));
             }
-            for l in &content_lines[start..end] {
-                lines.push(Line::from(format!("  {l}")));
-            }
+            lines.extend(content_lines[start..end].iter().map(|l| Line::from(format!("  {l}"))));
             if end < total_content {
-                let remaining = total_content - end;
                 lines.push(Line::from(Span::styled(
-                    format!("    ... ({remaining} lines below - Click to unfold) ..."),
+                    format!(
+                        "    ... ({} lines below - Click to unfold) ...",
+                        total_content - end
+                    ),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
         } else {
-            for l in content_lines {
-                lines.push(Line::from(format!("  {l}")));
-            }
+            lines.extend(content_lines.iter().map(|l| Line::from(format!("  {l}"))));
         }
 
         lines.push(Line::from(""));
@@ -671,17 +638,14 @@ impl TuiApp {
             .split(area);
 
         self.chat_area = chunks[0];
-        let inner_width = chunks[0].width.saturating_sub(2).max(1);
-        let available_width = inner_width.saturating_sub(2) as usize;
+        let available_width = chunks[0].width.saturating_sub(4).max(1) as usize;
 
         if self.cached_wrap_width != available_width {
             self.cached_wrap_width = available_width;
             self.msg_wrap_cache.clear();
         }
-        while self.msg_wrap_cache.len() < self.messages.len() {
-            let idx = self.msg_wrap_cache.len();
-            self.msg_wrap_cache
-                .push(reflow_text(&self.messages[idx].content, available_width));
+        for m in &self.messages[self.msg_wrap_cache.len()..] {
+            self.msg_wrap_cache.push(reflow_text(&m.content, available_width));
         }
 
         self.msg_scrolls.resize(self.messages.len() + 1, 0);
@@ -702,11 +666,10 @@ impl TuiApp {
                 .as_ref()
                 .map(|v| format!(" [+{} img]", v.len()))
                 .unwrap_or_default();
-            let header = format!("{tag}{img_badge}");
 
             Self::render_message_block(
                 i,
-                &header,
+                &format!("{tag}{img_badge}"),
                 color,
                 m.truncated,
                 &self.msg_wrap_cache[i],
@@ -741,11 +704,9 @@ impl TuiApp {
         self.chat_scroll = self.chat_scroll.min(max_scroll);
 
         f.render_widget(
-            Paragraph::new(lines).scroll((self.chat_scroll, 0)).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Conversation "),
-            ),
+            Paragraph::new(lines)
+                .scroll((self.chat_scroll, 0))
+                .block(titled_block(" Conversation ")),
             chunks[0],
         );
 
@@ -767,10 +728,7 @@ impl TuiApp {
                 .wrap(Wrap { trim: false })
                 .scroll((input_scroll, 0))
                 .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt "),
+                    titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
                 ),
             chunks[1],
         );
@@ -783,25 +741,15 @@ impl TuiApp {
     }
 
     fn draw_file_modal(&self, f: &mut Frame) {
-        let area = centered_rect(60, 20, f.area());
-        f.render_widget(Clear, area);
-        f.render_widget(
-            Paragraph::new(format!(
-                "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
-                self.file_path_input
-            ))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Add Image File "),
-            ),
-            area,
-        );
+        let widget = Paragraph::new(format!(
+            "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
+            self.file_path_input
+        ))
+        .block(titled_block(" Add Image File "));
+        render_modal(f, 60, 20, widget);
     }
 
     fn draw_sessions_modal(&self, f: &mut Frame) {
-        let area = centered_rect(70, 60, f.area());
-        f.render_widget(Clear, area);
         let items: Vec<ListItem> = self
             .sessions
             .iter()
@@ -817,20 +765,12 @@ impl TuiApp {
             })
             .collect();
 
-        f.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "),
-            ),
-            area,
-        );
+        let widget = List::new(items)
+            .block(titled_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
+        render_modal(f, 70, 60, widget);
     }
 
     fn draw_tool_modal(&self, f: &mut Frame) {
-        let area = centered_rect(80, 75, f.area());
-        f.render_widget(Clear, area);
-
         let (preview, idx, total) = self
             .pending_tool
             .as_ref()
@@ -842,29 +782,20 @@ impl TuiApp {
 
         for line in preview.lines() {
             if line.starts_with("--- ") && line.ends_with(" ---") {
-                if line.contains("SEARCH") {
+                let header_color = if line.contains("SEARCH") {
                     section_color = Color::LightRed;
-                    lines.push(Line::from(Span::styled(
-                        line,
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )));
+                    Color::Red
                 } else if line.contains("REPLACE") || line.contains("CONTENT") {
                     section_color = Color::Cyan;
-                    lines.push(Line::from(Span::styled(
-                        line,
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+                    Color::Green
                 } else {
                     section_color = Color::White;
-                    lines.push(Line::from(Span::styled(
-                        line,
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )));
-                }
+                    Color::Cyan
+                };
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(header_color).add_modifier(Modifier::BOLD),
+                )));
             } else {
                 lines.push(Line::from(Span::styled(
                     line,
@@ -873,46 +804,57 @@ impl TuiApp {
             }
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Optional Feedback / Note:",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(format!("> {}", self.tool_feedback)));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[⏎] Approve & Run     [Esc] Decline     [↑/↓/PgUp/PgDn] Scroll",
-            Style::default().fg(Color::Yellow),
-        )));
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Optional Feedback / Note:",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("> {}", self.tool_feedback)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "[⏎] Approve & Run     [Esc] Decline     [↑/↓/PgUp/PgDn] Scroll",
+                Style::default().fg(Color::Yellow),
+            )),
+        ]);
 
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((self.tool_scroll, 0))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Yellow))
-                        .title(format!(
-                            " ⚠️ Tool Execution Approval Required ({idx}/{total}) "
-                        )),
-                ),
-            area,
-        );
+        let widget = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((self.tool_scroll, 0))
+            .block(
+                titled_block(format!(
+                    " ⚠️ Tool Execution Approval Required ({idx}/{total}) "
+                ))
+                .border_style(Style::default().fg(Color::Yellow)),
+            );
+        render_modal(f, 80, 75, widget);
     }
+}
+
+fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
+    Block::default().borders(Borders::ALL).title(title)
+}
+
+fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget: W) {
+    let area = centered_rect(percent_x, percent_y, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(widget, area);
+}
+
+fn preset_label(presets: &[Preset], idx: usize) -> &str {
+    presets.get(idx).map(|p| p.name.as_str()).unwrap_or("None")
 }
 
 fn compute_cursor_coords(text: &str, cursor_byte: usize, width: usize) -> (u16, u16) {
     if width == 0 {
         return (0, 0);
     }
-    let slice = &text[..cursor_byte.min(text.len())];
     let mut row: u16 = 0;
     let mut col: usize = 0;
 
-    for c in slice.chars() {
+    for c in text[..cursor_byte.min(text.len())].chars() {
         if c == '\n' {
             row = row.saturating_add(1);
             col = 0;
@@ -940,10 +882,25 @@ fn flush_word(
     }
     let word_w = UnicodeWidthStr::width(word_buf.as_str());
     let cur_w = UnicodeWidthStr::width(current_line.as_str());
+
     if cur_w + word_w > width && !current_line.is_empty() {
         out.push(std::mem::take(current_line));
     }
-    current_line.push_str(word_buf);
+
+    if word_w <= width {
+        current_line.push_str(word_buf);
+    } else {
+        let mut chunk_w = 0;
+        for c in word_buf.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if chunk_w + cw > width && !current_line.is_empty() {
+                out.push(std::mem::take(current_line));
+                chunk_w = 0;
+            }
+            current_line.push(c);
+            chunk_w += cw;
+        }
+    }
     word_buf.clear();
 }
 
@@ -972,48 +929,24 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
             out.push(current_line);
         }
     }
-
-    let mut chopped = Vec::new();
-    for l in out {
-        if l.is_empty() || UnicodeWidthStr::width(l.as_str()) <= width {
-            chopped.push(l);
-            continue;
-        }
-
-        let mut chunk = String::new();
-        let mut chunk_w = 0;
-        for c in l.chars() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if chunk_w + cw > width && !chunk.is_empty() {
-                chopped.push(std::mem::take(&mut chunk));
-                chunk_w = 0;
-            }
-            chunk.push(c);
-            chunk_w += cw;
-        }
-        if !chunk.is_empty() {
-            chopped.push(chunk);
-        }
-    }
-    chopped
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let vert = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vert[1])[1]
+    let split = |dir, pct, rect| {
+        let margin = (100 - pct) / 2;
+        Layout::default()
+            .direction(dir)
+            .constraints([
+                Constraint::Percentage(margin),
+                Constraint::Percentage(pct),
+                Constraint::Percentage(margin),
+            ])
+            .split(rect)[1]
+    };
+    split(
+        Direction::Horizontal,
+        percent_x,
+        split(Direction::Vertical, percent_y, r),
+    )
 }
