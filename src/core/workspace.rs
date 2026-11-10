@@ -1,12 +1,14 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use image::{ImageBuffer, ImageFormat, Rgba};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
+use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
 
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {
@@ -69,18 +71,45 @@ impl ImageWorkspace {
 
     pub fn paste_clipboard(&self) -> Result<PathBuf> {
         let out_path = self.gen_path("paste");
-        let file = fs::File::create(&out_path)?;
-        let status = Command::new("wl-paste")
-            .args(["-t", "image/png"])
-            .stdout(Stdio::from(file))
-            .stderr(Stdio::null())
-            .status()?;
 
-        if !status.success() || !Self::validate_file(&out_path) {
-            let _ = fs::remove_file(&out_path);
-            bail!("No image found in Wayland clipboard");
+        // 1. Primary path: Native Wayland protocol (wlr-data-control / ext-data-control)
+        // Ideal for Hyprland / CachyOS without requiring external binaries or XWayland.
+        if let Ok(bytes) = Self::read_wayland_clipboard_image() {
+            let img = image::load_from_memory(&bytes)
+                .context("Failed to decode image from Wayland clipboard")?;
+            img.save_with_format(&out_path, ImageFormat::Png)?;
+            return Ok(out_path);
         }
-        Ok(out_path)
+
+        // 2. Fallback path: Arboard for X11 / other desktop environments
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            if let Ok(img_data) = clipboard.get_image() {
+                let width = img_data.width as u32;
+                let height = img_data.height as u32;
+                let raw = img_data.bytes.into_owned();
+
+                if let Some(buffer) = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, raw) {
+                    buffer.save_with_format(&out_path, ImageFormat::Png)?;
+                    return Ok(out_path);
+                }
+            }
+        }
+
+        bail!("No valid image found in clipboard")
+    }
+
+    fn read_wayland_clipboard_image() -> Result<Vec<u8>> {
+        for mime in ["image/png", "image/jpeg", "image/webp", "image/bmp"] {
+            if let Ok((mut pipe, _)) =
+                get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
+            {
+                let mut buf = Vec::new();
+                if pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                    return Ok(buf);
+                }
+            }
+        }
+        bail!("No supported image MIME type in Wayland clipboard")
     }
 
     pub fn import_file(&self, src: impl AsRef<Path>) -> Result<PathBuf> {
@@ -88,7 +117,7 @@ impl ImageWorkspace {
         let img =
             image::open(src).with_context(|| format!("Cannot open image: {}", src.display()))?;
         let out_path = self.gen_path("file");
-        img.save_with_format(&out_path, image::ImageFormat::Png)?;
+        img.save_with_format(&out_path, ImageFormat::Png)?;
         Ok(out_path)
     }
 
@@ -106,9 +135,5 @@ impl ImageWorkspace {
             .unwrap_or_default()
             .as_micros();
         self.img_dir.join(format!("{prefix}_{ts}.png"))
-    }
-
-    fn validate_file(path: &Path) -> bool {
-        path.metadata().map(|m| m.len() > 0).unwrap_or(false)
     }
 }

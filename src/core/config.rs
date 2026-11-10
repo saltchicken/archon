@@ -9,9 +9,9 @@ use std::{
 };
 
 pub fn expand_tilde(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(stripped) => dirs::home_dir().unwrap_or_default().join(stripped),
-        None => PathBuf::from(path),
+    match shellexpand::full(path) {
+        Ok(expanded) => PathBuf::from(expanded.into_owned()),
+        Err(_) => PathBuf::from(shellexpand::tilde(path).into_owned()),
     }
 }
 
@@ -67,7 +67,7 @@ impl Default for AppSettings {
             max_msg_lines: 25,
             max_tool_output_size: 131072,
             history_dir: "~/.local/share/archon/sessions".into(),
-            required_commands: vec!["wl-paste".into()],
+            required_commands: Vec::new(),
             allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
                 .into_iter()
                 .map(String::from)

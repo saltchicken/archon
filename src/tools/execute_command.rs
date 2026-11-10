@@ -14,9 +14,9 @@ struct ExecuteCommandArgs {
 pub fn schema() -> Value {
     function_schema(
         "execute_command",
-        "Executes an allowed shell command. No pipes or redirects.",
+        "Executes an allowed command directly without a shell. No pipes or redirects.",
         json!({
-            "command": { "type": "string", "description": "The exact command to execute." }
+            "command": { "type": "string", "description": "The exact command and arguments to execute." }
         }),
         &["command"],
     )
@@ -27,7 +27,7 @@ fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
         return Ok(());
     }
     let joined = cwd.join(validate_relative_path(candidate)?);
-    if joined.exists() && !joined.canonicalize()?.starts_with(cwd) {
+    if joined.exists() && !dunce::canonicalize(&joined)?.starts_with(cwd) {
         bail!("Security violation: argument '{candidate}' resolves outside workspace");
     }
     Ok(())
@@ -41,13 +41,7 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
         bail!("Empty command");
     }
 
-    for bad in [";", "&", "|", "`", "$", "<", ">", "\n", "\r"] {
-        if raw_cmd.contains(bad) {
-            bail!("Forbidden shell operator '{}'", bad.escape_default());
-        }
-    }
-
-    let parts = shlex::split(raw_cmd).context("Malformed command string")?;
+    let parts = shlex::split(raw_cmd).context("Malformed command string (unclosed quotes)")?;
     let Some((base, rest)) = parts.split_first() else {
         bail!("Empty parsed command");
     };

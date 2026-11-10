@@ -64,7 +64,7 @@ pub fn function_schema(
 }
 
 pub fn workspace_root() -> Result<PathBuf> {
-    Ok(env::current_dir()?.canonicalize()?)
+    Ok(dunce::canonicalize(env::current_dir()?)?)
 }
 
 pub fn validate_relative_path(raw: &str) -> Result<&Path> {
@@ -98,7 +98,7 @@ pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     if !target.exists() {
         bail!("Target path does not exist: '{}'", raw.trim());
     }
-    let canon = target.canonicalize()?;
+    let canon = dunce::canonicalize(&target)?;
     if !canon.starts_with(&cwd) {
         bail!(
             "Security violation: target '{}' escapes workspace",
@@ -118,7 +118,7 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     }
 
     if let Some(existing_ancestor) = target.ancestors().skip(1).find(|p| p.exists()) {
-        if !existing_ancestor.canonicalize()?.starts_with(&cwd) {
+        if !dunce::canonicalize(existing_ancestor)?.starts_with(&cwd) {
             bail!("Security violation: target directory escapes workspace via symlink");
         }
     }

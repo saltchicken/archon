@@ -1,11 +1,37 @@
 use crate::core::{config::Config, session::ChatMessage, tools::ToolCall, EngineEvent};
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
+use ollama_rs::Ollama;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::{
+    codec::{FramedRead, LinesCodec},
+    io::StreamReader,
+};
 use tracing::{debug, error, info};
+
+#[derive(Deserialize)]
+struct StreamResponseChunk {
+    error: Option<String>,
+    message: Option<StreamMessageChunk>,
+    #[serde(default)]
+    done: bool,
+    #[serde(default)]
+    prompt_eval_count: u64,
+    #[serde(default)]
+    eval_count: u64,
+}
+
+#[derive(Deserialize)]
+struct StreamMessageChunk {
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+}
 
 pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
     for cmd in &config.app.required_commands {
@@ -14,17 +40,21 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
         }
     }
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(config.ollama.status_timeout))
-        .build()?;
+    let ollama = Ollama::try_new(&config.ollama.base_url)
+        .context("Invalid Ollama base_url in configuration")?;
 
-    let resp: Value = client
-        .get(format!("{}/api/tags", config.ollama.base_url))
-        .send()
-        .await
-        .context("Ollama server is not reachable on localhost:11434")?
-        .json()
-        .await?;
+    let models = tokio::time::timeout(
+        Duration::from_secs(config.ollama.status_timeout),
+        ollama.list_local_models(),
+    )
+    .await
+    .context("Timed out connecting to Ollama server")?
+    .with_context(|| {
+        format!(
+            "Ollama server is not reachable at {}",
+            config.ollama.base_url
+        )
+    })?;
 
     let target = if model.contains(':') {
         model.to_string()
@@ -32,13 +62,9 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
         format!("{model}:latest")
     };
 
-    let installed = resp["models"]
-        .as_array()
-        .is_some_and(|arr| {
-            arr.iter()
-                .filter_map(|m| m["name"].as_str())
-                .any(|name| name == target || name == model)
-        });
+    let installed = models
+        .iter()
+        .any(|m| m.name == target || m.name == model);
 
     if !installed {
         bail!("Model '{model}' is not installed. Run: ollama pull {model}");
@@ -80,7 +106,7 @@ pub async fn stream_chat(
     payload: Value,
     tx: UnboundedSender<EngineEvent>,
 ) {
-    let url = format!("{base_url}/api/chat");
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
     info!("Initiating stream request to {}", url);
     debug!(
         "Payload: {}",
@@ -106,49 +132,53 @@ pub async fn stream_chat(
 
     info!("Stream connection established successfully.");
 
-    let mut stream = resp.bytes_stream();
-    let mut byte_buffer = Vec::new();
+    let byte_stream = resp
+        .bytes_stream()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+    let stream_reader = StreamReader::new(byte_stream);
+    let mut lines = FramedRead::new(stream_reader, LinesCodec::new());
+
     let mut collected_tools = Vec::new();
     let mut prompt_tokens = 0;
     let mut eval_tokens = 0;
 
-    while let Some(chunk_res) = stream.next().await {
-        let Ok(bytes) = chunk_res else {
-            let _ = tx.send(EngineEvent::StreamError("Stream interrupted".into()));
-            return;
-        };
-
-        byte_buffer.extend_from_slice(&bytes);
-
-        while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = byte_buffer.drain(..=pos).collect();
-            let Ok(data) = serde_json::from_slice::<Value>(&line_bytes) else {
-                continue;
-            };
-
-            if let Some(err) = data["error"].as_str() {
-                let _ = tx.send(EngineEvent::StreamError(err.to_string()));
+    while let Some(line_res) = lines.next().await {
+        let line = match line_res {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Stream reading error: {}", e);
+                let _ = tx.send(EngineEvent::StreamError(format!(
+                    "Stream interrupted: {e}"
+                )));
                 return;
             }
+        };
 
-            if let Some(content) = data
-                .pointer("/message/content")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                let _ = tx.send(EngineEvent::StreamChunk(content.to_string()));
-            }
+        if line.trim().is_empty() {
+            continue;
+        }
 
-            if let Some(tc_val) = data.pointer("/message/tool_calls") {
-                if let Ok(mut calls) = serde_json::from_value::<Vec<ToolCall>>(tc_val.clone()) {
-                    collected_tools.append(&mut calls);
-                }
-            }
+        let Ok(chunk) = serde_json::from_str::<StreamResponseChunk>(&line) else {
+            continue;
+        };
 
-            if data["done"].as_bool().unwrap_or(false) {
-                prompt_tokens = data["prompt_eval_count"].as_u64().unwrap_or(0);
-                eval_tokens = data["eval_count"].as_u64().unwrap_or(0);
+        if let Some(err) = chunk.error {
+            let _ = tx.send(EngineEvent::StreamError(err));
+            return;
+        }
+
+        if let Some(mut msg) = chunk.message {
+            if !msg.content.is_empty() {
+                let _ = tx.send(EngineEvent::StreamChunk(msg.content));
             }
+            if !msg.tool_calls.is_empty() {
+                collected_tools.append(&mut msg.tool_calls);
+            }
+        }
+
+        if chunk.done {
+            prompt_tokens = chunk.prompt_eval_count;
+            eval_tokens = chunk.eval_count;
         }
     }
 

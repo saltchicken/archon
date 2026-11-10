@@ -28,7 +28,7 @@ pub fn execute(json_args: &Value) -> Result<String> {
 
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).context("Error creating parent directories")?;
-        if !parent.canonicalize()?.starts_with(&cwd) {
+        if !dunce::canonicalize(parent)?.starts_with(&cwd) {
             bail!("Security violation: created path escapes workspace");
         }
     }
