@@ -99,6 +99,7 @@ fn create_text_area() -> TextArea<'static> {
             .title(" Prompt ")
             .border_style(Style::default().fg(Color::Cyan)),
     );
+    ta.set_cursor_line_style(Style::default());
     ta
 }
 
