@@ -33,8 +33,6 @@ use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const DEFAULT_MAX_MSG_LINES: usize = 25;
-
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
     let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
@@ -575,6 +573,7 @@ impl TuiApp {
         color: Color,
         content_lines: &[String],
         is_unfolded: bool,
+        max_folded_lines: usize,
         scroll: &mut usize,
         lines: &mut Vec<Line<'static>>,
         ranges: &mut Vec<(usize, u16, u16, bool)>,
@@ -583,7 +582,7 @@ impl TuiApp {
         let max_lines = if is_unfolded {
             usize::MAX
         } else {
-            DEFAULT_MAX_MSG_LINES
+            max_folded_lines
         };
         let toggle_hint = if is_unfolded { " [Click to fold]" } else { "" };
 
@@ -673,6 +672,7 @@ impl TuiApp {
                 color,
                 &self.msg_wrap_cache[i],
                 self.msg_unfolded[i],
+                self.config.app.max_msg_lines,
                 &mut self.msg_scrolls[i],
                 &mut lines,
                 &mut self.msg_visual_ranges,
@@ -688,6 +688,7 @@ impl TuiApp {
                 Color::Yellow,
                 &stream_lines,
                 self.msg_unfolded[i],
+                self.config.app.max_msg_lines,
                 &mut self.msg_scrolls[i],
                 &mut lines,
                 &mut self.msg_visual_ranges,
