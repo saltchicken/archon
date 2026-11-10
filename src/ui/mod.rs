@@ -80,6 +80,8 @@ pub struct TuiApp {
     chat_area: Rect,
     msg_visual_ranges: Vec<(usize, u16, u16, bool)>,
 
+    sidebar_expanded: bool,
+
     modal: ActiveModal,
     file_path_input: String,
     sessions: Vec<SessionData>,
@@ -115,6 +117,7 @@ impl TuiApp {
             msg_wrap_cache: Vec::new(),
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
+            sidebar_expanded: false,
             modal: ActiveModal::None,
             file_path_input: String::new(),
             sessions: Vec::new(),
@@ -419,6 +422,7 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
+            KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
             KeyCode::Char('p') if ctrl && !self.config.presets.is_empty() => {
                 self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
                 let prompt = &self.config.presets[self.preset_idx].prompt;
@@ -491,10 +495,19 @@ impl TuiApp {
 
         let main_panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(36), Constraint::Min(40)])
+            .constraints([
+                if self.sidebar_expanded {
+                    Constraint::Length(36)
+                } else {
+                    Constraint::Length(0)
+                },
+                Constraint::Min(40),
+            ])
             .split(root[0]);
 
-        self.draw_sidebar(f, main_panes[0]);
+        if self.sidebar_expanded {
+            self.draw_sidebar(f, main_panes[0]);
+        }
         self.draw_chat_area(f, main_panes[1]);
 
         let status_style = if self.status_bar.1 {
