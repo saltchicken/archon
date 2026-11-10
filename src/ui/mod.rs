@@ -801,18 +801,26 @@ impl TuiApp {
         let mut section_color = Color::White;
 
         for line in preview.lines() {
-            if line == "--- SEARCH ---" {
-                section_color = Color::LightRed;
-                lines.push(Line::from(Span::styled(
-                    line,
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )));
-            } else if line == "+++ REPLACE +++" || line == "+++ CONTENT +++" {
-                section_color = Color::LightGreen;
-                lines.push(Line::from(Span::styled(
-                    line,
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                )));
+            if line.starts_with("--- ") && line.ends_with(" ---") {
+                if line.contains("SEARCH") {
+                    section_color = Color::LightRed;
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                } else if line.contains("REPLACE") || line.contains("CONTENT") {
+                    section_color = Color::LightGreen;
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    )));
+                } else {
+                    section_color = Color::White;
+                    lines.push(Line::from(Span::styled(
+                        line,
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )));
+                }
             } else {
                 lines.push(Line::from(Span::styled(
                     line,

@@ -2,6 +2,7 @@ pub mod context;
 pub mod create_file;
 pub mod edit_file;
 pub mod execute_command;
+pub mod read_file;
 
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -11,6 +12,27 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Output,
 };
+
+pub fn schemas() -> Vec<Value> {
+    vec![
+        context::schema(),
+        create_file::schema(),
+        edit_file::schema(),
+        execute_command::schema(),
+        read_file::schema(),
+    ]
+}
+
+pub fn execute(name: &str, args: &Value, allowed_commands: &[String]) -> Result<String> {
+    match name {
+        "context" => context::execute(args),
+        "create_file" => create_file::execute(args),
+        "edit_file" => edit_file::execute(args),
+        "execute_command" => execute_command::execute(args, allowed_commands),
+        "read_file" => read_file::execute(args),
+        _ => bail!("Unknown tool: '{name}'"),
+    }
+}
 
 pub fn parse_args<T: DeserializeOwned>(json_args: &Value, tool_name: &str) -> Result<T> {
     serde_json::from_value(json_args.clone())
