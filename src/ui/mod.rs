@@ -31,7 +31,7 @@ use ratatui::{
 };
 use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use tui_textarea::TextArea;
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
@@ -69,8 +69,7 @@ pub struct TuiApp {
     sys_preset_idx: usize,
     enable_tools: bool,
     num_ctx: u32,
-    input_buffer: String,
-    input_cursor: usize,
+    text_area: TextArea<'static>,
 
     chat_scroll: u16,
     tool_scroll: u16,
@@ -78,8 +77,6 @@ pub struct TuiApp {
 
     msg_scrolls: Vec<usize>,
     msg_unfolded: Vec<bool>,
-    cached_wrap_width: usize,
-    msg_wrap_cache: Vec<Vec<String>>,
 
     chat_area: Rect,
     msg_visual_ranges: Vec<(usize, u16, u16, bool)>,
@@ -92,6 +89,17 @@ pub struct TuiApp {
     session_idx: usize,
     pending_tool: Option<(String, usize, usize)>,
     tool_feedback: String,
+}
+
+fn create_text_area() -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Prompt ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    ta
 }
 
 impl TuiApp {
@@ -110,15 +118,12 @@ impl TuiApp {
             sys_preset_idx: 0,
             enable_tools: true,
             num_ctx,
-            input_buffer: String::new(),
-            input_cursor: 0,
+            text_area: create_text_area(),
             chat_scroll: 0,
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_scrolls: Vec::new(),
             msg_unfolded: Vec::new(),
-            cached_wrap_width: 0,
-            msg_wrap_cache: Vec::new(),
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
@@ -161,9 +166,8 @@ impl TuiApp {
                         Event::Key(key) if self.handle_key(key) => break,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         Event::Paste(text) => {
-                            for c in text.chars().filter(|&c| c != '\r') {
-                                self.insert_char(c);
-                            }
+                            let clean_text = text.replace('\r', "");
+                            self.text_area.insert_str(clean_text);
                         }
                         _ => {}
                     }
@@ -189,7 +193,6 @@ impl TuiApp {
                 self.streaming_text.clear();
                 self.msg_scrolls.clear();
                 self.msg_unfolded.clear();
-                self.msg_wrap_cache.clear();
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
@@ -290,43 +293,6 @@ impl TuiApp {
         }
     }
 
-    fn prev_char_boundary(&self) -> Option<usize> {
-        self.input_buffer[..self.input_cursor]
-            .char_indices()
-            .next_back()
-            .map(|(idx, _)| idx)
-    }
-
-    fn insert_char(&mut self, c: char) {
-        self.input_buffer.insert(self.input_cursor, c);
-        self.input_cursor += c.len_utf8();
-    }
-
-    fn move_cursor_left(&mut self) {
-        if let Some(idx) = self.prev_char_boundary() {
-            self.input_cursor = idx;
-        }
-    }
-
-    fn move_cursor_right(&mut self) {
-        if let Some(c) = self.input_buffer[self.input_cursor..].chars().next() {
-            self.input_cursor += c.len_utf8();
-        }
-    }
-
-    fn delete_prev_char(&mut self) {
-        if let Some(idx) = self.prev_char_boundary() {
-            self.input_buffer.remove(idx);
-            self.input_cursor = idx;
-        }
-    }
-
-    fn delete_next_char(&mut self) {
-        if self.input_cursor < self.input_buffer.len() {
-            self.input_buffer.remove(self.input_cursor);
-        }
-    }
-
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('q') {
@@ -404,7 +370,6 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
             KeyCode::Enter if ctrl => self.submit_prompt(),
-            KeyCode::Enter => self.insert_char('\n'),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }
@@ -428,21 +393,16 @@ impl TuiApp {
                 self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
                 let prompt = &self.config.presets[self.preset_idx].prompt;
                 if !prompt.is_empty() {
-                    self.input_buffer = prompt.clone();
-                    self.input_cursor = self.input_buffer.len();
+                    self.text_area = create_text_area();
+                    self.text_area.insert_str(prompt);
                 }
             }
             KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
             }
-            KeyCode::Left => self.move_cursor_left(),
-            KeyCode::Right => self.move_cursor_right(),
-            KeyCode::Home => self.input_cursor = 0,
-            KeyCode::End => self.input_cursor = self.input_buffer.len(),
-            KeyCode::Delete => self.delete_next_char(),
-            KeyCode::Backspace => self.delete_prev_char(),
-            KeyCode::Char(c) if !ctrl => self.insert_char(c),
-            _ => {}
+            _ => {
+                self.text_area.input(key);
+            }
         }
         false
     }
@@ -459,13 +419,13 @@ impl TuiApp {
         if self.is_streaming {
             return;
         }
-        let prompt = self.input_buffer.trim().to_string();
+        let prompt = self.text_area.lines().join("\n").trim().to_string();
         if prompt.is_empty() {
             self.status_bar = ("Prompt cannot be empty.".into(), true);
             return;
         }
-        self.input_buffer.clear();
-        self.input_cursor = 0;
+        
+        self.text_area = create_text_area();
         self.chat_scroll = u16::MAX;
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
@@ -640,19 +600,12 @@ impl TuiApp {
         self.chat_area = chunks[0];
         let available_width = chunks[0].width.saturating_sub(4).max(1) as usize;
 
-        if self.cached_wrap_width != available_width {
-            self.cached_wrap_width = available_width;
-            self.msg_wrap_cache.clear();
-        }
-        for m in &self.messages[self.msg_wrap_cache.len()..] {
-            self.msg_wrap_cache.push(reflow_text(&m.content, available_width));
-        }
-
         self.msg_scrolls.resize(self.messages.len() + 1, 0);
         self.msg_unfolded.resize(self.messages.len() + 1, false);
         self.msg_visual_ranges.clear();
 
         let mut lines = Vec::new();
+        let options = textwrap::Options::new(available_width).break_words(true);
 
         for (i, m) in self.messages.iter().enumerate() {
             let (tag, color) = match m.role.as_str() {
@@ -667,12 +620,27 @@ impl TuiApp {
                 .map(|v| format!(" [+{} img]", v.len()))
                 .unwrap_or_default();
 
+            let wrapped_content: Vec<String> = m
+                .content
+                .lines()
+                .flat_map(|line| {
+                    if line.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        textwrap::wrap(line, &options)
+                            .into_iter()
+                            .map(|c| c.into_owned())
+                            .collect()
+                    }
+                })
+                .collect();
+
             Self::render_message_block(
                 i,
                 &format!("{tag}{img_badge}"),
                 color,
                 m.truncated,
-                &self.msg_wrap_cache[i],
+                &wrapped_content,
                 self.msg_unfolded[i],
                 self.config.app.max_msg_lines,
                 &mut self.msg_scrolls[i],
@@ -683,7 +651,21 @@ impl TuiApp {
 
         if self.is_streaming {
             let i = self.messages.len();
-            let stream_lines = reflow_text(&self.streaming_text, available_width);
+            let stream_lines: Vec<String> = self
+                .streaming_text
+                .lines()
+                .flat_map(|line| {
+                    if line.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        textwrap::wrap(line, &options)
+                            .into_iter()
+                            .map(|c| c.into_owned())
+                            .collect()
+                    }
+                })
+                .collect();
+                
             Self::render_message_block(
                 i,
                 "ARCHON (streaming...)",
@@ -717,27 +699,7 @@ impl TuiApp {
             ScrollbarState::new(max_scroll as usize).position(self.chat_scroll as usize);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
-        let prompt_inner_width = chunks[1].width.saturating_sub(2).max(1) as usize;
-        let prompt_inner_height = chunks[1].height.saturating_sub(2).max(1);
-        let (cursor_row, cursor_col) =
-            compute_cursor_coords(&self.input_buffer, self.input_cursor, prompt_inner_width);
-        let input_scroll = cursor_row.saturating_sub(prompt_inner_height.saturating_sub(1));
-
-        f.render_widget(
-            Paragraph::new(self.input_buffer.as_str())
-                .wrap(Wrap { trim: false })
-                .scroll((input_scroll, 0))
-                .block(
-                    titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
-                ),
-            chunks[1],
-        );
-
-        if self.modal == ActiveModal::None {
-            let cx = chunks[1].x + 1 + cursor_col.min(chunks[1].width.saturating_sub(3));
-            let cy = chunks[1].y + 1 + (cursor_row - input_scroll);
-            f.set_cursor_position(Position::new(cx, cy));
-        }
+        f.render_widget(&self.text_area, chunks[1]);
     }
 
     fn draw_file_modal(&self, f: &mut Frame) {
@@ -845,91 +807,6 @@ fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget
 
 fn preset_label(presets: &[Preset], idx: usize) -> &str {
     presets.get(idx).map(|p| p.name.as_str()).unwrap_or("None")
-}
-
-fn compute_cursor_coords(text: &str, cursor_byte: usize, width: usize) -> (u16, u16) {
-    if width == 0 {
-        return (0, 0);
-    }
-    let mut row: u16 = 0;
-    let mut col: usize = 0;
-
-    for c in text[..cursor_byte.min(text.len())].chars() {
-        if c == '\n' {
-            row = row.saturating_add(1);
-            col = 0;
-        } else {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if col + cw > width {
-                row = row.saturating_add(1);
-                col = cw;
-            } else {
-                col += cw;
-            }
-        }
-    }
-    (row, col as u16)
-}
-
-fn flush_word(
-    out: &mut Vec<String>,
-    current_line: &mut String,
-    word_buf: &mut String,
-    width: usize,
-) {
-    if word_buf.is_empty() {
-        return;
-    }
-    let word_w = UnicodeWidthStr::width(word_buf.as_str());
-    let cur_w = UnicodeWidthStr::width(current_line.as_str());
-
-    if cur_w + word_w > width && !current_line.is_empty() {
-        out.push(std::mem::take(current_line));
-    }
-
-    if word_w <= width {
-        current_line.push_str(word_buf);
-    } else {
-        let mut chunk_w = 0;
-        for c in word_buf.chars() {
-            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-            if chunk_w + cw > width && !current_line.is_empty() {
-                out.push(std::mem::take(current_line));
-                chunk_w = 0;
-            }
-            current_line.push(c);
-            chunk_w += cw;
-        }
-    }
-    word_buf.clear();
-}
-
-fn reflow_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return text.lines().map(String::from).collect();
-    }
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            out.push(String::new());
-            continue;
-        }
-
-        let mut current_line = String::new();
-        let mut word_buf = String::new();
-
-        for c in line.chars() {
-            word_buf.push(c);
-            if c.is_whitespace() {
-                flush_word(&mut out, &mut current_line, &mut word_buf, width);
-            }
-        }
-        flush_word(&mut out, &mut current_line, &mut word_buf, width);
-        if !current_line.is_empty() {
-            out.push(current_line);
-        }
-    }
-    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
