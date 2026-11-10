@@ -1,6 +1,10 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::process;
+use std::{
+    env,
+    path::{Component, Path},
+    process,
+};
 
 pub fn schema() -> Value {
     json!({
@@ -19,6 +23,32 @@ pub fn schema() -> Value {
     })
 }
 
+fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
+    if candidate.is_empty() {
+        return Ok(());
+    }
+    let path = Path::new(candidate);
+    if path.is_absolute() {
+        bail!("Absolute path blocked in argument '{}'", candidate);
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("Path traversal ('..') blocked in argument '{}'", candidate);
+    }
+
+    // If the argument resolves to an existing filesystem entry, ensure it doesn't symlink outside workspace
+    let joined = cwd.join(path);
+    if joined.exists() {
+        let canon = joined.canonicalize()?;
+        if !canon.starts_with(cwd) {
+            bail!(
+                "Security violation: argument '{}' resolves outside workspace",
+                candidate
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String> {
     let raw_cmd = json_args
         .get("command")
@@ -30,9 +60,9 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
         bail!("Empty command");
     }
 
-    for bad in [";", "&", "|", "`", "$", "<", ">"] {
+    for bad in [";", "&", "|", "`", "$", "<", ">", "\n", "\r"] {
         if raw_cmd.contains(bad) {
-            bail!("Forbidden shell operator '{}'", bad);
+            bail!("Forbidden shell operator '{}'", bad.escape_default());
         }
     }
 
@@ -48,13 +78,21 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
         bail!("Command '{}' is not in allowlist", base);
     }
 
+    let cwd = env::current_dir()?.canonicalize()?;
+
     for arg in rest {
-        if arg.starts_with('/') || arg.contains("..") {
-            bail!("Path traversal blocked for argument '{}'", arg);
+        validate_arg_path(arg, &cwd)?;
+
+        // Also inspect inline flag values like `--file=/etc/passwd` or `-f../secret`
+        if let Some((_, val)) = arg.split_once('=') {
+            validate_arg_path(val, &cwd)?;
+        } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
+            validate_arg_path(&arg[2..], &cwd)?;
         }
     }
 
     let out = process::Command::new(base)
+        .current_dir(&cwd)
         .args(rest)
         .output()
         .context("Error executing command")?;

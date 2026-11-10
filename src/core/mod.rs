@@ -5,10 +5,13 @@ pub mod tools;
 pub mod workspace;
 
 use config::Config;
+use reqwest::Client;
 use session::{ChatMessage, SessionData, SessionManager};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -71,10 +74,13 @@ pub enum EngineEvent {
 pub struct CoreEngine {
     model: String,
     config: Config,
-    workspace: ImageWorkspace,
-    sessions: SessionManager,
+    client: Client,
+    workspace: Arc<ImageWorkspace>,
+    sessions: Arc<SessionManager>,
     tools: ToolRegistry,
     session_id: String,
+    active_system_prompt: String,
+    active_num_ctx: u32,
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
@@ -90,16 +96,25 @@ impl CoreEngine {
         config: Config,
         tx: UnboundedSender<EngineEvent>,
     ) -> anyhow::Result<Self> {
-        let workspace = ImageWorkspace::new()?;
-        let sessions = SessionManager::new(&config.app.history_dir)?;
+        let workspace = Arc::new(ImageWorkspace::new()?);
+        let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
         let tools = ToolRegistry::new(&config);
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(config.ollama.status_timeout.max(5)))
+            .read_timeout(Duration::from_secs(config.ollama.chat_timeout))
+            .build()?;
+        let active_num_ctx = config.app.default_context;
+
         Ok(Self {
             model,
             config,
+            client,
             workspace,
             sessions,
             tools,
             session_id: SessionManager::new_id(),
+            active_system_prompt: String::new(),
+            active_num_ctx,
             messages: Vec::new(),
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
@@ -153,25 +168,43 @@ impl CoreEngine {
     ) {
         match cmd {
             EngineCommand::PasteClipboard => {
-                match self.workspace.paste_clipboard() {
-                    Ok(_) => self.notify("Image pasted from clipboard.", false),
-                    Err(e) => self.notify(format!("{e}"), true),
+                let ws = Arc::clone(&self.workspace);
+                let res = tokio::task::spawn_blocking(move || {
+                    let paste_res = ws.paste_clipboard();
+                    let list = ws.list_attachments();
+                    (paste_res, list)
+                })
+                .await;
+
+                if let Ok((paste_res, list)) = res {
+                    match paste_res {
+                        Ok(_) => self.notify("Image pasted from clipboard.", false),
+                        Err(e) => self.notify(format!("{e}"), true),
+                    }
+                    let _ = self.tx.send(EngineEvent::WorkspaceUpdated(list));
                 }
-                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(
-                    self.workspace.list_attachments(),
-                ));
             }
             EngineCommand::ImportFile(path) => {
-                match self.workspace.import_file(&path) {
-                    Ok(_) => self.notify(format!("Added {}", path.display()), false),
-                    Err(e) => self.notify(format!("{e}"), true),
+                let ws = Arc::clone(&self.workspace);
+                let path_clone = path.clone();
+                let res = tokio::task::spawn_blocking(move || {
+                    let import_res = ws.import_file(&path_clone);
+                    let list = ws.list_attachments();
+                    (import_res, list)
+                })
+                .await;
+
+                if let Ok((import_res, list)) = res {
+                    match import_res {
+                        Ok(_) => self.notify(format!("Added {}", path.display()), false),
+                        Err(e) => self.notify(format!("{e}"), true),
+                    }
+                    let _ = self.tx.send(EngineEvent::WorkspaceUpdated(list));
                 }
-                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(
-                    self.workspace.list_attachments(),
-                ));
             }
             EngineCommand::ClearImages => {
-                self.workspace.clear();
+                let ws = Arc::clone(&self.workspace);
+                let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
                 self.notify("Cleared attached images.", false);
                 let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
             }
@@ -181,10 +214,23 @@ impl CoreEngine {
                 num_ctx,
                 enable_tools,
             } => {
+                self.active_system_prompt = system_prompt.clone();
+                self.active_num_ctx = num_ctx;
+
+                let ws = Arc::clone(&self.workspace);
+                let attachments =
+                    tokio::task::spawn_blocking(move || ws.list_attachments())
+                        .await
+                        .unwrap_or_default();
+
                 let mut new_imgs = Vec::new();
-                for att in self.workspace.list_attachments() {
+                for att in attachments {
                     if !self.sent_images.contains(&att.path) {
-                        if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
+                        let p = att.path.clone();
+                        if let Ok(Ok(b64)) =
+                            tokio::task::spawn_blocking(move || ImageWorkspace::encode_image(&p))
+                                .await
+                        {
                             new_imgs.push(b64);
                             self.sent_images.insert(att.path);
                         }
@@ -202,15 +248,14 @@ impl CoreEngine {
                     tool_calls: None,
                 });
 
-                let _ = self.sessions.save(
-                    &self.session_id,
-                    &self.model,
+                self.save_session_bg();
+                self.emit_chat();
+                self.spawn_ollama_turn(
                     &system_prompt,
                     num_ctx,
-                    &self.messages,
+                    enable_tools,
+                    internal_tx.clone(),
                 );
-                self.emit_chat();
-                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone());
             }
             EngineCommand::CancelStream => {
                 if let Some(handle) = self.active_task.take() {
@@ -218,10 +263,14 @@ impl CoreEngine {
                     if !self.stream_buffer.trim().is_empty() {
                         self.messages.push(ChatMessage {
                             role: "assistant".into(),
-                            content: format!("{}\n\n*[Generation cancelled]*", self.stream_buffer),
+                            content: format!(
+                                "{}\n\n*[Generation cancelled]*",
+                                self.stream_buffer
+                            ),
                             images: None,
                             tool_calls: None,
                         });
+                        self.save_session_bg();
                     }
                     self.stream_buffer.clear();
                     self.emit_chat();
@@ -235,6 +284,9 @@ impl CoreEngine {
                 num_ctx,
                 enable_tools,
             } => {
+                self.active_system_prompt = system_prompt.clone();
+                self.active_num_ctx = num_ctx;
+
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
                 };
@@ -269,13 +321,7 @@ impl CoreEngine {
                     tool_calls: None,
                 });
 
-                let _ = self.sessions.save(
-                    &self.session_id,
-                    &self.model,
-                    &system_prompt,
-                    num_ctx,
-                    &self.messages,
-                );
+                self.save_session_bg();
                 self.emit_chat();
 
                 if self.pending_tools.is_empty() {
@@ -291,9 +337,10 @@ impl CoreEngine {
                 }
             }
             EngineCommand::RefreshSessions => {
-                let _ = self
-                    .tx
-                    .send(EngineEvent::SessionsListed(self.sessions.list()));
+                let sessions = Arc::clone(&self.sessions);
+                if let Ok(list) = tokio::task::spawn_blocking(move || sessions.list()).await {
+                    let _ = self.tx.send(EngineEvent::SessionsListed(list));
+                }
             }
             EngineCommand::LoadSession(data) => {
                 if let Some(h) = self.active_task.take() {
@@ -302,6 +349,8 @@ impl CoreEngine {
                 self.pending_tools.clear();
                 self.pending_batch_total = 0;
                 self.session_id = data.id;
+                self.active_system_prompt = data.system_prompt;
+                self.active_num_ctx = data.num_ctx;
                 self.messages = data.messages;
                 self.sent_images.clear();
                 self.emit_chat();
@@ -316,10 +365,15 @@ impl CoreEngine {
                 }
             }
             EngineCommand::DeleteSession(path) => {
-                let _ = self.sessions.delete(&path);
-                let _ = self
-                    .tx
-                    .send(EngineEvent::SessionsListed(self.sessions.list()));
+                let sessions = Arc::clone(&self.sessions);
+                if let Ok(list) = tokio::task::spawn_blocking(move || {
+                    let _ = sessions.delete(&path);
+                    sessions.list()
+                })
+                .await
+                {
+                    let _ = self.tx.send(EngineEvent::SessionsListed(list));
+                }
             }
             EngineCommand::ResetChat => {
                 if let Some(h) = self.active_task.take() {
@@ -362,13 +416,7 @@ impl CoreEngine {
                             Some(tool_calls.clone())
                         },
                     });
-                    let _ = self.sessions.save(
-                        &self.session_id,
-                        &self.model,
-                        "",
-                        self.config.app.default_context,
-                        &self.messages,
-                    );
+                    self.save_session_bg();
                 }
 
                 self.emit_chat();
@@ -391,6 +439,28 @@ impl CoreEngine {
                 let _ = self.tx.send(other);
             }
         }
+    }
+
+    fn save_session_bg(&self) {
+        let sessions = Arc::clone(&self.sessions);
+        let id = self.session_id.clone();
+        let model = self.model.clone();
+        let sys = self.active_system_prompt.clone();
+        let ctx = self.active_num_ctx;
+        let msgs: Vec<ChatMessage> = self
+            .messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                images: None,
+                tool_calls: m.tool_calls.clone(),
+            })
+            .collect();
+
+        tokio::task::spawn_blocking(move || {
+            let _ = sessions.save(&id, &model, &sys, ctx, &msgs);
+        });
     }
 
     fn spawn_ollama_turn(
@@ -416,17 +486,32 @@ impl CoreEngine {
 
         let _ = self.tx.send(EngineEvent::StreamStarted);
 
+        let client = self.client.clone();
         let url = self.config.ollama.base_url.clone();
-        let timeout = self.config.ollama.chat_timeout;
 
         self.active_task = Some(tokio::spawn(async move {
-            ollama::stream_chat(url, timeout, payload, internal_tx).await;
+            ollama::stream_chat(client, url, payload, internal_tx).await;
         }));
     }
 
     fn emit_chat(&self) {
+        // Strip heavy base64 strings when sending messages to the UI
+        let ui_messages: Vec<ChatMessage> = self
+            .messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                images: m
+                    .images
+                    .as_ref()
+                    .map(|imgs| vec![String::new(); imgs.len()]),
+                tool_calls: m.tool_calls.clone(),
+            })
+            .collect();
+
         let _ = self.tx.send(EngineEvent::ChatUpdated {
-            messages: self.messages.clone(),
+            messages: ui_messages,
         });
     }
 

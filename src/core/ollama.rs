@@ -82,22 +82,11 @@ pub fn build_payload(
 }
 
 pub async fn stream_chat(
+    client: Client,
     base_url: String,
-    timeout_secs: u64,
     payload: Value,
     tx: UnboundedSender<EngineEvent>,
 ) {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(EngineEvent::StreamError(e.to_string()));
-            return;
-        }
-    };
-
     let resp = match client
         .post(format!("{base_url}/api/chat"))
         .json(&payload)
@@ -119,7 +108,7 @@ pub async fn stream_chat(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    let mut byte_buffer: Vec<u8> = Vec::new();
     let mut collected_tools: Vec<ToolCall> = Vec::new();
     let mut prompt_tokens = 0;
     let mut eval_tokens = 0;
@@ -130,11 +119,11 @@ pub async fn stream_chat(
             return;
         };
 
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        byte_buffer.extend_from_slice(&bytes);
 
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim().to_string();
-            buffer.drain(..=pos);
+        while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = byte_buffer.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
 
             if line.is_empty() {
                 continue;

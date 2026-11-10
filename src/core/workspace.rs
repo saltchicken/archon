@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::GenericImageView;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -50,13 +49,13 @@ impl ImageWorkspace {
         paths
             .into_iter()
             .filter_map(|path| {
-                let img = image::open(&path).ok()?;
+                let dimensions = image::image_dimensions(&path).ok()?;
                 let size_kb = path.metadata().ok()?.len() / 1024;
                 let name = path.file_name()?.to_string_lossy().to_string();
                 Some(ImageAttachment {
                     path,
                     name,
-                    dimensions: img.dimensions(),
+                    dimensions,
                     size_kb: size_kb.max(1),
                 })
             })
@@ -104,7 +103,7 @@ impl ImageWorkspace {
     fn gen_path(&self, prefix: &str) -> PathBuf {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_micros();
         self.img_dir.join(format!("{prefix}_{ts}.png"))
     }

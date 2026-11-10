@@ -1,13 +1,16 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs,
+    path::{Component, Path, PathBuf},
+};
 
 pub fn schema() -> Value {
     json!({
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit a file by replacing an exact search string with a replacement string.",
+            "description": "Edit a file by replacing an exact, unique search string with a replacement string.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -22,14 +25,28 @@ pub fn schema() -> Value {
 }
 
 fn resolve_secure_path(rel: &str) -> Result<PathBuf> {
-    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
+    let trimmed = rel.trim();
+    if trimmed.is_empty() {
+        bail!("Security violation: path must be non-empty and relative to current working directory");
+    }
+
+    let rel_path = Path::new(trimmed);
+    if rel_path.is_absolute() {
         bail!("Security violation: path must be relative to current working directory");
     }
+
+    for comp in rel_path.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => bail!("Security violation: path traversal is not allowed"),
+        }
+    }
+
     let cwd = env::current_dir()?.canonicalize()?;
-    let target = cwd.join(rel);
+    let target = cwd.join(rel_path);
 
     if !target.exists() {
-        bail!("File not found: {}", rel);
+        bail!("File not found: {}", trimmed);
     }
 
     let canon = target.canonicalize()?;
@@ -53,11 +70,23 @@ pub fn execute(json_args: &Value) -> Result<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    if search_str.is_empty() {
+        bail!("search_string cannot be empty");
+    }
+
     let target_path = resolve_secure_path(path_str)?;
     let content = fs::read_to_string(&target_path).context("Error reading file")?;
 
-    if !content.contains(search_str) {
+    let match_count = content.matches(search_str).count();
+    if match_count == 0 {
         bail!("Exact search_string not found in {}", path_str);
+    }
+    if match_count > 1 {
+        bail!(
+            "search_string matched {} times in {}. Provide more surrounding context to make it unique.",
+            match_count,
+            path_str
+        );
     }
 
     let updated = content.replacen(search_str, replace_str, 1);

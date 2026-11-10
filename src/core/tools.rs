@@ -1,10 +1,10 @@
 use crate::core::config::Config;
-use crate::tools::{context, edit_file, execute_command};
+use crate::tools::{context, create_file, edit_file, execute_command};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashSet, env, fs, path::PathBuf};
-use tokio::process::Command;
+use std::{collections::HashSet, env, fs, path::PathBuf, process::Stdio};
+use tokio::{io::AsyncWriteExt, process::Command};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -19,12 +19,16 @@ pub struct ToolFunction {
 
 pub struct ToolRegistry {
     allowed_commands: Vec<String>,
+    cached_schemas: Vec<Value>,
 }
 
 impl ToolRegistry {
     pub fn new(config: &Config) -> Self {
+        let allowed_commands = config.app.allowed_commands.clone();
+        let cached_schemas = Self::discover_schemas();
         Self {
-            allowed_commands: config.app.allowed_commands.clone(),
+            allowed_commands,
+            cached_schemas,
         }
     }
 
@@ -47,6 +51,7 @@ impl ToolRegistry {
     pub fn builtin_schema(name: &str) -> Option<Value> {
         match name {
             "context" => Some(context::schema()),
+            "create_file" => Some(create_file::schema()),
             "edit_file" => Some(edit_file::schema()),
             "execute_command" => Some(execute_command::schema()),
             _ => None,
@@ -60,18 +65,19 @@ impl ToolRegistry {
     ) -> Option<Result<String>> {
         match name {
             "context" => Some(context::execute(args)),
+            "create_file" => Some(create_file::execute(args)),
             "edit_file" => Some(edit_file::execute(args)),
             "execute_command" => Some(execute_command::execute(args, allowed_commands)),
             _ => None,
         }
     }
 
-    pub fn schemas(&self) -> Vec<Value> {
+    fn discover_schemas() -> Vec<Value> {
         let mut schemas = Vec::new();
         let mut loaded_tools = HashSet::new();
 
         // 1. Load built-in compiled Rust tools directly from memory
-        for name in ["context", "edit_file", "execute_command"] {
+        for name in ["context", "create_file", "edit_file", "execute_command"] {
             if let Some(schema) = Self::builtin_schema(name) {
                 schemas.push(schema);
                 loaded_tools.insert(name.to_string());
@@ -101,13 +107,14 @@ impl ToolRegistry {
                         .to_string_lossy()
                         .to_string();
 
-                    let (base_name, is_python) = if let Some(stripped) = file_name.strip_suffix(".py") {
-                        (stripped.to_string(), true)
-                    } else if let Some(stripped) = file_name.strip_suffix(".exe") {
-                        (stripped.to_string(), false)
-                    } else {
-                        (file_name.clone(), false)
-                    };
+                    let (base_name, is_python) =
+                        if let Some(stripped) = file_name.strip_suffix(".py") {
+                            (stripped.to_string(), true)
+                        } else if let Some(stripped) = file_name.strip_suffix(".exe") {
+                            (stripped.to_string(), false)
+                        } else {
+                            (file_name.clone(), false)
+                        };
 
                     if loaded_tools.contains(&base_name) {
                         continue;
@@ -135,6 +142,10 @@ impl ToolRegistry {
             }
         }
         schemas
+    }
+
+    pub fn schemas(&self) -> Vec<Value> {
+        self.cached_schemas.clone()
     }
 
     pub fn format_approval(&self, call: &ToolCall) -> String {
@@ -213,7 +224,6 @@ impl ToolRegistry {
     ) -> Result<String> {
         let cwd = env::current_dir()?;
 
-        // Pass configuration context directly inside a JSON envelope instead of environment variables
         let envelope = json!({
             "arguments": args,
             "context": {
@@ -231,9 +241,18 @@ impl ToolRegistry {
             Command::new(bin_path)
         };
 
-        cmd.current_dir(cwd).arg(&payload_json);
+        // Pass payload over stdin to avoid OS ARG_MAX limits on large file contents
+        cmd.current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        let out = cmd.output().await?;
+        let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(payload_json.as_bytes()).await?;
+        }
+
+        let out = child.wait_with_output().await?;
 
         let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
         if !out.stderr.is_empty() {

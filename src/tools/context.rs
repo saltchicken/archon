@@ -1,6 +1,10 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::process;
+use std::{
+    env,
+    path::{Component, Path},
+    process,
+};
 
 pub fn schema() -> Value {
     json!({
@@ -25,12 +29,29 @@ pub fn execute(json_args: &Value) -> Result<String> {
         .unwrap_or("")
         .trim();
 
-    if target.starts_with('/') || target.contains("..") {
-        bail!("Path traversal blocked for target '{}'", target);
-    }
-
+    let cwd = env::current_dir()?.canonicalize()?;
     let mut cmd = process::Command::new("context");
+    cmd.current_dir(&cwd);
+
     if !target.is_empty() {
+        let rel_path = Path::new(target);
+        if rel_path.is_absolute() {
+            bail!("Path traversal blocked for target '{}'", target);
+        }
+        for comp in rel_path.components() {
+            match comp {
+                Component::Normal(_) | Component::CurDir => {}
+                _ => bail!("Path traversal blocked for target '{}'", target),
+            }
+        }
+        let resolved = cwd.join(rel_path);
+        if !resolved.exists() {
+            bail!("Target path does not exist: '{}'", target);
+        }
+        let canon = resolved.canonicalize()?;
+        if !canon.starts_with(&cwd) {
+            bail!("Security violation: target '{}' escapes workspace", target);
+        }
         cmd.arg(target);
     }
 

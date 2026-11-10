@@ -19,11 +19,11 @@ SCHEMA = {
 }
 
 def resolve_secure_path(rel, workspace_root):
-    if not rel or rel.startswith('/') or '..' in rel:
+    if not rel or os.path.isabs(rel):
         raise ValueError("Security violation: path must be relative to current working directory")
-    cwd = os.path.abspath(workspace_root)
-    target = os.path.abspath(os.path.join(cwd, rel))
-    if not target.startswith(cwd):
+    cwd = os.path.realpath(workspace_root)
+    target = os.path.realpath(os.path.join(cwd, rel))
+    if os.path.commonpath([cwd, target]) != cwd or target == cwd:
         raise ValueError("Security violation: path escapes workspace")
     return target
 
@@ -32,12 +32,13 @@ def main():
         print(json.dumps(SCHEMA))
         sys.exit(0)
 
-    if len(sys.argv) < 2:
+    raw_input = sys.argv[1] if len(sys.argv) >= 2 else sys.stdin.read()
+    if not raw_input.strip():
         print("Error: Missing JSON arguments", file=sys.stderr)
         sys.exit(1)
 
-    payload = json.loads(sys.argv[1])
-    
+    payload = json.loads(raw_input)
+
     # Unpack the JSON envelope (with fallback for direct arguments)
     if isinstance(payload, dict) and "arguments" in payload and "context" in payload:
         args = payload["arguments"]
@@ -55,14 +56,14 @@ def main():
         if os.path.exists(target_path):
             print("Error: File already exists. Use edit_file instead.", file=sys.stderr)
             sys.exit(1)
-            
+
         parent = os.path.dirname(target_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-            
+
         with open(target_path, "w", encoding="utf-8") as f:
             f.write(content)
-            
+
         print(f"Successfully created {path_str}")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

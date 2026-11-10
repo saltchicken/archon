@@ -12,12 +12,15 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use futures_util::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -28,6 +31,7 @@ use ratatui::{
 };
 use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(PartialEq, Clone, Copy)]
 enum ActiveModal {
@@ -53,15 +57,18 @@ pub struct TuiApp {
     enable_tools: bool,
     num_ctx: u32,
     input_buffer: String,
+    input_cursor: usize, // Byte index into input_buffer
 
     // Global scrolling
     chat_scroll: u16,
     tool_scroll: u16,
     total_chat_lines: u16,
 
-    // Per-message internal scrolling state
+    // Per-message internal scrolling & reflow cache
     msg_scrolls: Vec<usize>,
     msg_unfolded: Vec<bool>,
+    cached_wrap_width: usize,
+    msg_wrap_cache: Vec<Vec<String>>,
 
     // Mouse tracking UI math
     chat_area: Rect,
@@ -92,11 +99,14 @@ impl TuiApp {
             enable_tools: true,
             num_ctx,
             input_buffer: String::new(),
+            input_cursor: 0,
             chat_scroll: 0,
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_scrolls: Vec::new(),
             msg_unfolded: Vec::new(),
+            cached_wrap_width: 0,
+            msg_wrap_cache: Vec::new(),
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             modal: ActiveModal::None,
@@ -111,15 +121,19 @@ impl TuiApp {
     pub async fn run(mut self, mut ev_rx: UnboundedReceiver<EngineEvent>) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        
-        // Enable mouse capture and Kitty keyboard enhancement during initialization
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )?;
-        
+
+        let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+        if keyboard_enhanced {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                EnableMouseCapture,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        } else {
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        }
+
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         let mut term_events = EventStream::new();
@@ -138,9 +152,7 @@ impl TuiApp {
                         Ok(Event::Mouse(mouse)) => {
                             self.handle_mouse(mouse);
                         }
-                        Ok(Event::Resize(_, _)) => {
-                            // Automatically loop around and redraw without crashing
-                        }
+                        Ok(Event::Resize(_, _)) => {}
                         _ => {}
                     }
                 }
@@ -152,13 +164,20 @@ impl TuiApp {
         }
 
         disable_raw_mode()?;
-        // Gracefully clean up the Kitty keyboard protocol
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            PopKeyboardEnhancementFlags
-        )?;
+        if keyboard_enhanced {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                PopKeyboardEnhancementFlags
+            )?;
+        } else {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+        }
         Ok(())
     }
 
@@ -174,6 +193,7 @@ impl TuiApp {
                 self.streaming_text.clear();
                 self.msg_scrolls.clear();
                 self.msg_unfolded.clear();
+                self.msg_wrap_cache.clear();
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
@@ -182,7 +202,7 @@ impl TuiApp {
                     "Streaming response from Ollama... (Esc to cancel)".into(),
                     false,
                 );
-                self.chat_scroll = u16::MAX; // Auto-scroll down on new streams
+                self.chat_scroll = u16::MAX;
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
             EngineEvent::StreamDone { .. } | EngineEvent::StreamError(_) => {
@@ -209,7 +229,6 @@ impl TuiApp {
         let x = mouse.column;
         let y = mouse.row;
 
-        // Active modal mouse scrolling
         if matches!(self.modal, ActiveModal::ToolApproval) {
             if mouse.kind == MouseEventKind::ScrollUp {
                 self.tool_scroll = self.tool_scroll.saturating_sub(3);
@@ -219,20 +238,17 @@ impl TuiApp {
             return;
         }
 
-        // Check if mouse is hovering over the main chat box
         if x >= self.chat_area.x
             && x < self.chat_area.x + self.chat_area.width
             && y >= self.chat_area.y
             && y < self.chat_area.y + self.chat_area.height
         {
-            // Designate the rightmost 2 columns as the dedicated "Global Scrollbar Area"
             let is_on_scrollbar = x >= self.chat_area.x + self.chat_area.width.saturating_sub(2);
 
             if mouse.kind == MouseEventKind::ScrollUp || mouse.kind == MouseEventKind::ScrollDown {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
 
                 if is_on_scrollbar {
-                    // Force global scroll when on the right edge
                     if is_up {
                         self.chat_scroll = self.chat_scroll.saturating_sub(3);
                     } else {
@@ -244,7 +260,6 @@ impl TuiApp {
 
                     let mut scrolled_internal = false;
                     for (i, start, end, is_truncated) in &self.msg_visual_ranges {
-                        // Check which specific message we are hovering over
                         if visual_y >= *start as usize && visual_y < *end as usize {
                             if *is_truncated {
                                 let current = *self.msg_scrolls.get(*i).unwrap_or(&0);
@@ -259,7 +274,6 @@ impl TuiApp {
                         }
                     }
 
-                    // Fall back to main chat scroll if not hovering over a truncated message
                     if !scrolled_internal {
                         if is_up {
                             self.chat_scroll = self.chat_scroll.saturating_sub(3);
@@ -273,7 +287,6 @@ impl TuiApp {
                 MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
             ) {
                 if is_on_scrollbar {
-                    // Handle clicking and dragging the scrollbar physically
                     let view_height = self.chat_area.height.saturating_sub(2);
                     let inner_y = y.saturating_sub(self.chat_area.y + 1);
                     let max_scroll = self.total_chat_lines.saturating_sub(view_height);
@@ -285,7 +298,6 @@ impl TuiApp {
                         self.chat_scroll = (fraction * max_scroll as f32).round() as u16;
                     }
                 } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    // Handle clicking anywhere on the message to toggle fold/unfold
                     let inner_y = y.saturating_sub(self.chat_area.y + 1);
                     let visual_y = inner_y as usize + self.chat_scroll as usize;
 
@@ -299,6 +311,48 @@ impl TuiApp {
                     }
                 }
             }
+        }
+    }
+
+    fn insert_char(&mut self, c: char) {
+        self.input_buffer.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    fn move_cursor_left(&mut self) {
+        if self.input_cursor > 0 {
+            if let Some((idx, _)) = self.input_buffer[..self.input_cursor]
+                .char_indices()
+                .next_back()
+            {
+                self.input_cursor = idx;
+            }
+        }
+    }
+
+    fn move_cursor_right(&mut self) {
+        if self.input_cursor < self.input_buffer.len() {
+            if let Some(c) = self.input_buffer[self.input_cursor..].chars().next() {
+                self.input_cursor += c.len_utf8();
+            }
+        }
+    }
+
+    fn delete_prev_char(&mut self) {
+        if self.input_cursor > 0 {
+            if let Some((idx, _)) = self.input_buffer[..self.input_cursor]
+                .char_indices()
+                .next_back()
+            {
+                self.input_buffer.remove(idx);
+                self.input_cursor = idx;
+            }
+        }
+    }
+
+    fn delete_next_char(&mut self) {
+        if self.input_cursor < self.input_buffer.len() {
+            self.input_buffer.remove(self.input_cursor);
         }
     }
 
@@ -379,9 +433,12 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
-                // Alt+Enter or Ctrl+Enter inserts a newline instead of sending
-                self.input_buffer.push('\n');
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+            {
+                self.insert_char('\n');
             }
             KeyCode::Enter => self.submit_prompt(),
             KeyCode::Char('v') if ctrl => {
@@ -403,23 +460,39 @@ impl TuiApp {
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
             KeyCode::Char('p') if ctrl => {
-                self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
-                let p = &self.config.presets[self.preset_idx];
-                if !p.prompt.is_empty() {
-                    self.input_buffer = p.prompt.clone();
+                if !self.config.presets.is_empty() {
+                    self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
+                    let p = &self.config.presets[self.preset_idx];
+                    if !p.prompt.is_empty() {
+                        self.input_buffer = p.prompt.clone();
+                        self.input_cursor = self.input_buffer.len();
+                    }
                 }
             }
             KeyCode::Char('y') if ctrl => {
-                self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                if !self.config.system_presets.is_empty() {
+                    self.sys_preset_idx =
+                        (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                }
             }
-
-            KeyCode::Backspace => {
-                self.input_buffer.pop();
-            }
-            KeyCode::Char(c) if !ctrl => self.input_buffer.push(c),
+            KeyCode::Left => self.move_cursor_left(),
+            KeyCode::Right => self.move_cursor_right(),
+            KeyCode::Home => self.input_cursor = 0,
+            KeyCode::End => self.input_cursor = self.input_buffer.len(),
+            KeyCode::Delete => self.delete_next_char(),
+            KeyCode::Backspace => self.delete_prev_char(),
+            KeyCode::Char(c) if !ctrl => self.insert_char(c),
             _ => {}
         }
         false
+    }
+
+    fn current_system_prompt(&self) -> String {
+        self.config
+            .system_presets
+            .get(self.sys_preset_idx)
+            .map(|p| p.prompt.clone())
+            .unwrap_or_default()
     }
 
     fn submit_prompt(&mut self) {
@@ -432,10 +505,9 @@ impl TuiApp {
             return;
         }
         self.input_buffer.clear();
-        self.chat_scroll = u16::MAX; // Jump to the bottom of the chat when sending a new prompt
-        let sys = self.config.system_presets[self.sys_preset_idx]
-            .prompt
-            .clone();
+        self.input_cursor = 0;
+        self.chat_scroll = u16::MAX;
+        let sys = self.current_system_prompt();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
             system_prompt: sys,
@@ -447,9 +519,7 @@ impl TuiApp {
     fn resolve_modal_tool(&mut self, approved: bool) {
         if self.pending_tool.take().is_some() {
             self.modal = ActiveModal::None;
-            let sys = self.config.system_presets[self.sys_preset_idx]
-                .prompt
-                .clone();
+            let sys = self.current_system_prompt();
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
                 approved,
                 feedback: std::mem::take(&mut self.tool_feedback),
@@ -502,8 +572,18 @@ impl TuiApp {
             ])
             .split(area);
 
-        let preset_name = &self.config.presets[self.preset_idx].name;
-        let sys_name = &self.config.system_presets[self.sys_preset_idx].name;
+        let preset_name = self
+            .config
+            .presets
+            .get(self.preset_idx)
+            .map(|p| p.name.as_str())
+            .unwrap_or("None");
+        let sys_name = self
+            .config
+            .system_presets
+            .get(self.sys_preset_idx)
+            .map(|p| p.name.as_str())
+            .unwrap_or("None");
         let settings_text = vec![
             Line::from(vec![
                 Span::raw("Model:   "),
@@ -566,10 +646,19 @@ impl TuiApp {
             .constraints([Constraint::Min(8), Constraint::Length(8)])
             .split(area);
 
-        // Store chat rect for mouse hit-testing later
         self.chat_area = chunks[0];
         let inner_width = chunks[0].width.saturating_sub(2).max(1);
         let available_width = inner_width.saturating_sub(2) as usize; // for "  " visual padding
+
+        if self.cached_wrap_width != available_width {
+            self.cached_wrap_width = available_width;
+            self.msg_wrap_cache.clear();
+        }
+        while self.msg_wrap_cache.len() < self.messages.len() {
+            let idx = self.msg_wrap_cache.len();
+            self.msg_wrap_cache
+                .push(reflow_text(&self.messages[idx].content, available_width));
+        }
 
         self.msg_scrolls.resize(self.messages.len() + 1, 0);
         self.msg_unfolded.resize(self.messages.len() + 1, false);
@@ -579,7 +668,6 @@ impl TuiApp {
         let mut lines = Vec::new();
         let mut total_visual_lines: u16 = 0;
 
-        // Since we explicitly format the word-wrapping beforehand, each Line takes exactly 1 visual height.
         let add_line = |lines_vec: &mut Vec<Line<'static>>, total: &mut u16, l: Line<'static>| {
             *total = total.saturating_add(1);
             lines_vec.push(l);
@@ -617,7 +705,7 @@ impl TuiApp {
                 )),
             );
 
-            let msg_content_lines = reflow_text(&m.content, available_width);
+            let msg_content_lines = &self.msg_wrap_cache[i];
             let total_content = msg_content_lines.len();
             let is_truncated = total_content > max_lines;
 
@@ -754,13 +842,11 @@ impl TuiApp {
                 .push((i, start_visual, end_visual, is_truncated));
         }
 
-        // Clamp global scrolling based on total height
         self.total_chat_lines = total_visual_lines;
-        let viewable_height = chunks[0].height.saturating_sub(2); // Subtract borders
+        let viewable_height = chunks[0].height.saturating_sub(2);
         let max_scroll = self.total_chat_lines.saturating_sub(viewable_height);
         self.chat_scroll = self.chat_scroll.min(max_scroll);
 
-        // Render main chat paragraph (Wrap removed! We manage it fully in reflow_text)
         f.render_widget(
             Paragraph::new(lines).scroll((self.chat_scroll, 0)).block(
                 Block::default()
@@ -777,9 +863,17 @@ impl TuiApp {
             ScrollbarState::new(max_scroll as usize).position(self.chat_scroll as usize);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
+        // Prompt box with auto-scrolling and visible cursor
+        let prompt_inner_width = chunks[1].width.saturating_sub(2).max(1) as usize;
+        let prompt_inner_height = chunks[1].height.saturating_sub(2).max(1) as u16;
+        let (cursor_row, cursor_col) =
+            compute_cursor_coords(&self.input_buffer, self.input_cursor, prompt_inner_width);
+        let input_scroll = cursor_row.saturating_sub(prompt_inner_height.saturating_sub(1));
+
         f.render_widget(
             Paragraph::new(self.input_buffer.as_str())
                 .wrap(Wrap { trim: false })
+                .scroll((input_scroll, 0))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -788,6 +882,12 @@ impl TuiApp {
                 ),
             chunks[1],
         );
+
+        if matches!(self.modal, ActiveModal::None) {
+            let cx = chunks[1].x + 1 + cursor_col.min(chunks[1].width.saturating_sub(3));
+            let cy = chunks[1].y + 1 + (cursor_row - input_scroll);
+            f.set_cursor_position(Position::new(cx, cy));
+        }
     }
 
     fn draw_file_modal(&self, f: &mut Frame) {
@@ -867,7 +967,32 @@ impl TuiApp {
     }
 }
 
-// Custom manual text wrap to predict accurate heights while preserving indentation
+fn compute_cursor_coords(text: &str, cursor_byte: usize, width: usize) -> (u16, u16) {
+    if width == 0 {
+        return (0, 0);
+    }
+    let slice = &text[..cursor_byte.min(text.len())];
+    let mut row: u16 = 0;
+    let mut col: usize = 0;
+
+    for c in slice.chars() {
+        if c == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+        } else {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if col + cw > width {
+                row = row.saturating_add(1);
+                col = cw;
+            } else {
+                col += cw;
+            }
+        }
+    }
+    (row, col as u16)
+}
+
+// Unicode-width aware manual text wrap to predict accurate heights while preserving indentation
 fn reflow_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return text.lines().map(|s| s.to_string()).collect();
@@ -885,8 +1010,9 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
         for c in line.chars() {
             word_buf.push(c);
             if c.is_whitespace() {
-                let word_len = word_buf.chars().count();
-                if current_line.chars().count() + word_len <= width {
+                let word_width = UnicodeWidthStr::width(word_buf.as_str());
+                let cur_width = UnicodeWidthStr::width(current_line.as_str());
+                if cur_width + word_width <= width {
                     current_line.push_str(&word_buf);
                     word_buf.clear();
                 } else {
@@ -900,8 +1026,9 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
             }
         }
         if !word_buf.is_empty() {
-            let word_len = word_buf.chars().count();
-            if current_line.chars().count() + word_len <= width {
+            let word_width = UnicodeWidthStr::width(word_buf.as_str());
+            let cur_width = UnicodeWidthStr::width(current_line.as_str());
+            if cur_width + word_width <= width {
                 current_line.push_str(&word_buf);
             } else {
                 if !current_line.is_empty() {
@@ -916,26 +1043,32 @@ fn reflow_text(text: &str, width: usize) -> Vec<String> {
         }
     }
 
-    // Aggressive line-chopping pass to catch strings/words exceeding bounds (avoids sideways cutoffs)
+    // Second pass: split single long tokens that exceed `width` using display cell widths
     let mut chopped = Vec::new();
     for l in out {
         if l.is_empty() {
             chopped.push(String::new());
             continue;
         }
-        let mut rem = l.as_str();
-        while rem.chars().count() > width {
-            let split_byte = rem
-                .char_indices()
-                .nth(width)
-                .map(|(i, _)| i)
-                .unwrap_or(rem.len());
-            let (chunk, rest) = rem.split_at(split_byte);
-            chopped.push(chunk.to_string());
-            rem = rest;
+        if UnicodeWidthStr::width(l.as_str()) <= width {
+            chopped.push(l);
+            continue;
         }
-        if !rem.is_empty() {
-            chopped.push(rem.to_string());
+
+        let mut chunk = String::new();
+        let mut chunk_w = 0;
+        for c in l.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if chunk_w + cw > width && !chunk.is_empty() {
+                chopped.push(chunk);
+                chunk = String::new();
+                chunk_w = 0;
+            }
+            chunk.push(c);
+            chunk_w += cw;
+        }
+        if !chunk.is_empty() {
+            chopped.push(chunk);
         }
     }
     chopped
