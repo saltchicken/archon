@@ -512,11 +512,7 @@ impl TuiApp {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(10),
-                Constraint::Min(6),
-                Constraint::Length(8),
-            ])
+            .constraints([Constraint::Length(10), Constraint::Min(6)])
             .split(area);
 
         let preset_name = self
@@ -570,20 +566,6 @@ impl TuiApp {
                     .title(format!(" Images ({}) ", self.attachments.len())),
             ),
             chunks[1],
-        );
-
-        let keys = vec![
-            Line::from("Ctrl+⏎ Send   ^S Sessions"),
-            Line::from("⏎ Newline"),
-            Line::from("^V Paste   ^F Add File"),
-            Line::from("^X Clear   ^R Reset"),
-            Line::from("^Q Quit"),
-        ];
-        f.render_widget(
-            Paragraph::new(keys)
-                .style(Style::default().fg(Color::Yellow))
-                .block(Block::default().borders(Borders::ALL).title(" Shortcuts ")),
-            chunks[2],
         );
     }
 
@@ -747,7 +729,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (Ctrl+⏎=Send  ⏎=Newline) "),
+                        .title(" Prompt "),
                 ),
             chunks[1],
         );
