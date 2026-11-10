@@ -1,8 +1,8 @@
 use crate::core::config::Config;
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::{env, fs, path::PathBuf};
+use serde_json::Value;
+use std::{collections::HashSet, env, fs, path::PathBuf};
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,242 +27,157 @@ impl ToolRegistry {
         }
     }
 
+    /// Returns the tool directories in order of priority:
+    /// 1. Project-specific ./tools
+    /// 2. Global ~/.local/share/archon/tools
+    pub fn tool_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Ok(cwd) = env::current_dir() {
+            dirs.push(cwd.join("tools"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".local/share/archon/tools"));
+        }
+        dirs
+    }
+
     pub fn schemas(&self) -> Vec<Value> {
-        let allowed = self.allowed_commands.join(", ");
-        vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "execute_command",
-                    "description": format!("Executes an allowed shell command. Allowed base commands: {allowed}. No pipes or redirects."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": { "type": "string", "description": "The exact command to execute." }
-                        },
-                        "required": ["command"]
+        let mut schemas = Vec::new();
+        let mut loaded_tools = HashSet::new();
+
+        for dir in Self::tool_dirs() {
+            fs::create_dir_all(&dir).ok();
+
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    
+                    // Skip directories and json files
+                    if path.is_dir() || path.extension().and_then(|s| s.to_str()) == Some("json") {
+                        continue;
                     }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "context",
-                    "description": "Retrieves project directory structures and file contents. Use this to explore the codebase.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "target_path": { "type": "string", "description": "Optional relative path (defaults to current directory)." }
+
+                    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    
+                    // Determine tool name and if it is a python script
+                    let (base_name, is_python) = if file_name.ends_with(".py") {
+                        (file_name.strip_suffix(".py").unwrap().to_string(), true)
+                    } else if file_name.ends_with(".exe") {
+                        (file_name.strip_suffix(".exe").unwrap().to_string(), false)
+                    } else {
+                        (file_name.clone(), false) // Unix binary
+                    };
+
+                    if loaded_tools.contains(&base_name) {
+                        continue; // Tool already loaded from a higher-priority directory
+                    }
+
+                    // Build the schema discovery command
+                    let mut cmd = if is_python {
+                        let mut c = std::process::Command::new("python3");
+                        c.arg(&path);
+                        c
+                    } else {
+                        std::process::Command::new(&path)
+                    };
+
+                    cmd.arg("--schema");
+
+                    if let Ok(out) = cmd.output() {
+                        if out.status.success() {
+                            if let Ok(schema) = serde_json::from_slice::<Value>(&out.stdout) {
+                                schemas.push(schema);
+                                loaded_tools.insert(base_name);
+                            }
                         }
                     }
                 }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "edit_file",
-                    "description": "Edit a file by replacing an exact search string with a replacement string.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": { "type": "string" },
-                            "search_string": { "type": "string" },
-                            "replace_string": { "type": "string" }
-                        },
-                        "required": ["file_path", "search_string", "replace_string"]
-                    }
-                }
-            }),
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "create_file",
-                    "description": "Create a new file in the workspace.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": { "type": "string" },
-                            "content": { "type": "string" }
-                        },
-                        "required": ["file_path", "content"]
-                    }
-                }
-            }),
-        ]
+            }
+        }
+        schemas
     }
 
     pub fn format_approval(&self, call: &ToolCall) -> String {
-        let args = &call.function.arguments;
-        match call.function.name.as_str() {
-            "execute_command" => format!(
-                "$ {}",
-                args.get("command").and_then(|v| v.as_str()).unwrap_or("")
-            ),
-            "context" => format!(
-                "$ context {}",
-                args.get("target_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-            ),
-            "edit_file" => format!(
-                "Edit: {}\n--- SEARCH ---\n{}\n--- REPLACE ---\n{}",
-                args.get("file_path").and_then(|v| v.as_str()).unwrap_or(""),
-                args.get("search_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-                args.get("replace_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-            ),
-            "create_file" => format!(
-                "Create: {}\n--- CONTENT ---\n{}",
-                args.get("file_path").and_then(|v| v.as_str()).unwrap_or(""),
-                args.get("content").and_then(|v| v.as_str()).unwrap_or("")
-            ),
-            _ => serde_json::to_string_pretty(args).unwrap_or_default(),
-        }
+        format!(
+            "Dynamic Tool [{}]:\n{}",
+            call.function.name,
+            serde_json::to_string_pretty(&call.function.arguments).unwrap_or_default()
+        )
     }
 
     pub async fn execute(&self, call: &ToolCall) -> (String, String) {
-        let res = match call.function.name.as_str() {
-            "execute_command" => self.exec_cmd(&call.function.arguments).await,
-            "context" => self.context_cmd(&call.function.arguments).await,
-            "edit_file" => self.edit_file(&call.function.arguments),
-            "create_file" => self.create_file(&call.function.arguments),
-            other => Err(anyhow::anyhow!("Unknown tool: {other}")),
+        let name = &call.function.name;
+        
+        let mut found_target = None;
+        for dir in Self::tool_dirs() {
+            let unix_cand = dir.join(name);
+            let win_cand = dir.join(format!("{name}.exe"));
+            let py_cand = dir.join(format!("{name}.py"));
+            
+            // Prefer compiled binaries over python scripts if both exist in the same directory
+            if unix_cand.exists() {
+                found_target = Some((unix_cand, false));
+                break;
+            } else if win_cand.exists() {
+                found_target = Some((win_cand, false));
+                break;
+            } else if py_cand.exists() {
+                found_target = Some((py_cand, true));
+                break;
+            }
+        }
+
+        let res = if let Some((bin_path, is_python)) = found_target {
+            self.exec_dynamic(&bin_path, is_python, &call.function.arguments).await
+        } else {
+            Err(anyhow::anyhow!("Unknown tool: '{name}'. Could not find compiled binary or .py script in tool directories."))
         };
 
         match res {
             Ok(out) => (
                 out.clone(),
-                format!("[Tool Result: {}]\n{}", call.function.name, out),
+                format!("[Tool Result: {}]\n{}", name, out),
             ),
             Err(e) => (
                 format!("Error: {e}"),
-                format!("[Tool Error: {}]\n{e}", call.function.name),
+                format!("[Tool Error: {}]\n{e}", name),
             ),
         }
     }
 
-    async fn exec_cmd(&self, args: &Value) -> Result<String> {
-        let raw = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if raw.is_empty() {
-            bail!("Empty command");
-        }
-        for bad in [';', '&', '|', '`', '$', '<', '>'] {
-            if raw.contains(bad) {
-                bail!("Forbidden shell operator '{bad}'");
-            }
-        }
-        let parts = shlex::split(raw).context("Malformed command string")?;
-        let Some((base, rest)) = parts.split_first() else {
-            bail!("Empty parsed command");
+    async fn exec_dynamic(&self, bin_path: &PathBuf, is_python: bool, args: &Value) -> Result<String> {
+        let args_json = serde_json::to_string(args)?;
+        let cwd = env::current_dir()?;
+        let allowed_cmds_str = self.allowed_commands.join(",");
+
+        let mut cmd = if is_python {
+            let mut c = Command::new("python3");
+            c.arg(bin_path);
+            c
+        } else {
+            Command::new(bin_path)
         };
-        if !self.allowed_commands.contains(base) {
-            bail!("Command '{base}' is not in allowlist");
-        }
-        for arg in rest {
-            if arg.starts_with('/') || arg.contains("..") {
-                bail!("Path traversal blocked for argument '{arg}'");
-            }
-        }
 
-        let out = Command::new(base).args(rest).output().await?;
-        let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
-        if !out.stderr.is_empty() {
-            combined.push_str("\n[STDERR]\n");
-            combined.push_str(&String::from_utf8_lossy(&out.stderr));
-        }
-        if combined.trim().is_empty() {
-            Ok("Command executed successfully (no output).".into())
-        } else {
-            Ok(combined)
-        }
-    }
+        // Inject allowed commands into the environment so Python scripts can still respect them
+        cmd.current_dir(cwd)
+           .env("ARCHON_ALLOWED_COMMANDS", allowed_cmds_str)
+           .arg(&args_json);
 
-    async fn context_cmd(&self, args: &Value) -> Result<String> {
-        let target = args
-            .get("target_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if target.starts_with('/') || target.contains("..") {
-            bail!(
-                "Path traversal blocked for target '{target}'. Must operate in current directory."
-            );
-        }
-
-        let mut cmd = Command::new("context");
-        if !target.is_empty() {
-            cmd.arg(target);
-        }
         let out = cmd.output().await?;
+
         let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
         if !out.stderr.is_empty() {
-            combined.push_str("\n[STDERR]\n");
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            combined.push_str("[STDERR]\n");
             combined.push_str(&String::from_utf8_lossy(&out.stderr));
         }
+
         if combined.trim().is_empty() {
-            Ok("Context executed successfully (no output).".into())
+            Ok(format!("Tool executed successfully (no output)."))
         } else {
             Ok(combined)
         }
-    }
-
-    fn edit_file(&self, args: &Value) -> Result<String> {
-        let path_str = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-        let search = args
-            .get("search_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let replace = args
-            .get("replace_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let path = resolve_secure_path(path_str, true)?;
-        let content = fs::read_to_string(&path)?;
-        if !content.contains(search) {
-            bail!("Exact search_string not found in {}", path_str);
-        }
-        let updated = content.replacen(search, replace, 1);
-        fs::write(&path, updated)?;
-        Ok(format!("Successfully edited {path_str}"))
-    }
-
-    fn create_file(&self, args: &Value) -> Result<String> {
-        let path_str = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-        let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-        let path = resolve_secure_path(path_str, false)?;
-        if path.exists() {
-            bail!("File already exists. Use edit_file instead.");
-        }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&path, content)?;
-        Ok(format!("Successfully created {path_str}"))
-    }
-}
-
-fn resolve_secure_path(rel: &str, must_exist: bool) -> Result<PathBuf> {
-    if rel.is_empty() || rel.starts_with('/') || rel.contains("..") {
-        bail!("Security violation: path must be relative to current working directory");
-    }
-    let cwd = env::current_dir()?.canonicalize()?;
-    let joined = cwd.join(rel);
-    if must_exist {
-        let canon = joined.canonicalize()?;
-        if !canon.starts_with(&cwd) {
-            bail!("Security violation: path escapes workspace");
-        }
-        Ok(canon)
-    } else {
-        Ok(joined)
     }
 }
