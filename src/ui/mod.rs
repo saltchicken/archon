@@ -374,6 +374,10 @@ impl TuiApp {
                 match key.code {
                     KeyCode::Enter => self.resolve_modal_tool(true),
                     KeyCode::Esc => self.resolve_modal_tool(false),
+                    KeyCode::Up => self.tool_scroll = self.tool_scroll.saturating_sub(1),
+                    KeyCode::Down => self.tool_scroll = self.tool_scroll.saturating_add(1),
+                    KeyCode::PageUp => self.tool_scroll = self.tool_scroll.saturating_sub(10),
+                    KeyCode::PageDown => self.tool_scroll = self.tool_scroll.saturating_add(10),
                     KeyCode::Backspace => {
                         self.tool_feedback.pop();
                     }
@@ -801,7 +805,7 @@ impl TuiApp {
     }
 
     fn draw_tool_modal(&self, f: &mut Frame) {
-        let area = centered_rect(75, 60, f.area());
+        let area = centered_rect(80, 75, f.area());
         f.render_widget(Clear, area);
 
         let (preview, idx, total) = self
@@ -810,13 +814,44 @@ impl TuiApp {
             .map(|(p, i, t)| (p.as_str(), *i, *t))
             .unwrap_or(("", 1, 1));
 
-        let text = format!(
-            "{preview}\n\nOptional Feedback / Note:\n> {}\n\n[⏎] Approve & Run    [Esc] Decline",
-            self.tool_feedback
-        );
+        let mut lines: Vec<Line> = Vec::new();
+        let mut section_color = Color::White;
+
+        for line in preview.lines() {
+            if line == "--- SEARCH ---" {
+                section_color = Color::LightRed;
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )));
+            } else if line == "+++ REPLACE +++" || line == "+++ CONTENT +++" {
+                section_color = Color::LightGreen;
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(section_color),
+                )));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Optional Feedback / Note:",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!("> {}", self.tool_feedback)));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "[⏎] Approve & Run     [Esc] Decline     [↑/↓/PgUp/PgDn] Scroll",
+            Style::default().fg(Color::Yellow),
+        )));
 
         f.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .scroll((self.tool_scroll, 0))
                 .block(

@@ -149,11 +149,51 @@ impl ToolRegistry {
     }
 
     pub fn format_approval(&self, call: &ToolCall) -> String {
-        format!(
-            "Dynamic Tool [{}]:\n{}",
-            call.function.name,
-            serde_json::to_string_pretty(&call.function.arguments).unwrap_or_default()
-        )
+        let name = call.function.name.as_str();
+        let args = &call.function.arguments;
+
+        // TODO: This hardcoded approach needs to be fixed
+        match name {
+            "edit_file" => {
+                let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+                let search = args.get("search_string").and_then(|v| v.as_str()).unwrap_or("");
+                let replace = args.get("replace_string").and_then(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "Tool: edit_file\nFile: {path}\n\n--- SEARCH ---\n{search}\n\n+++ REPLACE +++\n{replace}"
+                )
+            }
+            "create_file" => {
+                let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                format!(
+                    "Tool: create_file\nFile: {path}\n\n+++ CONTENT +++\n{content}"
+                )
+            }
+            "execute_command" => {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                format!("Tool: execute_command\nCommand:\n  $ {cmd}")
+            }
+            _ => {
+                if let Some(obj) = args.as_object() {
+                    let mut out = format!("Tool [{name}]:\n");
+                    for (k, v) in obj {
+                        match v.as_str() {
+                            Some(s) if s.contains('\n') => {
+                                out.push_str(&format!("\n{k}:\n{s}\n"));
+                            }
+                            Some(s) => out.push_str(&format!("  {k}: {s}\n")),
+                            None => out.push_str(&format!("  {k}: {v}\n")),
+                        }
+                    }
+                    out.trim_end().to_string()
+                } else {
+                    format!(
+                        "Tool [{name}]:\n{}",
+                        serde_json::to_string_pretty(args).unwrap_or_default()
+                    )
+                }
+            }
+        }
     }
 
     fn find_external_tool(name: &str) -> Option<(PathBuf, bool)> {
