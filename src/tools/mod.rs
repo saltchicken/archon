@@ -5,6 +5,7 @@ pub mod execute_command;
 pub mod read_file;
 
 use anyhow::{bail, Context, Result};
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::{
@@ -40,25 +41,21 @@ pub fn parse_args<T: DeserializeOwned>(json_args: &Value, tool_name: &str) -> Re
         .with_context(|| format!("Invalid arguments provided to {tool_name}"))
 }
 
-pub fn function_schema(
-    name: &str,
-    description: &str,
-    properties: Value,
-    required: &[&str],
-) -> Value {
-    let mut params = json!({
-        "type": "object",
-        "properties": properties,
-    });
-    if !required.is_empty() {
-        params["required"] = json!(required);
+pub fn auto_schema<T: JsonSchema>(name: &str, description: &str) -> Value {
+    let schema = schemars::schema_for!(T);
+    let mut parameters = serde_json::to_value(&schema).unwrap();
+
+    if let Some(obj) = parameters.as_object_mut() {
+        obj.remove("$schema");
+        obj.remove("title");
     }
+
     json!({
         "type": "function",
         "function": {
             "name": name,
             "description": description,
-            "parameters": params,
+            "parameters": parameters,
         }
     })
 }

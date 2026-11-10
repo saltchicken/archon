@@ -1,24 +1,22 @@
 use crate::tools::{
-    function_schema, parse_args, run_workspace_command, validate_relative_path, workspace_root,
+    auto_schema, parse_args, run_workspace_command, validate_relative_path, workspace_root,
 };
 use anyhow::{bail, Context, Result};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::Path;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ExecuteCommandArgs {
+    /// The exact command and arguments to execute.
     command: String,
 }
 
 pub fn schema() -> Value {
-    function_schema(
+    auto_schema::<ExecuteCommandArgs>(
         "execute_command",
         "Executes an allowed command directly without a shell. No pipes or redirects.",
-        json!({
-            "command": { "type": "string", "description": "The exact command and arguments to execute." }
-        }),
-        &["command"],
     )
 }
 

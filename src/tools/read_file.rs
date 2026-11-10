@@ -1,22 +1,19 @@
-use crate::tools::{function_schema, parse_args, resolve_existing_path};
+use crate::tools::{auto_schema, parse_args, resolve_existing_path};
 use anyhow::{bail, Context, Result};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ReadFileArgs {
     file_path: String,
 }
 
 pub fn schema() -> Value {
-    function_schema(
+    auto_schema::<ReadFileArgs>(
         "read_file",
         "Read the exact contents of a file in the workspace.",
-        json!({
-            "file_path": { "type": "string" }
-        }),
-        &["file_path"],
     )
 }
 

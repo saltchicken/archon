@@ -1,10 +1,11 @@
-use crate::tools::{function_schema, parse_args, resolve_existing_path};
+use crate::tools::{auto_schema, parse_args, resolve_existing_path};
 use anyhow::{bail, Context, Result};
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct EditFileArgs {
     file_path: String,
     search_string: String,
@@ -12,15 +13,9 @@ struct EditFileArgs {
 }
 
 pub fn schema() -> Value {
-    function_schema(
+    auto_schema::<EditFileArgs>(
         "edit_file",
         "Edit a file by replacing an exact, unique search string with a replacement string.",
-        json!({
-            "file_path": { "type": "string" },
-            "search_string": { "type": "string" },
-            "replace_string": { "type": "string" }
-        }),
-        &["file_path", "search_string", "replace_string"],
     )
 }
 

@@ -1,27 +1,22 @@
 use crate::tools::{
-    function_schema, parse_args, resolve_existing_path, run_workspace_command,
+    auto_schema, parse_args, resolve_existing_path, run_workspace_command,
 };
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 struct ContextArgs {
+    /// Optional relative path (defaults to current directory).
     #[serde(default)]
     target_path: String,
 }
 
 pub fn schema() -> Value {
-    function_schema(
+    auto_schema::<ContextArgs>(
         "context",
         "Retrieves project directory structures and file contents. Use this to explore the codebase.",
-        json!({
-            "target_path": {
-                "type": "string",
-                "description": "Optional relative path (defaults to current directory)."
-            }
-        }),
-        &[],
     )
 }
 
