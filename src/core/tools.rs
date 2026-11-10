@@ -28,11 +28,15 @@ impl ToolRegistry {
     }
 
     /// Returns the tool directories in order of priority:
-    /// 1. Project-specific ./tools
-    /// 2. Global ~/.local/share/archon/tools
+    /// 1. Project-specific ./tools/python
+    /// 2. Project-specific ./tools/rust
+    /// 3. Legacy flat ./tools
+    /// 4. Global ~/.local/share/archon/tools
     pub fn tool_dirs() -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Ok(cwd) = env::current_dir() {
+            dirs.push(cwd.join("tools").join("python"));
+            dirs.push(cwd.join("tools").join("rust"));
             dirs.push(cwd.join("tools"));
         }
         if let Some(home) = dirs::home_dir() {
@@ -52,31 +56,54 @@ impl ToolRegistry {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     
-                    // Skip directories and json files
-                    if path.is_dir() || path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if path.is_dir() {
+                        continue;
+                    }
+
+                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if ext == "json" || ext == "toml" || ext == "md" {
                         continue;
                     }
 
                     let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                     
-                    // Determine tool name and if it is a python script
-                    let (base_name, is_python) = if file_name.ends_with(".py") {
-                        (file_name.strip_suffix(".py").unwrap().to_string(), true)
+                    // Determine tool name and language backend
+                    let (base_name, is_python, is_rust) = if file_name.ends_with(".py") {
+                        (file_name.strip_suffix(".py").unwrap().to_string(), true, false)
+                    } else if file_name.ends_with(".rs") {
+                        (file_name.strip_suffix(".rs").unwrap().to_string(), false, true)
                     } else if file_name.ends_with(".exe") {
-                        (file_name.strip_suffix(".exe").unwrap().to_string(), false)
+                        (file_name.strip_suffix(".exe").unwrap().to_string(), false, false)
                     } else {
-                        (file_name.clone(), false) // Unix binary
+                        (file_name.clone(), false, false)
                     };
 
                     if loaded_tools.contains(&base_name) {
-                        continue; // Tool already loaded from a higher-priority directory
+                        continue;
                     }
 
-                    // Build the schema discovery command
                     let mut cmd = if is_python {
                         let mut c = std::process::Command::new("python3");
                         c.arg(&path);
                         c
+                    } else if is_rust {
+                        // Resolve the compiled binary path instead of trying to run the .rs source file
+                        let cwd = env::current_dir().unwrap_or_default();
+                        let debug_bin = cwd.join("target").join("debug").join(&base_name);
+                        let release_bin = cwd.join("target").join("release").join(&base_name);
+                        
+                        let compiled_path = if debug_bin.exists() {
+                            debug_bin
+                        } else if debug_bin.with_extension("exe").exists() {
+                            debug_bin.with_extension("exe")
+                        } else if release_bin.exists() {
+                            release_bin
+                        } else if release_bin.with_extension("exe").exists() {
+                            release_bin.with_extension("exe")
+                        } else {
+                            continue; // Skip if it hasn't been compiled yet
+                        };
+                        std::process::Command::new(compiled_path)
                     } else {
                         std::process::Command::new(&path)
                     };
@@ -113,17 +140,36 @@ impl ToolRegistry {
             let unix_cand = dir.join(name);
             let win_cand = dir.join(format!("{name}.exe"));
             let py_cand = dir.join(format!("{name}.py"));
+            let rs_cand = dir.join(format!("{name}.rs"));
             
-            // Prefer compiled binaries over python scripts if both exist in the same directory
-            if unix_cand.exists() {
+            if unix_cand.exists() && unix_cand.is_file() {
                 found_target = Some((unix_cand, false));
                 break;
-            } else if win_cand.exists() {
+            } else if win_cand.exists() && win_cand.is_file() {
                 found_target = Some((win_cand, false));
                 break;
-            } else if py_cand.exists() {
+            } else if py_cand.exists() && py_cand.is_file() {
                 found_target = Some((py_cand, true));
                 break;
+            } else if rs_cand.exists() && rs_cand.is_file() {
+                // Find corresponding compiled rust binary
+                let cwd = env::current_dir().unwrap_or_default();
+                let debug_bin = cwd.join("target").join("debug").join(name);
+                let release_bin = cwd.join("target").join("release").join(name);
+                
+                if debug_bin.exists() {
+                    found_target = Some((debug_bin, false));
+                    break;
+                } else if debug_bin.with_extension("exe").exists() {
+                    found_target = Some((debug_bin.with_extension("exe"), false));
+                    break;
+                } else if release_bin.exists() {
+                    found_target = Some((release_bin, false));
+                    break;
+                } else if release_bin.with_extension("exe").exists() {
+                    found_target = Some((release_bin.with_extension("exe"), false));
+                    break;
+                }
             }
         }
 
@@ -158,7 +204,7 @@ impl ToolRegistry {
             Command::new(bin_path)
         };
 
-        // Inject allowed commands into the environment so Python scripts can still respect them
+        // Inject allowed commands into the environment so scripts can still respect them
         cmd.current_dir(cwd)
            .env("ARCHON_ALLOWED_COMMANDS", allowed_cmds_str)
            .arg(&args_json);

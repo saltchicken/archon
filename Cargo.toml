@@ -38,7 +38,3 @@ path = "src/tools/context.rs"
 [[bin]]
 name = "edit_file"
 path = "src/tools/edit_file.rs"
-
-[[bin]]
-name = "create_file"
-path = "src/tools/create_file.rs"
