@@ -2,6 +2,18 @@ import sys
 import json
 import os
 
+
+def resolve_secure_path(rel: str, workspace_root: str) -> str:
+    """Resolves a relative path within workspace_root and blocks path traversal."""
+    if not rel or os.path.isabs(rel):
+        raise ValueError("Security violation: path must be relative to current working directory")
+    cwd = os.path.realpath(workspace_root)
+    target = os.path.realpath(os.path.join(cwd, rel))
+    if os.path.commonpath([cwd, target]) != cwd:
+        raise ValueError("Security violation: path escapes workspace")
+    return target
+
+
 def run_tool(schema: dict, execute_fn: callable):
     """Handles Archon's standard CLI/stdin boilerplate for Python tools."""
     if len(sys.argv) > 1 and sys.argv[1] == "--schema":

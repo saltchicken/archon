@@ -17,6 +17,36 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
+impl ChatMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            images: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn without_images(&self) -> Self {
+        Self {
+            role: self.role.clone(),
+            content: self.content.clone(),
+            images: None,
+            tool_calls: self.tool_calls.clone(),
+        }
+    }
+
+    pub fn with_ui_image_placeholders(&self) -> Self {
+        Self {
+            images: self
+                .images
+                .as_ref()
+                .map(|imgs| vec![String::new(); imgs.len()]),
+            ..self.without_images()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub id: String,
@@ -36,15 +66,12 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(raw_dir: &str) -> Result<Self> {
-        let expanded = if let Some(stripped) = raw_dir.strip_prefix("~/") {
-            dirs::home_dir().unwrap_or_default().join(stripped)
-        } else {
-            PathBuf::from(raw_dir)
+        let history_dir = match raw_dir.strip_prefix("~/") {
+            Some(stripped) => dirs::home_dir().unwrap_or_default().join(stripped),
+            None => PathBuf::from(raw_dir),
         };
-        fs::create_dir_all(&expanded)?;
-        Ok(Self {
-            history_dir: expanded,
-        })
+        fs::create_dir_all(&history_dir)?;
+        Ok(Self { history_dir })
     }
 
     pub fn new_id() -> String {
@@ -63,25 +90,19 @@ impl SessionManager {
             return Ok(());
         }
 
-        let clean_msgs: Vec<ChatMessage> = messages
-            .iter()
-            .map(|m| ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                images: None,
-                tool_calls: m.tool_calls.clone(),
-            })
-            .collect();
+        let clean_msgs: Vec<ChatMessage> = messages.iter().map(ChatMessage::without_images).collect();
 
         let title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
             .map(|m| {
                 let first_line = m.content.lines().next().unwrap_or("Untitled");
-                if first_line.chars().count() > 50 {
-                    format!("{}...", first_line.chars().take(50).collect::<String>())
+                let mut chars = first_line.chars();
+                let preview: String = chars.by_ref().take(50).collect();
+                if chars.next().is_some() {
+                    format!("{preview}...")
                 } else {
-                    first_line.to_string()
+                    preview
                 }
             })
             .unwrap_or_else(|| "Untitled Session".into());
@@ -106,7 +127,7 @@ impl SessionManager {
         let mut list: Vec<SessionData> = fs::read_dir(&self.history_dir)
             .into_iter()
             .flatten()
-            .filter_map(|e| e.ok())
+            .flatten()
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .filter_map(|e| {
                 let text = fs::read_to_string(e.path()).ok()?;
