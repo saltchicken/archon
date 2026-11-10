@@ -8,7 +8,8 @@ use anyhow::Result;
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -110,8 +111,15 @@ impl TuiApp {
     pub async fn run(mut self, mut ev_rx: UnboundedReceiver<EngineEvent>) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        // Enable mouse capture during initialization
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        
+        // Enable mouse capture and Kitty keyboard enhancement during initialization
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+        
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
         let mut term_events = EventStream::new();
@@ -144,7 +152,13 @@ impl TuiApp {
         }
 
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+        // Gracefully clean up the Kitty keyboard protocol
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags
+        )?;
         Ok(())
     }
 
@@ -365,8 +379,8 @@ impl TuiApp {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                // Alt+Enter inserts a newline instead of sending
+            KeyCode::Enter if key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) => {
+                // Alt+Enter or Ctrl+Enter inserts a newline instead of sending
                 self.input_buffer.push('\n');
             }
             KeyCode::Enter => self.submit_prompt(),
@@ -532,10 +546,10 @@ impl TuiApp {
         );
 
         let keys = vec![
-            Line::from("⏎ Send    ^S Sessions"),
-            Line::from("Alt+⏎ \n Newline"),
-            Line::from("^V Paste    ^F Add File"),
-            Line::from("^X Clear    ^R Reset"),
+            Line::from("⏎ Send   ^S Sessions"),
+            Line::from("Alt/Ctrl+⏎ Newline"),
+            Line::from("^V Paste   ^F Add File"),
+            Line::from("^X Clear   ^R Reset"),
             Line::from("^Q Quit"),
         ];
         f.render_widget(
@@ -770,7 +784,7 @@ impl TuiApp {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))
-                        .title(" Prompt (⏎=Send  Alt+⏎=Newline) "),
+                        .title(" Prompt (⏎=Send  Alt/Ctrl+⏎=Newline) "),
                 ),
             chunks[1],
         );

@@ -4,6 +4,11 @@ mod ui;
 
 use anyhow::Result;
 use core::{config::Config, ollama::run_preflight, tools::ToolRegistry, CoreEngine};
+use crossterm::{
+    event::{DisableMouseCapture, PopKeyboardEnhancementFlags},
+    execute,
+    terminal::{disable_raw_mode, LeaveAlternateScreen},
+};
 use serde_json::{json, Value};
 use std::env;
 use tokio::sync::mpsc;
@@ -11,6 +16,21 @@ use ui::TuiApp;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Graceful Panic Handler: Ensures the terminal isn't left permanently broken 
+    // and that advanced Kitty keyboard protocols are popped if the app crashes.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let mut stdout = std::io::stdout();
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            stdout,
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            PopKeyboardEnhancementFlags
+        );
+        original_hook(panic_info);
+    }));
+
     let config = Config::load("config.toml");
     let args: Vec<String> = env::args().collect();
 
