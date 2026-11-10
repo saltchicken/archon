@@ -1,6 +1,6 @@
 import sys
-import json
 import os
+from archon_tool import run_tool
 
 SCHEMA = {
     "type": "function",
@@ -26,49 +26,15 @@ def resolve_secure_path(rel, workspace_root):
         raise ValueError("Security violation: path escapes workspace")
     return target
 
-def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--schema":
-        print(json.dumps(SCHEMA))
-        sys.exit(0)
-
-    raw_input = sys.argv[1] if len(sys.argv) >= 2 else sys.stdin.read()
-    if not raw_input.strip():
-        print("Error: Missing JSON arguments", file=sys.stderr)
-        sys.exit(1)
-
-    payload = json.loads(raw_input)
-
-    # Unpack the JSON envelope
-    if isinstance(payload, dict) and "arguments" in payload and "context" in payload:
-        args = payload["arguments"]
-        context = payload["context"]
-    else:
-        args = payload
-        context = {}
-
-    workspace_root = context.get("workspace_root") or os.getcwd()
+def execute(args, workspace_root):
     path_str = args.get("file_path", "")
+    target_path = resolve_secure_path(path_str, workspace_root)
+    
+    if not os.path.isfile(target_path):
+        raise ValueError(f"Target is not a file (or not found): {path_str}")
 
-    try:
-        target_path = resolve_secure_path(path_str, workspace_root)
-        
-        if not os.path.exists(target_path):
-            print(f"Error: File not found: {path_str}", file=sys.stderr)
-            sys.exit(1)
-            
-        if not os.path.isfile(target_path):
-            print(f"Error: Target is not a file: {path_str}", file=sys.stderr)
-            sys.exit(1)
-
-        with open(target_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Print directly to stdout; the Rust engine captures this as the tool result
-        print(content)
-        
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    with open(target_path, "r", encoding="utf-8") as f:
+        print(f.read()) # Output caught by Rust engine
 
 if __name__ == "__main__":
-    main()
+    run_tool(SCHEMA, execute)

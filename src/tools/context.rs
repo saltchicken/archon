@@ -1,10 +1,17 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     env,
     path::{Component, Path},
     process,
 };
+
+#[derive(Deserialize)]
+struct ContextArgs {
+    #[serde(default)]
+    target_path: String,
+}
 
 pub fn schema() -> Value {
     json!({
@@ -23,11 +30,10 @@ pub fn schema() -> Value {
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {
-    let target = json_args
-        .get("target_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    let args: ContextArgs = serde_json::from_value(json_args.clone())
+        .context("Invalid arguments provided to context")?;
+        
+    let target = args.target_path.trim();
 
     let cwd = env::current_dir()?.canonicalize()?;
     let mut cmd = process::Command::new("context");

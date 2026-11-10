@@ -1,9 +1,17 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     env, fs,
     path::{Component, Path, PathBuf},
 };
+
+#[derive(Deserialize)]
+struct EditFileArgs {
+    file_path: String,
+    search_string: String,
+    replace_string: String,
+}
 
 pub fn schema() -> Value {
     json!({
@@ -57,40 +65,30 @@ fn resolve_secure_path(rel: &str) -> Result<PathBuf> {
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {
-    let path_str = json_args
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let search_str = json_args
-        .get("search_string")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let replace_str = json_args
-        .get("replace_string")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let args: EditFileArgs = serde_json::from_value(json_args.clone())
+        .context("Invalid arguments provided to edit_file")?;
 
-    if search_str.is_empty() {
+    if args.search_string.is_empty() {
         bail!("search_string cannot be empty");
     }
 
-    let target_path = resolve_secure_path(path_str)?;
+    let target_path = resolve_secure_path(&args.file_path)?;
     let content = fs::read_to_string(&target_path).context("Error reading file")?;
 
-    let match_count = content.matches(search_str).count();
+    let match_count = content.matches(&args.search_string).count();
     if match_count == 0 {
-        bail!("Exact search_string not found in {}", path_str);
+        bail!("Exact search_string not found in {}", args.file_path);
     }
     if match_count > 1 {
         bail!(
             "search_string matched {} times in {}. Provide more surrounding context to make it unique.",
             match_count,
-            path_str
+            args.file_path
         );
     }
 
-    let updated = content.replacen(search_str, replace_str, 1);
+    let updated = content.replacen(&args.search_string, &args.replace_string, 1);
     fs::write(&target_path, updated).context("Error writing file")?;
 
-    Ok(format!("Successfully edited {}", path_str))
+    Ok(format!("Successfully edited {}", args.file_path))
 }

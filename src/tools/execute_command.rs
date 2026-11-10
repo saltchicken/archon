@@ -1,10 +1,16 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     env,
     path::{Component, Path},
     process,
 };
+
+#[derive(Deserialize)]
+struct ExecuteCommandArgs {
+    command: String,
+}
 
 pub fn schema() -> Value {
     json!({
@@ -50,11 +56,10 @@ fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
 }
 
 pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String> {
-    let raw_cmd = json_args
-        .get("command")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
+    let args: ExecuteCommandArgs = serde_json::from_value(json_args.clone())
+        .context("Invalid arguments provided to execute_command")?;
+        
+    let raw_cmd = args.command.trim();
 
     if raw_cmd.is_empty() {
         bail!("Empty command");

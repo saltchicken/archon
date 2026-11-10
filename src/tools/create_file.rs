@@ -1,9 +1,16 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     env, fs,
     path::{Component, Path, PathBuf},
 };
+
+#[derive(Deserialize)]
+struct CreateFileArgs {
+    file_path: String,
+    content: String,
+}
 
 pub fn schema() -> Value {
     json!({
@@ -65,16 +72,10 @@ fn resolve_new_secure_path(rel: &str) -> Result<PathBuf> {
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {
-    let path_str = json_args
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let content = json_args
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let args: CreateFileArgs = serde_json::from_value(json_args.clone())
+        .context("Invalid arguments provided to create_file")?;
 
-    let target_path = resolve_new_secure_path(path_str)?;
+    let target_path = resolve_new_secure_path(&args.file_path)?;
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).context("Error creating parent directories")?;
     }
@@ -88,6 +89,6 @@ pub fn execute(json_args: &Value) -> Result<String> {
         }
     }
 
-    fs::write(&target_path, content).context("Error writing new file")?;
-    Ok(format!("Successfully created {}", path_str.trim()))
+    fs::write(&target_path, &args.content).context("Error writing new file")?;
+    Ok(format!("Successfully created {}", args.file_path.trim()))
 }
