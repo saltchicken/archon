@@ -67,6 +67,7 @@ pub enum EngineEvent {
     StreamDone {
         prompt_tokens: u64,
         eval_tokens: u64,
+        done_reason: Option<String>,
         tool_calls: Vec<ToolCall>,
     },
     StreamError(String),
@@ -495,10 +496,18 @@ impl CoreEngine {
             EngineEvent::StreamDone {
                 prompt_tokens,
                 eval_tokens,
+                ref done_reason,
                 ref tool_calls,
             } => {
                 self.active_task = None;
                 let final_text = std::mem::take(&mut self.stream_buffer);
+                let total_used = prompt_tokens + eval_tokens;
+                let ctx_limit = self.active_num_ctx as u64;
+                let usage_pct = (total_used as f64 / ctx_limit.max(1) as f64) * 100.0;
+                let hit_length = done_reason.as_deref() == Some("length");
+                let is_near_limit = hit_length
+                    || usage_pct >= 90.0
+                    || prompt_tokens >= ctx_limit.saturating_sub(256);
 
                 if !final_text.trim().is_empty() || !tool_calls.is_empty() {
                     self.messages.push(ChatMessage {
@@ -507,9 +516,20 @@ impl CoreEngine {
                     });
                     self.save_session_bg().await;
                     self.emit_chat();
+
+                    let prefix = if hit_length {
+                        "⚠️ CTX MAXED OUT (Truncated) — "
+                    } else if is_near_limit {
+                        "⚠️ CTX LIMIT NEAR — "
+                    } else {
+                        ""
+                    };
+
                     self.notify(
-                        format!("Tokens — Prompt: {prompt_tokens} | Eval: {eval_tokens}"),
-                        false,
+                        format!(
+                            "{prefix}Context: {total_used}/{ctx_limit} ({usage_pct:.1}%) [Prompt: {prompt_tokens} | Eval: {eval_tokens}]"
+                        ),
+                        is_near_limit,
                     );
                 } else {
                     warn!(
@@ -518,11 +538,13 @@ impl CoreEngine {
                     self.emit_chat();
                     self.notify(
                         format!(
-                            "Model returned an empty response (Prompt: {prompt_tokens} | Eval: {eval_tokens})"
+                            "Model returned an empty response (Context: {total_used}/{ctx_limit} | Prompt: {prompt_tokens} | Eval: {eval_tokens})"
                         ),
                         true,
                     );
                 }
+
+                let _ = self.tx.send(ev.clone());
 
                 if !tool_calls.is_empty() {
                     self.enqueue_tool_calls(tool_calls.clone());

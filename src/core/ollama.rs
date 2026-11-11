@@ -19,6 +19,7 @@ struct StreamResponseChunk {
     message: Option<StreamMessageChunk>,
     #[serde(default)]
     done: bool,
+    done_reason: Option<String>,
     prompt_eval_count: Option<i64>,
     eval_count: Option<i64>,
 }
@@ -148,6 +149,7 @@ pub async fn stream_chat(
     let mut collected_tools = Vec::new();
     let mut prompt_tokens = 0u64;
     let mut eval_tokens = 0u64;
+    let mut done_reason = None;
     let mut in_thinking = false;
 
     while let Some(line_res) = lines.next().await {
@@ -211,13 +213,15 @@ pub async fn stream_chat(
             }
             prompt_tokens = chunk.prompt_eval_count.unwrap_or(0).max(0) as u64;
             eval_tokens = chunk.eval_count.unwrap_or(0).max(0) as u64;
+            done_reason = chunk.done_reason;
         }
     }
 
     info!(
-        "Stream completed. Prompt tokens: {}, Eval tokens: {}, Tool calls: {}",
+        "Stream completed. Prompt tokens: {}, Eval tokens: {}, Done reason: {:?}, Tool calls: {}",
         prompt_tokens,
         eval_tokens,
+        done_reason,
         collected_tools.len()
     );
     if !collected_tools.is_empty() {
@@ -227,6 +231,7 @@ pub async fn stream_chat(
     let _ = tx.send(EngineEvent::StreamDone {
         prompt_tokens,
         eval_tokens,
+        done_reason,
         tool_calls: collected_tools,
     });
 }

@@ -334,12 +334,27 @@ impl TuiApp {
         let tools_label = if self.enable_tools { "ON" } else { "OFF" };
         let think_label = if self.show_thinking { "ON" } else { "OFF" };
 
+        let pct = (self.used_tokens as f64 / self.num_ctx.max(1) as f64) * 100.0;
+        let ctx_color = if pct >= 90.0 {
+            Color::Red
+        } else if pct >= 75.0 {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        };
+
         let settings_text = vec![
             Line::from(vec![
                 Span::raw("Model:   "),
                 Span::styled(&self.model, Style::default().fg(Color::Green)),
             ]),
-            Line::from(format!("Context: {}", self.num_ctx)),
+            Line::from(vec![
+                Span::raw("Context: "),
+                Span::styled(
+                    format!("{}/{} ({:.0}%)", self.used_tokens, self.num_ctx, pct),
+                    Style::default().fg(ctx_color),
+                ),
+            ]),
             Line::from(format!("Tools:   {tools_label} (^T)")),
             Line::from(format!("Think:   {think_label} (^K)")),
             Line::from(format!("Preset:  {preset_name} (^P)")),
@@ -469,10 +484,30 @@ impl TuiApp {
             self.chat_scroll = self.chat_scroll.min(max_scroll);
         }
 
+        let pct = (self.used_tokens as f64 / self.num_ctx.max(1) as f64) * 100.0;
+        let ctx_color = if pct >= 90.0 {
+            Color::Red
+        } else if pct >= 75.0 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+
+        let title_line = Line::from(vec![
+            Span::raw(" Conversation "),
+            Span::styled(
+                format!(
+                    "[Ctx: {} / {} ({:.0}%)] ",
+                    self.used_tokens, self.num_ctx, pct
+                ),
+                Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
         f.render_widget(
             Paragraph::new(lines)
                 .scroll((self.chat_scroll, 0))
-                .block(titled_block(" Conversation ")),
+                .block(titled_block(title_line)),
             chunks[0],
         );
 

@@ -80,6 +80,7 @@ pub struct TuiApp {
     pub(super) enable_tools: bool,
     pub(super) show_thinking: bool,
     pub(super) num_ctx: u32,
+    pub(super) used_tokens: u64,
     pub(super) text_area: TextArea<'static>,
 
     pub(super) chat_scroll: u16,
@@ -144,6 +145,7 @@ impl TuiApp {
             enable_tools: true,
             show_thinking,
             num_ctx,
+            used_tokens: 0,
             text_area: create_text_area(),
             chat_scroll: 0,
             follow_tail: true,
@@ -240,6 +242,9 @@ impl TuiApp {
                 num_ctx,
                 system_prompt,
             } => {
+                if messages.is_empty() {
+                    self.used_tokens = 0;
+                }
                 self.messages = messages;
                 self.wrapped_messages.clear();
                 self.num_ctx = num_ctx;
@@ -258,7 +263,15 @@ impl TuiApp {
                 self.scroll_to_bottom();
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
-            EngineEvent::StreamDone { .. } | EngineEvent::StreamError(_) => {
+            EngineEvent::StreamDone {
+                prompt_tokens,
+                eval_tokens,
+                ..
+            } => {
+                self.is_streaming = false;
+                self.used_tokens = prompt_tokens + eval_tokens;
+            }
+            EngineEvent::StreamError(_) => {
                 self.is_streaming = false;
             }
             EngineEvent::ToolApprovalRequested {
