@@ -7,7 +7,7 @@ pub mod workspace;
 
 use config::Config;
 use reqwest::Client;
-use session::{ChatMessage, SessionData, SessionManager};
+use session::{ChatMessage, SessionManager, SessionSummary};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -41,7 +41,7 @@ pub enum EngineCommand {
         num_ctx: u32,
         enable_tools: bool,
     },
-    LoadSession(SessionData),
+    LoadSession(PathBuf),
     DeleteSession(PathBuf),
     RefreshSessions,
     ResetChat,
@@ -56,6 +56,7 @@ pub enum EngineEvent {
     WorkspaceUpdated(Vec<ImageAttachment>),
     ChatUpdated {
         messages: Vec<ChatMessage>,
+        num_ctx: u32,
     },
     StreamStarted,
     StreamChunk(String),
@@ -70,7 +71,7 @@ pub enum EngineEvent {
         index: usize,
         total: usize,
     },
-    SessionsListed(Vec<SessionData>),
+    SessionsListed(Vec<SessionSummary>),
 }
 
 pub struct CoreEngine {
@@ -368,23 +369,38 @@ impl CoreEngine {
                 info!("Refreshing sessions list");
                 self.emit_sessions(None).await;
             }
-            EngineCommand::LoadSession(data) => {
-                info!("Loading session: {}", data.id);
-                self.abort_active_state();
-                self.session_id = data.id;
-                self.active_system_prompt = data.system_prompt;
-                self.active_num_ctx = data.num_ctx;
-                self.messages = data.messages;
-                self.emit_chat();
-                self.notify(format!("Loaded session: {}", data.title), false);
+            EngineCommand::LoadSession(path) => {
+                info!("Loading session from path: {}", path.display());
+                let sessions = Arc::clone(&self.sessions);
+                let res = tokio::task::spawn_blocking(move || sessions.load(&path)).await;
 
-                if let Some(calls) = self
-                    .messages
-                    .last()
-                    .and_then(|m| m.tool_calls.clone())
-                    .filter(|c| !c.is_empty())
-                {
-                    self.enqueue_tool_calls(calls);
+                match res {
+                    Ok(Ok(data)) => {
+                        self.abort_active_state();
+                        self.session_id = data.id;
+                        self.active_system_prompt = data.system_prompt;
+                        self.active_num_ctx = data.num_ctx;
+                        self.messages = data.messages;
+                        self.emit_chat();
+                        self.notify(format!("Loaded session: {}", data.title), false);
+
+                        if let Some(calls) = self
+                            .messages
+                            .last()
+                            .and_then(|m| m.tool_calls.clone())
+                            .filter(|c| !c.is_empty())
+                        {
+                            self.enqueue_tool_calls(calls);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("Failed to load session: {e}");
+                        self.notify(format!("Failed to load session: {e}"), true);
+                    }
+                    Err(e) => {
+                        error!("Session load task panicked: {e}");
+                        self.notify(format!("Session load failed: {e}"), true);
+                    }
                 }
             }
             EngineCommand::DeleteSession(path) => {
@@ -523,7 +539,10 @@ impl CoreEngine {
             .iter()
             .map(ChatMessage::with_ui_image_placeholders)
             .collect();
-        let _ = self.tx.send(EngineEvent::ChatUpdated { messages });
+        let _ = self.tx.send(EngineEvent::ChatUpdated {
+            messages,
+            num_ctx: self.active_num_ctx,
+        });
     }
 
     fn notify(&self, msg: impl Into<String>, is_error: bool) {

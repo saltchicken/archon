@@ -1,9 +1,12 @@
 use crate::core::{config::expand_tilde, tools::ToolCall};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Local;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{IgnoredAny, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
@@ -66,6 +69,44 @@ pub struct SessionData {
     pub messages: Vec<ChatMessage>,
     #[serde(skip)]
     pub file_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionSummary {
+    pub title: String,
+    pub updated_at: String,
+    #[serde(default, deserialize_with = "count_sequence")]
+    pub messages: usize,
+    #[serde(skip)]
+    pub file_path: PathBuf,
+}
+
+fn count_sequence<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct CountVisitor;
+
+    impl<'de> Visitor<'de> for CountVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a sequence of messages")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut count = 0;
+            while seq.next_element::<IgnoredAny>()?.is_some() {
+                count += 1;
+            }
+            Ok(count)
+        }
+    }
+
+    deserializer.deserialize_seq(CountVisitor)
 }
 
 pub struct SessionManager {
@@ -133,23 +174,33 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn list(&self) -> Vec<SessionData> {
-        let mut list: Vec<SessionData> = fs::read_dir(&self.history_dir)
+    pub fn list(&self) -> Vec<SessionSummary> {
+        let mut list: Vec<SessionSummary> = fs::read_dir(&self.history_dir)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
             .filter_map(|path| {
-                let mut data: SessionData =
-                    serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()?;
-                data.file_path = path;
-                Some(data)
+                let file = fs::File::open(&path).ok()?;
+                let reader = std::io::BufReader::new(file);
+                let mut summary: SessionSummary = serde_json::from_reader(reader).ok()?;
+                summary.file_path = path;
+                Some(summary)
             })
             .collect();
 
         list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         list
+    }
+
+    pub fn load(&self, path: &Path) -> Result<SessionData> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read session file: {}", path.display()))?;
+        let mut data: SessionData = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
+        data.file_path = path.to_path_buf();
+        Ok(data)
     }
 
     pub fn delete(&self, path: &Path) -> Result<()> {

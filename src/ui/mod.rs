@@ -1,6 +1,6 @@
 use crate::core::{
     config::{Config, Preset},
-    session::{ChatMessage, SessionData},
+    session::{ChatMessage, SessionSummary},
     workspace::ImageAttachment,
     EngineCommand, EngineEvent,
 };
@@ -29,9 +29,9 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use ratatui_textarea::TextArea;
 use std::{io, path::PathBuf};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use ratatui_textarea::TextArea;
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
@@ -61,6 +61,8 @@ pub struct TuiApp {
 
     attachments: Vec<ImageAttachment>,
     messages: Vec<ChatMessage>,
+    wrapped_messages: Vec<Vec<String>>,
+    last_wrap_width: usize,
     streaming_text: String,
     is_streaming: bool,
     status_bar: (String, bool),
@@ -82,10 +84,11 @@ pub struct TuiApp {
     msg_visual_ranges: Vec<(usize, u16, u16, bool)>,
 
     sidebar_expanded: bool,
+    show_help_bar: bool,
 
     modal: ActiveModal,
     file_path_input: String,
-    sessions: Vec<SessionData>,
+    sessions: Vec<SessionSummary>,
     session_idx: usize,
     pending_tool: Option<(String, usize, usize)>,
     tool_feedback: String,
@@ -103,6 +106,22 @@ fn create_text_area() -> TextArea<'static> {
     ta
 }
 
+fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
+    content
+        .lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(line, options)
+                    .into_iter()
+                    .map(|c| c.into_owned())
+                    .collect()
+            }
+        })
+        .collect()
+}
+
 impl TuiApp {
     pub fn new(model: String, config: Config, cmd_tx: UnboundedSender<EngineCommand>) -> Self {
         let num_ctx = config.app.default_context;
@@ -112,9 +131,14 @@ impl TuiApp {
             cmd_tx,
             attachments: Vec::new(),
             messages: Vec::new(),
+            wrapped_messages: Vec::new(),
+            last_wrap_width: 0,
             streaming_text: String::new(),
-            is_streaming: false,
-            status_bar: ("Ready. Press Ctrl+⏎ to send prompt.".into(), false),
+            is_streaming: bool::default(),
+            status_bar: (
+                "Ready. Press Ctrl+⏎ to send prompt, ? to toggle help.".into(),
+                false,
+            ),
             preset_idx: 0,
             sys_preset_idx: 0,
             enable_tools: true,
@@ -128,6 +152,7 @@ impl TuiApp {
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
+            show_help_bar: false,
             modal: ActiveModal::None,
             file_path_input: String::new(),
             sessions: Vec::new(),
@@ -188,8 +213,10 @@ impl TuiApp {
                 self.status_bar = (message, is_error);
             }
             EngineEvent::WorkspaceUpdated(list) => self.attachments = list,
-            EngineEvent::ChatUpdated { messages } => {
+            EngineEvent::ChatUpdated { messages, num_ctx } => {
                 self.messages = messages;
+                self.wrapped_messages.clear();
+                self.num_ctx = num_ctx;
                 self.is_streaming = false;
                 self.streaming_text.clear();
                 self.msg_scrolls.clear();
@@ -294,6 +321,10 @@ impl TuiApp {
         }
     }
 
+    fn is_prompt_empty(&self) -> bool {
+        self.text_area.lines().iter().all(|l| l.is_empty())
+    }
+
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('q') {
@@ -325,14 +356,16 @@ impl TuiApp {
             ActiveModal::Sessions => {
                 match key.code {
                     KeyCode::Esc => self.modal = ActiveModal::None,
+                    KeyCode::Char('?') => self.show_help_bar = !self.show_help_bar,
                     KeyCode::Up => self.session_idx = self.session_idx.saturating_sub(1),
                     KeyCode::Down if self.session_idx + 1 < self.sessions.len() => {
                         self.session_idx += 1;
                     }
                     KeyCode::Enter => {
-                        if let Some(s) = self.sessions.get(self.session_idx).cloned() {
-                            self.num_ctx = s.num_ctx;
-                            let _ = self.cmd_tx.send(EngineCommand::LoadSession(s));
+                        if let Some(s) = self.sessions.get(self.session_idx) {
+                            let _ = self
+                                .cmd_tx
+                                .send(EngineCommand::LoadSession(s.file_path.clone()));
                             self.modal = ActiveModal::None;
                         }
                     }
@@ -368,6 +401,9 @@ impl TuiApp {
                     KeyCode::Esc if self.is_streaming => {
                         let _ = self.cmd_tx.send(EngineCommand::CancelStream);
                     }
+                    KeyCode::Char('?') if !ctrl && self.is_prompt_empty() => {
+                        self.show_help_bar = !self.show_help_bar;
+                    }
                     KeyCode::Enter if ctrl => self.submit_prompt(),
                     KeyCode::Char('v') if ctrl => {
                         let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
@@ -397,7 +433,8 @@ impl TuiApp {
                         }
                     }
                     KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
-                        self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                        self.sys_preset_idx =
+                            (self.sys_preset_idx + 1) % self.config.system_presets.len();
                     }
                     _ => {
                         self.text_area.input(key);
@@ -425,7 +462,7 @@ impl TuiApp {
             self.status_bar = ("Prompt cannot be empty.".into(), true);
             return;
         }
-        
+
         self.text_area = create_text_area();
         self.chat_scroll = u16::MAX;
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
@@ -450,9 +487,19 @@ impl TuiApp {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        let root_constraints = if self.show_help_bar {
+            vec![
+                Constraint::Min(10),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ]
+        } else {
+            vec![Constraint::Min(10), Constraint::Length(1)]
+        };
+
         let root = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(10), Constraint::Length(1)])
+            .constraints(root_constraints)
             .split(f.area());
 
         let sidebar_width = if self.sidebar_expanded { 36 } else { 0 };
@@ -471,10 +518,30 @@ impl TuiApp {
         } else {
             Style::default().fg(Color::Cyan)
         };
+
+        let status_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(10), Constraint::Length(16)])
+            .split(root[1]);
+
         f.render_widget(
             Paragraph::new(format!(" {}", self.status_bar.0)).style(status_style),
-            root[1],
+            status_chunks[0],
         );
+
+        let help_toggle_label = if self.show_help_bar {
+            "[?] Hide Help "
+        } else {
+            "[?] Show Help "
+        };
+        f.render_widget(
+            Paragraph::new(help_toggle_label).style(Style::default().fg(Color::DarkGray)),
+            status_chunks[1],
+        );
+
+        if self.show_help_bar {
+            self.draw_help_bar(f, root[2]);
+        }
 
         match self.modal {
             ActiveModal::AddFile => self.draw_file_modal(f),
@@ -482,6 +549,40 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::None => {}
         }
+    }
+
+    fn draw_help_bar(&self, f: &mut Frame, area: Rect) {
+        let key_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(Color::Gray);
+        let sep_style = Style::default().fg(Color::DarkGray);
+
+        let bindings = [
+            ("^⏎", "Send"),
+            ("^B", "Sidebar"),
+            ("^S", "Sessions"),
+            ("^R", "New"),
+            ("^V", "Paste Img"),
+            ("^F", "Add Img"),
+            ("^X", "Clear Imgs"),
+            ("^T", "Tools"),
+            ("^P", "Preset"),
+            ("^Y", "SysPrompt"),
+            ("^Q", "Quit"),
+            ("?", "Toggle Bar"),
+        ];
+
+        let mut spans = vec![Span::raw(" ")];
+        for (idx, (key, desc)) in bindings.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled(" │ ", sep_style));
+            }
+            spans.push(Span::styled(*key, key_style));
+            spans.push(Span::styled(format!(" {desc}"), desc_style));
+        }
+
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
@@ -523,7 +624,8 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items).block(titled_block(format!(" Images ({}) ", self.attachments.len()))),
+            List::new(items)
+                .block(titled_block(format!(" Images ({}) ", self.attachments.len()))),
             chunks[1],
         );
     }
@@ -605,10 +707,29 @@ impl TuiApp {
         self.msg_unfolded.resize(self.messages.len() + 1, false);
         self.msg_visual_ranges.clear();
 
-        let mut lines = Vec::new();
         let options = textwrap::Options::new(available_width).break_words(true);
 
-        for (i, m) in self.messages.iter().enumerate() {
+        if self.last_wrap_width != available_width {
+            self.wrapped_messages.clear();
+            self.last_wrap_width = available_width;
+        }
+
+        if self.wrapped_messages.len() > self.messages.len() {
+            self.wrapped_messages.truncate(self.messages.len());
+        }
+
+        for m in &self.messages[self.wrapped_messages.len()..] {
+            self.wrapped_messages.push(wrap_text(&m.content, &options));
+        }
+
+        let mut lines = Vec::new();
+
+        for (i, (m, wrapped_content)) in self
+            .messages
+            .iter()
+            .zip(self.wrapped_messages.iter())
+            .enumerate()
+        {
             let (tag, color) = match m.role.as_str() {
                 "user" => ("USER", Color::Cyan),
                 "assistant" => ("ARCHON", Color::Green),
@@ -621,27 +742,12 @@ impl TuiApp {
                 .map(|v| format!(" [+{} img]", v.len()))
                 .unwrap_or_default();
 
-            let wrapped_content: Vec<String> = m
-                .content
-                .lines()
-                .flat_map(|line| {
-                    if line.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        textwrap::wrap(line, &options)
-                            .into_iter()
-                            .map(|c| c.into_owned())
-                            .collect()
-                    }
-                })
-                .collect();
-
             Self::render_message_block(
                 i,
                 &format!("{tag}{img_badge}"),
                 color,
                 m.truncated,
-                &wrapped_content,
+                wrapped_content,
                 self.msg_unfolded[i],
                 self.config.app.max_msg_lines,
                 &mut self.msg_scrolls[i],
@@ -652,21 +758,8 @@ impl TuiApp {
 
         if self.is_streaming {
             let i = self.messages.len();
-            let stream_lines: Vec<String> = self
-                .streaming_text
-                .lines()
-                .flat_map(|line| {
-                    if line.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        textwrap::wrap(line, &options)
-                            .into_iter()
-                            .map(|c| c.into_owned())
-                            .collect()
-                    }
-                })
-                .collect();
-                
+            let stream_lines = wrap_text(&self.streaming_text, &options);
+
             Self::render_message_block(
                 i,
                 "ARCHON (streaming...)",
@@ -721,9 +814,7 @@ impl TuiApp {
                 let prefix = if i == self.session_idx { ">> " } else { "   " };
                 ListItem::new(format!(
                     "{prefix}[{}] {} ({} msgs)",
-                    s.updated_at,
-                    s.title,
-                    s.messages.len()
+                    s.updated_at, s.title, s.messages
                 ))
             })
             .collect();
@@ -742,9 +833,11 @@ impl TuiApp {
 
         let mut lines: Vec<Line> = Vec::new();
         let mut section_color = Color::White;
+        let mut in_diff = false;
 
         for line in preview.lines() {
             if line.starts_with("--- ") && line.ends_with(" ---") {
+                in_diff = line == "--- UNIFIED DIFF ---";
                 let header_color = if line.contains("SEARCH") {
                     section_color = Color::LightRed;
                     Color::Red
@@ -759,6 +852,21 @@ impl TuiApp {
                     line,
                     Style::default().fg(header_color).add_modifier(Modifier::BOLD),
                 )));
+            } else if in_diff {
+                let style = if line.starts_with("+++") || line.starts_with("---") {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if line.starts_with("@@") {
+                    Style::default().fg(Color::Cyan)
+                } else if line.starts_with('+') {
+                    Style::default().fg(Color::Green)
+                } else if line.starts_with('-') {
+                    Style::default().fg(Color::LightRed)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                lines.push(Line::from(Span::styled(line, style)));
             } else {
                 lines.push(Line::from(Span::styled(
                     line,

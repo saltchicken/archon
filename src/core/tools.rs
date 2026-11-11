@@ -2,6 +2,7 @@ use crate::core::config::Config;
 use crate::tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use similar::TextDiff;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +47,46 @@ impl ToolRegistry {
         };
 
         let mut out = format!("Tool: {name}\n");
+
+        if name == "edit_file" {
+            let file_path = obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            let search = obj
+                .get("search_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let replace = obj
+                .get("replace_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            out.push_str(&format!("  file_path: {file_path}\n"));
+            for (k, v) in obj {
+                if !matches!(
+                    k.as_str(),
+                    "file_path" | "search_string" | "replace_string"
+                ) {
+                    match v.as_str() {
+                        Some(s) => out.push_str(&format!("  {k}: {s}\n")),
+                        None => out.push_str(&format!("  {k}: {v}\n")),
+                    }
+                }
+            }
+
+            let diff = TextDiff::from_lines(search, replace)
+                .unified_diff()
+                .context_radius(3)
+                .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
+                .to_string();
+
+            out.push_str("\n--- UNIFIED DIFF ---\n");
+            if diff.trim().is_empty() {
+                out.push_str("(No differences)\n");
+            } else {
+                out.push_str(&diff);
+            }
+            return out.trim_end().to_string();
+        }
+
         let mut multiline_blocks = Vec::new();
 
         for (k, v) in obj {
@@ -79,10 +120,7 @@ impl ToolRegistry {
         info!("Executing tool: {}", name);
         debug!("Tool arguments: {}", args);
 
-        let name_clone = name.clone();
-        let res = tokio::task::spawn_blocking(move || tools::execute(&name_clone, &args, &allowed))
-            .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("Tool task panicked: {e}")));
+        let res = tools::execute(&name, &args, &allowed, max_size).await;
 
         match res {
             Ok(mut out) => {
@@ -103,7 +141,8 @@ impl ToolRegistry {
                     "Tool '{}' executed successfully. Truncated: {}",
                     name, truncated
                 );
-                debug!("Tool output snippet: {:.200}", out.replace('\n', " "));
+                let snippet: String = out.replace('\n', " ").chars().take(200).collect();
+                debug!("Tool output snippet: {}", snippet);
                 (out, truncated)
             }
             Err(e) => {

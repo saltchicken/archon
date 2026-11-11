@@ -31,7 +31,11 @@ fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String> {
+pub async fn execute(
+    json_args: &Value,
+    allowed_commands: &[String],
+    max_output_size: usize,
+) -> Result<String> {
     let args: ExecuteCommandArgs = parse_args(json_args, "execute_command")?;
     let raw_cmd = args.command.trim();
 
@@ -58,5 +62,11 @@ pub fn execute(json_args: &Value, allowed_commands: &[String]) -> Result<String>
         }
     }
 
-    run_workspace_command(base, rest, "Command executed successfully (no output).")
+    run_workspace_command(
+        base,
+        rest,
+        "Command executed successfully (no output).",
+        max_output_size,
+    )
+    .await
 }

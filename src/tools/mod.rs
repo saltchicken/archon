@@ -12,8 +12,16 @@ use std::{
     env,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::Stdio,
+    time::Duration,
 };
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    time::timeout,
+};
+
+const COMMAND_TIMEOUT_SECS: u64 = 30;
 
 pub fn schemas() -> Vec<Value> {
     vec![
@@ -25,13 +33,35 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
-pub fn execute(name: &str, args: &Value, allowed_commands: &[String]) -> Result<String> {
+pub async fn execute(
+    name: &str,
+    args: &Value,
+    allowed_commands: &[String],
+    max_output_size: usize,
+) -> Result<String> {
     match name {
-        "context" => context::execute(args),
-        "create_file" => create_file::execute(args),
-        "edit_file" => edit_file::execute(args),
-        "execute_command" => execute_command::execute(args, allowed_commands),
-        "read_file" => read_file::execute(args),
+        "context" => context::execute(args, max_output_size).await,
+        "execute_command" => {
+            execute_command::execute(args, allowed_commands, max_output_size).await
+        }
+        "create_file" => {
+            let args = args.clone();
+            tokio::task::spawn_blocking(move || create_file::execute(&args))
+                .await
+                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+        }
+        "edit_file" => {
+            let args = args.clone();
+            tokio::task::spawn_blocking(move || edit_file::execute(&args))
+                .await
+                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+        }
+        "read_file" => {
+            let args = args.clone();
+            tokio::task::spawn_blocking(move || read_file::execute(&args))
+                .await
+                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+        }
         _ => bail!("Unknown tool: '{name}'"),
     }
 }
@@ -123,28 +153,76 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     Ok((cwd, target))
 }
 
-pub fn run_workspace_command<I, S>(program: &str, args: I, empty_msg: &str) -> Result<String>
+/// Reads up to `cap` bytes into memory, then drops `reader` immediately so the
+/// write end of the OS pipe closes (preventing the child process from deadlocking
+/// on a full pipe buffer when output exceeds `max_output_size`).
+async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, cap: u64) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    (&mut reader).take(cap).read_to_end(&mut buf).await?;
+    drop(reader);
+    Ok(buf)
+}
+
+pub async fn run_workspace_command<I, S>(
+    program: &str,
+    args: I,
+    empty_msg: &str,
+    max_output_size: usize,
+) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let cwd = workspace_root()?;
-    let out = Command::new(program)
+    let mut child = Command::new(program)
         .current_dir(&cwd)
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
         .with_context(|| format!("Error executing {program}"))?;
-    Ok(format_process_output(&out, empty_msg))
+
+    // Cap reads at max_output_size + 1 so ToolRegistry::execute can still detect truncation
+    let cap = (max_output_size as u64).saturating_add(1);
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture child stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture child stderr")?;
+
+    let (out_bytes, err_bytes) = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), async {
+        let (r1, r2, status) = tokio::join!(
+            read_capped(stdout, cap),
+            read_capped(stderr, cap),
+            child.wait()
+        );
+        let out_buf = r1?;
+        let err_buf = r2?;
+        let _ = status?;
+        Ok::<_, std::io::Error>((out_buf, err_buf))
+    })
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("Command '{program}' timed out after {COMMAND_TIMEOUT_SECS} seconds")
+    })?
+    .with_context(|| format!("Error reading output from {program}"))?;
+
+    Ok(format_process_bytes(&out_bytes, &err_bytes, empty_msg))
 }
 
-pub fn format_process_output(out: &Output, empty_msg: &str) -> String {
-    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.stderr.is_empty() {
+pub fn format_process_bytes(stdout: &[u8], stderr: &[u8], empty_msg: &str) -> String {
+    let mut combined = String::from_utf8_lossy(stdout).into_owned();
+    if !stderr.is_empty() {
         if !combined.is_empty() {
             combined.push('\n');
         }
         combined.push_str("[STDERR]\n");
-        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+        combined.push_str(&String::from_utf8_lossy(stderr));
     }
     if combined.trim().is_empty() {
         empty_msg.to_string()

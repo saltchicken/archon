@@ -20,7 +20,7 @@ pub fn schema() -> Value {
     )
 }
 
-pub fn execute(json_args: &Value) -> Result<String> {
+pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     let args: ContextArgs = parse_args(json_args, "context")?;
     let target = args.target_path.trim();
 
@@ -35,5 +35,7 @@ pub fn execute(json_args: &Value) -> Result<String> {
         "context",
         cmd_args,
         "Context executed successfully (no output).",
+        max_output_size,
     )
+    .await
 }
