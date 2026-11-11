@@ -174,6 +174,7 @@ impl TuiApp {
                     let _ = self.cmd_tx.send(EngineCommand::SwitchModel {
                         model: preset.name.clone(),
                         num_ctx: preset.context,
+                        max_tool_output_size: preset.max_tool_output_size,
                     });
                 }
                 self.modal = ActiveModal::None;

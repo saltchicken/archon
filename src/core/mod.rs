@@ -53,6 +53,7 @@ pub enum EngineCommand {
     SwitchModel {
         model: String,
         num_ctx: u32,
+        max_tool_output_size: usize,
     },
     SetContextWindow(u32),
 }
@@ -87,6 +88,7 @@ pub enum EngineEvent {
     ModelConfigUpdated {
         model: String,
         num_ctx: u32,
+        max_tool_output_size: usize,
     },
 }
 
@@ -100,6 +102,7 @@ pub struct CoreEngine {
     session_id: String,
     active_system_prompt: String,
     active_num_ctx: u32,
+    active_max_tool_output_size: usize,
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
@@ -133,6 +136,7 @@ impl CoreEngine {
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
         let client = provider.build_client(&config)?;
         let active_num_ctx = config.context_for_model(&model);
+        let active_max_tool_output_size = config.max_tool_output_for_model(&model);
 
         Ok(Self {
             model,
@@ -144,6 +148,7 @@ impl CoreEngine {
             session_id: SessionManager::new_id(),
             active_system_prompt: String::new(),
             active_num_ctx,
+            active_max_tool_output_size,
             messages: Vec::new(),
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
@@ -178,6 +183,14 @@ impl CoreEngine {
     fn apply_turn_config(&mut self, turn: &TurnConfig) {
         self.active_system_prompt = turn.system_prompt.clone();
         self.active_num_ctx = turn.num_ctx;
+    }
+
+    fn emit_model_config(&self) {
+        let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
+            model: self.model.clone(),
+            num_ctx: self.active_num_ctx,
+            max_tool_output_size: self.active_max_tool_output_size,
+        });
     }
 
     fn prompt_next_tool(&mut self) {
@@ -372,15 +385,15 @@ impl CoreEngine {
                 };
 
                 info!(
-                    "Resolving tool call: {}. Approved: {}",
-                    call.function.name, approved
+                    "Resolving tool call: {}. Approved: {} (max_tool_output_size: {})",
+                    call.function.name, approved, self.active_max_tool_output_size
                 );
 
                 let (mut internal_out, truncated) = if approved {
                     tools::execute(
                         &call,
                         &self.config.app.allowed_commands,
-                        self.config.app.max_tool_output_size,
+                        self.active_max_tool_output_size,
                     )
                     .await
                 } else {
@@ -465,12 +478,10 @@ impl CoreEngine {
                         } else {
                             self.config.context_for_model(&self.model)
                         };
+                        self.active_max_tool_output_size =
+                            self.config.max_tool_output_for_model(&self.model);
 
-                        let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
-                            model: self.model.clone(),
-                            num_ctx: self.active_num_ctx,
-                        });
-
+                        self.emit_model_config();
                         self.messages = data.messages;
                         self.emit_chat();
                         self.notify(format!("Loaded session: {}", data.title), false);
@@ -506,15 +517,18 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.active_num_ctx = self.config.context_for_model(&self.model);
-                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
-                    model: self.model.clone(),
-                    num_ctx: self.active_num_ctx,
-                });
+                self.active_max_tool_output_size =
+                    self.config.max_tool_output_for_model(&self.model);
+                self.emit_model_config();
                 self.messages.clear();
                 self.emit_chat();
                 self.notify("Started new chat session.", false);
             }
-            EngineCommand::SwitchModel { model, num_ctx } => {
+            EngineCommand::SwitchModel {
+                model,
+                num_ctx,
+                max_tool_output_size,
+            } => {
                 if self.active_task.is_some() {
                     self.notify(
                         "Cannot switch model while streaming. Cancel stream first.",
@@ -525,8 +539,8 @@ impl CoreEngine {
 
                 let new_provider = Provider::from_model(&model);
                 info!(
-                    "Hot-swapping to model '{}' ({:?}, ctx: {})",
-                    model, new_provider, num_ctx
+                    "Hot-swapping to model '{}' ({:?}, ctx: {}, tool_max: {})",
+                    model, new_provider, num_ctx, max_tool_output_size
                 );
 
                 if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
@@ -544,14 +558,17 @@ impl CoreEngine {
                 self.provider = new_provider;
                 self.client = new_client;
                 self.active_num_ctx = num_ctx.max(512);
+                self.active_max_tool_output_size = max_tool_output_size.max(1024);
 
                 self.save_session_bg().await;
-                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
-                    model: self.model.clone(),
-                    num_ctx: self.active_num_ctx,
-                });
+                self.emit_model_config();
                 self.notify(
-                    format!("Switched to {} (Ctx: {})", self.model, self.active_num_ctx),
+                    format!(
+                        "Switched to {} (Ctx: {}, Tool Max: {}KB)",
+                        self.model,
+                        self.active_num_ctx,
+                        self.active_max_tool_output_size / 1024
+                    ),
                     false,
                 );
             }
@@ -560,10 +577,7 @@ impl CoreEngine {
                 info!("Updating context window to {}", clamped);
                 self.active_num_ctx = clamped;
                 self.save_session_bg().await;
-                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
-                    model: self.model.clone(),
-                    num_ctx: self.active_num_ctx,
-                });
+                self.emit_model_config();
                 self.notify(format!("Context window set to {} tokens.", clamped), false);
             }
         }

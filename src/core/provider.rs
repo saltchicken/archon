@@ -44,11 +44,19 @@ impl Provider {
             .build()?)
     }
 
-    pub fn effective_default_ctx(&self, configured_ctx: u32) -> u32 {
+    /// Fallback context window if a model passed via CLI is not listed in `[[models]]`.
+    pub fn fallback_ctx(&self) -> u32 {
         match self {
-            // If the user hasn't customized the 32k Ollama default, use Gemini's 1M context window
-            Self::Gemini if configured_ctx == 32768 => 1_048_576,
-            _ => configured_ctx,
+            Self::Ollama => 32_768,
+            Self::Gemini => 1_048_576,
+        }
+    }
+
+    /// Fallback max tool output size if a model passed via CLI is not listed in `[[models]]`.
+    pub fn fallback_max_tool_output(&self) -> usize {
+        match self {
+            Self::Ollama => 131_072,
+            Self::Gemini => 524_288,
         }
     }
 

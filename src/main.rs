@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon/config.toml");
 
-    let (mut config, config_err) = Config::load(&base_config_path, ".archon.toml");
+    let (config, config_err) = Config::load(&base_config_path, ".archon.toml");
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
@@ -38,9 +38,8 @@ async fn main() -> Result<()> {
 
     let target_model = env::args()
         .nth(1)
-        .unwrap_or_else(|| config.app.default_model.clone());
+        .unwrap_or_else(|| config.startup_model());
     let provider = Provider::from_model(&target_model);
-    config.app.default_context = config.context_for_model(&target_model);
 
     info!("Targeting model: {} (Provider: {:?})", target_model, provider);
 

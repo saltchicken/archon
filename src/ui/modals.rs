@@ -130,6 +130,7 @@ impl TuiApp {
                 } else {
                     ""
                 };
+                let tool_kb = m.max_tool_output_size / 1024;
                 let style = if i == self.model_idx {
                     Style::default()
                         .fg(Color::Green)
@@ -140,7 +141,10 @@ impl TuiApp {
                     Style::default()
                 };
                 ListItem::new(Line::from(Span::styled(
-                    format!("{prefix}{} (default ctx: {}){active}", m.name, m.context),
+                    format!(
+                        "{prefix}{} (ctx: {}, tool max: {}KB){active}",
+                        m.name, m.context, tool_kb
+                    ),
                     style,
                 )))
             })
@@ -148,7 +152,7 @@ impl TuiApp {
 
         let widget =
             List::new(items).block(titled_block(" Select Model (⏎=Switch, Esc=Cancel) "));
-        render_modal(f, 60, 45, widget);
+        render_modal(f, 65, 45, widget);
     }
 
     pub(super) fn draw_context_modal(&self, f: &mut Frame) {

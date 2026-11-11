@@ -603,7 +603,11 @@ impl TuiApp {
                 ),
                 Span::raw(" (^W)"),
             ]),
-            Line::from(format!("Tools:   {} (^T)", toggle(self.enable_tools))),
+            Line::from(format!(
+                "Tools:   {} ({}KB max) (^T)",
+                toggle(self.enable_tools),
+                self.max_tool_output_size / 1024
+            )),
             Line::from(format!("Think:   {} (^K)", toggle(self.show_thinking))),
             Line::from(format!(
                 "Preset:  {} (^P)",

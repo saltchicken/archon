@@ -64,9 +64,7 @@ pub struct Config {
 #[serde(default)]
 pub struct AppSettings {
     pub default_model: String,
-    pub default_context: u32,
     pub max_msg_lines: usize,
-    pub max_tool_output_size: usize,
     pub history_dir: String,
     pub allowed_commands: Vec<String>,
     pub show_thinking: bool,
@@ -106,13 +104,15 @@ impl GeminiSettings {
 pub struct ModelPreset {
     pub name: String,
     pub context: u32,
+    pub max_tool_output_size: usize,
 }
 
 impl ModelPreset {
-    pub fn new(name: &str, context: u32) -> Self {
+    pub fn new(name: &str, context: u32, max_tool_output_size: usize) -> Self {
         Self {
             name: name.into(),
             context,
+            max_tool_output_size,
         }
     }
 }
@@ -136,9 +136,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_model: "qwen3.8:27b".into(),
-            default_context: 32768,
             max_msg_lines: 25,
-            max_tool_output_size: 131072,
             history_dir: "~/.local/share/archon/sessions".into(),
             allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
                 .into_iter()
@@ -177,9 +175,9 @@ impl Default for Config {
             ollama: OllamaSettings::default(),
             gemini: GeminiSettings::default(),
             models: vec![
-                ModelPreset::new("qwen3.8:27b", 32768),
-                ModelPreset::new("gemini-2.5-flash", 1_048_576),
-                ModelPreset::new("gemini-2.5-pro", 1_048_576),
+                ModelPreset::new("qwen3.8:27b", 32768, 131_072),
+                ModelPreset::new("gemini-2.5-flash", 1_048_576, 524_288),
+                ModelPreset::new("gemini-2.5-pro", 1_048_576, 524_288),
             ],
             presets: vec![
                 Preset::new("Custom", ""),
@@ -202,14 +200,32 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn startup_model(&self) -> String {
+        if !self.app.default_model.trim().is_empty() {
+            return self.app.default_model.trim().to_string();
+        }
+        self.models
+            .first()
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| "qwen3.8:27b".into())
+    }
+
     pub fn context_for_model(&self, model: &str) -> u32 {
         self.models
             .iter()
             .find(|m| m.name == model)
             .map(|m| m.context)
-            .unwrap_or_else(|| {
-                Provider::from_model(model).effective_default_ctx(self.app.default_context)
-            })
+            .unwrap_or_else(|| Provider::from_model(model).fallback_ctx())
+            .max(512)
+    }
+
+    pub fn max_tool_output_for_model(&self, model: &str) -> usize {
+        self.models
+            .iter()
+            .find(|m| m.name == model)
+            .map(|m| m.max_tool_output_size)
+            .unwrap_or_else(|| Provider::from_model(model).fallback_max_tool_output())
+            .max(1024)
     }
 
     pub fn load(

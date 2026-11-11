@@ -85,6 +85,7 @@ pub struct TuiApp {
     pub(super) enable_tools: bool,
     pub(super) show_thinking: bool,
     pub(super) num_ctx: u32,
+    pub(super) max_tool_output_size: usize,
     pub(super) used_tokens: u64,
     pub(super) text_area: TextArea<'static>,
 
@@ -127,6 +128,7 @@ pub(super) fn preset_label(presets: &[Preset], idx: usize) -> &str {
 impl TuiApp {
     pub fn new(model: String, config: Config, cmd_tx: UnboundedSender<EngineCommand>) -> Self {
         let num_ctx = config.context_for_model(&model);
+        let max_tool_output_size = config.max_tool_output_for_model(&model);
         let show_thinking = config.app.show_thinking;
         let model_idx = config
             .models
@@ -157,6 +159,7 @@ impl TuiApp {
             enable_tools: true,
             show_thinking,
             num_ctx,
+            max_tool_output_size,
             used_tokens: 0,
             text_area: create_text_area(),
             chat_scroll: 0,
@@ -315,9 +318,14 @@ impl TuiApp {
                 self.sessions = list;
                 self.session_idx = 0;
             }
-            EngineEvent::ModelConfigUpdated { model, num_ctx } => {
+            EngineEvent::ModelConfigUpdated {
+                model,
+                num_ctx,
+                max_tool_output_size,
+            } => {
                 self.model = model;
                 self.num_ctx = num_ctx;
+                self.max_tool_output_size = max_tool_output_size;
                 if let Some(idx) = self.config.models.iter().position(|m| m.name == self.model) {
                     self.model_idx = idx;
                 }
