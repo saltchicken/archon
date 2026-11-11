@@ -113,14 +113,14 @@ fn format_visible_lines(
                     Span::styled(
                         line.clone(),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(Color::Blue)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
             } else if in_code_block {
                 out.push(Line::from(vec![
-                    Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(line.clone(), Style::default().fg(Color::LightYellow)),
+                    Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                    Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
                 ]));
             } else {
                 out.push(Line::from(style_inline_markdown(line)));
@@ -177,7 +177,7 @@ fn render_message_block(
         if start > 0 {
             lines.push(Line::from(Span::styled(
                 format!("    ... ({start} lines above) ..."),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Blue),
             )));
         }
         lines.extend(format_visible_lines(content_lines, start, end));
@@ -187,7 +187,7 @@ fn render_message_block(
                     "    ... ({} lines below - Click to unfold) ...",
                     total_content - end
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Blue),
             )));
         }
     } else {
