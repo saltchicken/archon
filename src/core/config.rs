@@ -33,6 +33,7 @@ pub struct AppSettings {
     pub max_tool_output_size: usize,
     pub history_dir: String,
     pub allowed_commands: Vec<String>,
+    pub show_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +71,7 @@ impl Default for AppSettings {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            show_thinking: false,
         }
     }
 }

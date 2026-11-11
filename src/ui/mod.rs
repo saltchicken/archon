@@ -78,6 +78,7 @@ pub struct TuiApp {
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) enable_tools: bool,
+    pub(super) show_thinking: bool,
     pub(super) num_ctx: u32,
     pub(super) text_area: TextArea<'static>,
 
@@ -122,6 +123,7 @@ pub(super) fn preset_label(presets: &[Preset], idx: usize) -> &str {
 impl TuiApp {
     pub fn new(model: String, config: Config, cmd_tx: UnboundedSender<EngineCommand>) -> Self {
         let num_ctx = config.app.default_context;
+        let show_thinking = config.app.show_thinking;
         Self {
             model,
             config,
@@ -140,6 +142,7 @@ impl TuiApp {
             sys_preset_idx: 0,
             custom_system_prompt: None,
             enable_tools: true,
+            show_thinking,
             num_ctx,
             text_area: create_text_area(),
             chat_scroll: 0,

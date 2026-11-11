@@ -207,6 +207,10 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
+            KeyCode::Char('k') if ctrl => {
+                self.show_thinking = !self.show_thinking;
+                self.last_wrap_width = 0; // force re-wrap on next tick
+            }
             KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
             KeyCode::Char('p') if ctrl && !self.config.presets.is_empty() => {
                 self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();

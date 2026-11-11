@@ -8,8 +8,39 @@ use ratatui::{
     Frame,
 };
 
-fn format_message_display(m: &ChatMessage) -> String {
-    let mut text = m.content.clone();
+fn strip_thinking(text: &str) -> (String, bool) {
+    if !text.contains("<think>") {
+        return (text.to_string(), false);
+    }
+    
+    let mut result = String::with_capacity(text.len());
+    let mut current = text;
+    let mut is_thinking = false;
+    
+    while let Some(start) = current.find("<think>") {
+        result.push_str(&current[..start]);
+        if let Some(end_offset) = current[start..].find("</think>") {
+            current = &current[start + end_offset + 8..];
+            while current.starts_with('\n') {
+                current = &current[1..];
+            }
+        } else {
+            is_thinking = true;
+            current = "";
+            break;
+        }
+    }
+    result.push_str(current);
+    (result, is_thinking)
+}
+
+fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
+    let mut text = if show_thinking {
+        m.content.clone()
+    } else {
+        strip_thinking(&m.content).0
+    };
+    
     if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
@@ -274,6 +305,7 @@ impl TuiApp {
             ("^F", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
+            ("^K", "Think"),
             ("^P", "Preset"),
             ("^Y", "SysPrompt"),
             ("^Q", "Quit"),
@@ -300,6 +332,7 @@ impl TuiApp {
         let preset_name = preset_label(&self.config.presets, self.preset_idx);
         let sys_name = self.current_system_label();
         let tools_label = if self.enable_tools { "ON" } else { "OFF" };
+        let think_label = if self.show_thinking { "ON" } else { "OFF" };
 
         let settings_text = vec![
             Line::from(vec![
@@ -308,6 +341,7 @@ impl TuiApp {
             ]),
             Line::from(format!("Context: {}", self.num_ctx)),
             Line::from(format!("Tools:   {tools_label} (^T)")),
+            Line::from(format!("Think:   {think_label} (^K)")),
             Line::from(format!("Preset:  {preset_name} (^P)")),
             Line::from(format!("System:  {sys_name} (^Y)")),
         ];
@@ -359,7 +393,7 @@ impl TuiApp {
         self.wrapped_messages.truncate(self.messages.len());
 
         for m in &self.messages[self.wrapped_messages.len()..] {
-            let formatted = format_message_display(m);
+            let formatted = format_message_display(m, self.show_thinking);
             self.wrapped_messages.push(wrap_text(&formatted, &options));
         }
 
@@ -399,7 +433,19 @@ impl TuiApp {
 
         if self.is_streaming {
             let i = self.messages.len();
-            let stream_lines = wrap_text(&self.streaming_text, &options);
+            let text_to_wrap = if self.show_thinking {
+                self.streaming_text.clone()
+            } else {
+                let (mut stripped, is_thinking) = strip_thinking(&self.streaming_text);
+                if is_thinking {
+                    if !stripped.is_empty() && !stripped.ends_with('\n') {
+                        stripped.push_str("\n\n");
+                    }
+                    stripped.push_str("[Thinking...]");
+                }
+                stripped
+            };
+            let stream_lines = wrap_text(&text_to_wrap, &options);
 
             render_message_block(
                 i,
