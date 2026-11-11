@@ -3,10 +3,10 @@ mod tools;
 mod ui;
 
 use anyhow::Result;
-use core::{config::Config, ollama::run_preflight, CoreEngine};
+use core::{config::Config, ollama::run_preflight, CoreEngine, EngineEvent};
 use std::env;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use ui::TuiApp;
 
 #[tokio::main]
@@ -21,9 +21,13 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon/config.toml");
 
-    let config = Config::load(&base_config_path, ".archon.toml");
+    let (config, config_err) = Config::load(&base_config_path, ".archon.toml");
     let guard = core::logger::init(&config.app.history_dir);
-    info!("Archon starting up. Config loaded successfully.");
+    if let Some(ref err) = config_err {
+        warn!("{err}");
+    } else {
+        info!("Archon starting up. Config loaded successfully.");
+    }
 
     let target_model = env::args()
         .nth(1)
@@ -32,6 +36,9 @@ async fn main() -> Result<()> {
 
     if let Err(e) = run_preflight(&target_model, &config).await {
         error!("Preflight failed: {}", e);
+        if let Some(cfg_err) = config_err {
+            eprintln!("Warning: {cfg_err}");
+        }
         eprintln!("{e}");
         drop(guard);
         std::process::exit(1);
@@ -39,6 +46,13 @@ async fn main() -> Result<()> {
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+
+    if let Some(err) = config_err {
+        let _ = ev_tx.send(EngineEvent::Notification {
+            message: err,
+            is_error: true,
+        });
+    }
 
     let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
     let engine_handle = tokio::spawn(engine.run(cmd_rx));

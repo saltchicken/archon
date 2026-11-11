@@ -112,7 +112,10 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(base_path: impl AsRef<Path>, local_path: impl AsRef<Path>) -> Self {
+    pub fn load(
+        base_path: impl AsRef<Path>,
+        local_path: impl AsRef<Path>,
+    ) -> (Self, Option<String>) {
         let base_path = base_path.as_ref();
         if !base_path.exists() {
             if let Some(parent) = base_path.parent() {
@@ -123,11 +126,17 @@ impl Config {
             }
         }
 
-        Figment::from(Serialized::defaults(Self::default()))
+        match Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file(base_path))
             .merge(Toml::file(local_path.as_ref()))
             .merge(Env::prefixed("ARCHON_"))
             .extract()
-            .unwrap_or_default()
+        {
+            Ok(cfg) => (cfg, None),
+            Err(e) => (
+                Self::default(),
+                Some(format!("Config error (using defaults): {e}")),
+            ),
+        }
     }
 }
