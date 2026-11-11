@@ -10,6 +10,22 @@ use ratatui::{
     widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
+use textwrap::core::display_width;
+
+#[derive(Clone, Copy, PartialEq)]
+enum ColAlign {
+    Left,
+    Center,
+    Right,
+}
+
+fn sanitize_line(s: &str) -> String {
+    // Strip \r and Variation Selector-16 (\u{fe0f}) which causes terminal/ratatui
+    // cursor desync on ambiguous-width symbols like ⚠️ (U+26A0 + U+FE0F).
+    s.replace('\r', "")
+        .replace('\u{fe0f}', "")
+        .replace('\t', "    ")
+}
 
 fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
     let mut text = if show_thinking {
@@ -17,6 +33,8 @@ fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
     } else {
         strip_thinking(&m.content).0
     };
+
+    text = sanitize_line(&text);
 
     if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
         if !text.trim().is_empty() {
@@ -38,20 +56,275 @@ fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
     text
 }
 
-fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
-    content
-        .lines()
-        .flat_map(|line| {
-            if line.is_empty() {
+fn is_table_line(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') || (t.ends_with('|') && t.contains('|'))
+}
+
+fn parse_table_cells(line: &str) -> Vec<String> {
+    let mut s = line.trim();
+    if let Some(stripped) = s.strip_prefix('|') {
+        s = stripped;
+    }
+    if let Some(stripped) = s.strip_suffix('|') {
+        s = stripped;
+    }
+
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'|') {
+            cur.push(chars.next().unwrap());
+        } else if c == '|' {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+    }
+    cells.push(cur.trim().to_string());
+    cells
+}
+
+fn parse_separator_row(cells: &[String]) -> Option<Vec<ColAlign>> {
+    if cells.is_empty() {
+        return None;
+    }
+    let mut aligns = Vec::with_capacity(cells.len());
+    for cell in cells {
+        let t = cell.trim();
+        if t.is_empty() {
+            return None;
+        }
+        let left = t.starts_with(':');
+        let right = t.ends_with(':');
+        let core = t.trim_start_matches(':').trim_end_matches(':');
+        if core.is_empty() || !core.chars().all(|c| c == '-') {
+            return None;
+        }
+        let align = match (left, right) {
+            (true, true) => ColAlign::Center,
+            (false, true) => ColAlign::Right,
+            _ => ColAlign::Left,
+        };
+        aligns.push(align);
+    }
+    Some(aligns)
+}
+
+fn pad_cell(text: &str, width: usize, align: ColAlign) -> String {
+    let w = display_width(text);
+    let pad = width.saturating_sub(w);
+    match align {
+        ColAlign::Left => format!("{text}{}", " ".repeat(pad)),
+        ColAlign::Right => format!("{}{text}", " ".repeat(pad)),
+        ColAlign::Center => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(right))
+        }
+    }
+}
+
+fn draw_table_border(col_widths: &[usize], left: char, mid: char, right: char) -> String {
+    let mut out = String::new();
+    out.push(left);
+    for (i, &w) in col_widths.iter().enumerate() {
+        if i > 0 {
+            out.push(mid);
+        }
+        for _ in 0..(w + 2) {
+            out.push('─');
+        }
+    }
+    out.push(right);
+    out
+}
+
+fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<Vec<String>> {
+    if raw_lines.len() < 2 {
+        return None;
+    }
+
+    let parsed_rows: Vec<Vec<String>> = raw_lines.iter().map(|l| parse_table_cells(l)).collect();
+    let mut aligns = parse_separator_row(&parsed_rows[1])?;
+
+    let num_cols = parsed_rows.iter().map(Vec::len).max().unwrap_or(0);
+    if num_cols == 0 {
+        return None;
+    }
+    aligns.resize(num_cols, ColAlign::Left);
+
+    let mut col_widths = vec![1usize; num_cols];
+    for (r_idx, row) in parsed_rows.iter().enumerate() {
+        if r_idx == 1 {
+            continue;
+        }
+        for (c_idx, cell) in row.iter().enumerate() {
+            col_widths[c_idx] = col_widths[c_idx].max(display_width(cell));
+        }
+    }
+
+    let overhead = 3 * num_cols + 1;
+    let total_natural: usize = col_widths.iter().sum::<usize>() + overhead;
+
+    if total_natural > available_width && available_width > overhead + num_cols {
+        let target_sum = available_width - overhead;
+        let min_col = 3usize;
+        while col_widths.iter().sum::<usize>() > target_sum {
+            if let Some((max_idx, &max_val)) = col_widths
+                .iter()
+                .enumerate()
+                .max_by_key(|&(_, &w)| w)
+            {
+                if max_val <= min_col {
+                    break;
+                }
+                col_widths[max_idx] -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    out.push(draw_table_border(&col_widths, '┌', '┬', '┐'));
+
+    for (r_idx, row) in parsed_rows.iter().enumerate() {
+        if r_idx == 1 {
+            out.push(draw_table_border(&col_widths, '├', '┼', '┤'));
+            continue;
+        }
+
+        let mut wrapped_cells: Vec<Vec<String>> = Vec::with_capacity(num_cols);
+        let mut max_sublines = 1usize;
+
+        for c_idx in 0..num_cols {
+            let cell_text = row.get(c_idx).map_or("", String::as_str);
+            let w = col_widths[c_idx].max(1);
+            let wrapped: Vec<String> = if cell_text.is_empty() {
                 vec![String::new()]
             } else {
-                textwrap::wrap(line, options)
+                let opts = textwrap::Options::new(w).break_words(true);
+                textwrap::wrap(cell_text, &opts)
                     .into_iter()
                     .map(|c| c.into_owned())
                     .collect()
+            };
+            max_sublines = max_sublines.max(wrapped.len());
+            wrapped_cells.push(wrapped);
+        }
+
+        for sub in 0..max_sublines {
+            let mut line = String::from("│");
+            for c_idx in 0..num_cols {
+                let part = wrapped_cells[c_idx]
+                    .get(sub)
+                    .map_or("", String::as_str);
+                let padded = pad_cell(part, col_widths[c_idx], aligns[c_idx]);
+                line.push(' ');
+                line.push_str(&padded);
+                line.push_str(" │");
             }
-        })
-        .collect()
+            out.push(line);
+        }
+    }
+
+    out.push(draw_table_border(&col_widths, '└', '┴', '┘'));
+    Some(out)
+}
+
+fn wrap_single_line(line: &str, options: &textwrap::Options<'_>) -> Vec<String> {
+    if line.is_empty() {
+        vec![String::new()]
+    } else {
+        textwrap::wrap(line, options)
+            .into_iter()
+            .map(|c| c.into_owned())
+            .collect()
+    }
+}
+
+fn flush_table_buffer<'a>(
+    table_buf: &mut Vec<&'a str>,
+    out: &mut Vec<String>,
+    options: &textwrap::Options<'_>,
+) {
+    if table_buf.is_empty() {
+        return;
+    }
+    if let Some(formatted) = format_markdown_table(table_buf, options.width) {
+        out.extend(formatted);
+    } else {
+        for raw in table_buf.iter() {
+            out.extend(wrap_single_line(raw, options));
+        }
+    }
+    table_buf.clear();
+}
+
+fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut table_buf: Vec<&str> = Vec::new();
+    let mut in_code_block = false;
+
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            flush_table_buffer(&mut table_buf, &mut out, options);
+            in_code_block = !in_code_block;
+            out.extend(wrap_single_line(line, options));
+            continue;
+        }
+
+        if !in_code_block && is_table_line(line) {
+            table_buf.push(line);
+        } else {
+            flush_table_buffer(&mut table_buf, &mut out, options);
+            out.extend(wrap_single_line(line, options));
+        }
+    }
+    flush_table_buffer(&mut table_buf, &mut out, options);
+    out
+}
+
+fn style_inline_segments(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (idx, segment) in text.split('`').enumerate() {
+        if !segment.is_empty() {
+            if idx % 2 == 1 {
+                spans.push(Span::styled(
+                    format!("`{segment}`"),
+                    base_style.fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::styled(segment.to_string(), base_style));
+            }
+        }
+    }
+    spans
+}
+
+fn style_table_row(line: &str, is_header: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("  ")];
+    let border_style = Style::default().fg(Color::DarkGray);
+    let cell_style = if is_header {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    for (idx, part) in line.split('│').enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled("│", border_style));
+        }
+        if !part.is_empty() {
+            spans.extend(style_inline_segments(part, cell_style));
+        }
+    }
+    spans
 }
 
 fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
@@ -78,19 +351,15 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
         return spans;
     }
 
-    for (idx, segment) in line.split('`').enumerate() {
-        if !segment.is_empty() {
-            if idx % 2 == 1 {
-                spans.push(Span::styled(
-                    format!("`{segment}`"),
-                    Style::default().fg(Color::Yellow),
-                ));
-            } else {
-                spans.push(Span::raw(segment.to_string()));
-            }
-        }
+    if trimmed.starts_with(['┌', '├', '└']) {
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        return spans;
     }
 
+    spans.extend(style_inline_segments(line, Style::default()));
     spans
 }
 
@@ -100,10 +369,21 @@ fn format_visible_lines(
     end: usize,
 ) -> Vec<Line<'static>> {
     let mut in_code_block = false;
+    let mut in_table_header = false;
     let mut out = Vec::with_capacity(end.saturating_sub(start));
 
     for (idx, line) in content_lines.iter().enumerate().take(end) {
-        let is_fence = line.trim_start().starts_with("```");
+        let trimmed = line.trim_start();
+        let is_fence = trimmed.starts_with("```");
+
+        if !in_code_block {
+            if trimmed.starts_with('┌') {
+                in_table_header = true;
+            } else if trimmed.starts_with(['├', '└']) {
+                in_table_header = false;
+            }
+        }
+
         if idx >= start {
             let formatted = if is_fence {
                 vec![
@@ -118,13 +398,17 @@ fn format_visible_lines(
                     Span::styled("  │ ", Style::default().fg(Color::Blue)),
                     Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
                 ]
+            } else if trimmed.starts_with('│') && trimmed.ends_with('│') {
+                style_table_row(line, in_table_header)
             } else {
                 style_inline_markdown(line)
             };
             out.push(Line::from(formatted));
         }
+
         if is_fence {
             in_code_block = !in_code_block;
+            in_table_header = false;
         }
     }
 
@@ -420,7 +704,10 @@ impl TuiApp {
                 }
                 stripped
             };
-            let stream_lines = wrap_text(&text_to_wrap, &options);
+            
+            // Sanitize stream text too to avoid cursor drift during active generation
+            let sanitized_stream = sanitize_line(&text_to_wrap);
+            let stream_lines = wrap_text(&sanitized_stream, &options);
 
             render_message_block(
                 i,
