@@ -40,7 +40,7 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
     for line in preview.lines() {
         if line.starts_with("--- ") && line.ends_with(" ---") {
             in_diff = line == "--- UNIFIED DIFF ---";
-            let header_color = if line.contains("SEARCH") {
+            let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
                 section_color = Color::LightRed;
                 Color::Red
             } else if line.contains("REPLACE") || line.contains("CONTENT") {

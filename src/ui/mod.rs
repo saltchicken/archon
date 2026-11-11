@@ -70,11 +70,13 @@ pub struct TuiApp {
 
     pub(super) preset_idx: usize,
     pub(super) sys_preset_idx: usize,
+    pub(super) custom_system_prompt: Option<String>,
     pub(super) enable_tools: bool,
     pub(super) num_ctx: u32,
     pub(super) text_area: TextArea<'static>,
 
     pub(super) chat_scroll: u16,
+    pub(super) follow_tail: bool,
     pub(super) tool_scroll: u16,
     pub(super) total_chat_lines: u16,
 
@@ -134,10 +136,12 @@ impl TuiApp {
             ),
             preset_idx: 0,
             sys_preset_idx: 0,
+            custom_system_prompt: None,
             enable_tools: true,
             num_ctx,
             text_area: create_text_area(),
             chat_scroll: 0,
+            follow_tail: true,
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_scrolls: Vec::new(),
@@ -185,8 +189,15 @@ impl TuiApp {
                         Event::Key(key) if self.handle_key(key) => break,
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         Event::Paste(text) => {
-                            let clean_text = text.replace('\r', "");
-                            self.text_area.insert_str(clean_text);
+                            let single_line = text.replace(['\r', '\n'], "");
+                            match self.modal {
+                                ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
+                                ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
+                                ActiveModal::None => {
+                                    self.text_area.insert_str(text.replace('\r', ""));
+                                }
+                                ActiveModal::Sessions => {}
+                            }
                         }
                         _ => {}
                     }
@@ -206,10 +217,15 @@ impl TuiApp {
                 self.status_bar = (message, is_error);
             }
             EngineEvent::WorkspaceUpdated(list) => self.attachments = list,
-            EngineEvent::ChatUpdated { messages, num_ctx } => {
+            EngineEvent::ChatUpdated {
+                messages,
+                num_ctx,
+                system_prompt,
+            } => {
                 self.messages = messages;
                 self.wrapped_messages.clear();
                 self.num_ctx = num_ctx;
+                self.sync_system_prompt(&system_prompt);
                 self.is_streaming = false;
                 self.streaming_text.clear();
                 self.msg_scrolls.clear();
@@ -222,6 +238,7 @@ impl TuiApp {
                     "Streaming response from Ollama... (Esc to cancel)".into(),
                     false,
                 );
+                self.follow_tail = true;
                 self.chat_scroll = u16::MAX;
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
@@ -245,12 +262,47 @@ impl TuiApp {
         }
     }
 
+    fn sync_system_prompt(&mut self, system_prompt: &str) {
+        if let Some(idx) = self
+            .config
+            .system_presets
+            .iter()
+            .position(|p| p.prompt == system_prompt)
+        {
+            self.sys_preset_idx = idx;
+            self.custom_system_prompt = None;
+        } else if system_prompt.is_empty() {
+            if let Some(idx) = self
+                .config
+                .system_presets
+                .iter()
+                .position(|p| p.prompt.is_empty())
+            {
+                self.sys_preset_idx = idx;
+            }
+            self.custom_system_prompt = None;
+        } else {
+            self.custom_system_prompt = Some(system_prompt.to_string());
+        }
+    }
+
     pub(super) fn current_system_prompt(&self) -> String {
+        if let Some(custom) = &self.custom_system_prompt {
+            return custom.clone();
+        }
         self.config
             .system_presets
             .get(self.sys_preset_idx)
             .map(|p| p.prompt.clone())
             .unwrap_or_default()
+    }
+
+    pub(super) fn current_system_label(&self) -> &str {
+        if self.custom_system_prompt.is_some() {
+            "Custom (Session)"
+        } else {
+            preset_label(&self.config.system_presets, self.sys_preset_idx)
+        }
     }
 
     pub(super) fn submit_prompt(&mut self) {
@@ -264,6 +316,7 @@ impl TuiApp {
         }
 
         self.text_area = create_text_area();
+        self.follow_tail = true;
         self.chat_scroll = u16::MAX;
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
@@ -276,6 +329,7 @@ impl TuiApp {
     pub(super) fn resolve_modal_tool(&mut self, approved: bool) {
         if self.pending_tool.take().is_some() {
             self.modal = ActiveModal::None;
+            self.follow_tail = true;
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
                 approved,
                 feedback: std::mem::take(&mut self.tool_feedback),

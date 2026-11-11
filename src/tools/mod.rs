@@ -58,7 +58,7 @@ pub async fn execute(
         }
         "read_file" => {
             let args = args.clone();
-            tokio::task::spawn_blocking(move || read_file::execute(&args))
+            tokio::task::spawn_blocking(move || read_file::execute(&args, max_output_size))
                 .await
                 .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
         }

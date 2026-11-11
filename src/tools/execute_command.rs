@@ -1,11 +1,9 @@
-use crate::tools::{
-    auto_schema, parse_args, run_workspace_command, validate_relative_path, workspace_root,
-};
+use crate::tools::{auto_schema, parse_args, run_workspace_command, workspace_root};
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Component, Path};
 
 #[derive(Deserialize, JsonSchema)]
 struct ExecuteCommandArgs {
@@ -20,14 +18,41 @@ pub fn schema() -> Value {
     )
 }
 
-fn validate_arg_path(candidate: &str, cwd: &Path) -> Result<()> {
-    if candidate.is_empty() {
+fn check_path_candidate(candidate: &str, cwd: &Path) -> Result<()> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
         return Ok(());
     }
-    let joined = cwd.join(validate_relative_path(candidate)?);
-    if joined.exists() && !dunce::canonicalize(&joined)?.starts_with(cwd) {
-        bail!("Security violation: argument '{candidate}' resolves outside workspace");
+
+    if trimmed.starts_with('~') {
+        bail!("Security violation: home directory expansion ('~') is not allowed in '{trimmed}'");
     }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        bail!("Security violation: absolute path '{trimmed}' is not allowed");
+    }
+
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
+    {
+        bail!("Security violation: path traversal ('..') blocked in '{trimmed}'");
+    }
+
+    let joined = cwd.join(path);
+    if joined.exists() {
+        let canon = dunce::canonicalize(&joined)?;
+        if !canon.starts_with(cwd) {
+            bail!("Security violation: '{trimmed}' resolves outside workspace");
+        }
+    } else if let Some(ancestor) = joined.ancestors().skip(1).find(|p| p.exists()) {
+        let canon = dunce::canonicalize(ancestor)?;
+        if !canon.starts_with(cwd) {
+            bail!("Security violation: '{trimmed}' parent resolves outside workspace");
+        }
+    }
+
     Ok(())
 }
 
@@ -54,11 +79,20 @@ pub async fn execute(
 
     let cwd = workspace_root()?;
     for arg in rest {
-        validate_arg_path(arg, &cwd)?;
         if let Some((_, val)) = arg.split_once('=') {
-            validate_arg_path(val, &cwd)?;
-        } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
-            validate_arg_path(&arg[2..], &cwd)?;
+            check_path_candidate(val, &cwd)?;
+        } else if arg.starts_with('-') {
+            // Allow standard flags (e.g. -rn, --color), but still block traversal or absolute paths
+            // embedded inside flag arguments like -f../secret or -I/etc
+            if arg.contains("..") || arg.contains('/') || arg.contains('\\') || arg.contains('~') {
+                let stripped = arg.trim_start_matches('-');
+                check_path_candidate(stripped, &cwd)?;
+                if stripped.len() > 1 {
+                    check_path_candidate(&stripped[1..], &cwd)?;
+                }
+            }
+        } else {
+            check_path_candidate(arg, &cwd)?;
         }
     }
 

@@ -12,6 +12,20 @@ impl TuiApp {
             .map(|&(i, _, _, truncated)| (i, truncated))
     }
 
+    fn scroll_chat_up(&mut self, lines: u16) {
+        self.follow_tail = false;
+        self.chat_scroll = self.chat_scroll.saturating_sub(lines);
+    }
+
+    fn scroll_chat_down(&mut self, lines: u16) {
+        self.chat_scroll = self.chat_scroll.saturating_add(lines);
+        let view_height = self.chat_area.height.saturating_sub(2);
+        let max_scroll = self.total_chat_lines.saturating_sub(view_height);
+        if self.chat_scroll >= max_scroll {
+            self.follow_tail = true;
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (x, y) = (mouse.column, mouse.row);
 
@@ -46,11 +60,11 @@ impl TuiApp {
                         return;
                     }
                 }
-                self.chat_scroll = if is_up {
-                    self.chat_scroll.saturating_sub(3)
+                if is_up {
+                    self.scroll_chat_up(3);
                 } else {
-                    self.chat_scroll.saturating_add(3)
-                };
+                    self.scroll_chat_down(3);
+                }
             }
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
                 if is_on_scrollbar =>
@@ -61,6 +75,7 @@ impl TuiApp {
                     let track_height = view_height.saturating_sub(1);
                     let fraction = inner_y.min(track_height) as f32 / track_height as f32;
                     self.chat_scroll = (fraction * max_scroll as f32).round() as u16;
+                    self.follow_tail = self.chat_scroll >= max_scroll;
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -158,9 +173,26 @@ impl TuiApp {
     }
 
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
         match key.code {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
+            }
+            KeyCode::PageUp => {
+                let page = self.chat_area.height.saturating_sub(4).max(3);
+                self.scroll_chat_up(page);
+            }
+            KeyCode::PageDown => {
+                let page = self.chat_area.height.saturating_sub(4).max(3);
+                self.scroll_chat_down(page);
+            }
+            KeyCode::Up if alt => self.scroll_chat_up(3),
+            KeyCode::Down if alt => self.scroll_chat_down(3),
+            KeyCode::Home if ctrl => self.scroll_chat_up(u16::MAX),
+            KeyCode::End if ctrl => {
+                self.follow_tail = true;
+                self.chat_scroll = u16::MAX;
             }
             KeyCode::Char('?') if !ctrl && self.is_prompt_empty() => {
                 self.show_help_bar = !self.show_help_bar;
@@ -195,6 +227,7 @@ impl TuiApp {
             }
             KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
                 self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                self.custom_system_prompt = None;
             }
             _ => {
                 self.text_area.input(key);

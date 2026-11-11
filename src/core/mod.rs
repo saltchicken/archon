@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 use tools::{ToolCall, ToolRegistry};
 use tracing::{debug, error, info};
@@ -57,6 +57,7 @@ pub enum EngineEvent {
     ChatUpdated {
         messages: Vec<ChatMessage>,
         num_ctx: u32,
+        system_prompt: String,
     },
     StreamStarted,
     StreamChunk(String),
@@ -88,7 +89,7 @@ pub struct CoreEngine {
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
     active_task: Option<JoinHandle<()>>,
-    bg_tasks: JoinSet<()>,
+    save_task: Option<JoinHandle<()>>,
     pending_tools: VecDeque<ToolCall>,
     pending_batch_total: usize,
     tx: UnboundedSender<EngineEvent>,
@@ -123,7 +124,7 @@ impl CoreEngine {
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
             active_task: None,
-            bg_tasks: JoinSet::new(),
+            save_task: None,
             pending_tools: VecDeque::new(),
             pending_batch_total: 0,
             tx,
@@ -203,11 +204,6 @@ impl CoreEngine {
                     let Some(ev) = ev_opt else { break };
                     self.handle_internal_event(ev).await;
                 }
-                Some(res) = self.bg_tasks.join_next(), if !self.bg_tasks.is_empty() => {
-                    if let Err(e) = res {
-                        error!("Background task error: {e}");
-                    }
-                }
             }
         }
 
@@ -215,8 +211,10 @@ impl CoreEngine {
             h.abort();
         }
 
-        info!("Shutting down CoreEngine, awaiting remaining background tasks...");
-        while self.bg_tasks.join_next().await.is_some() {}
+        info!("Shutting down CoreEngine, awaiting pending session save...");
+        if let Some(save_handle) = self.save_task.take() {
+            let _ = save_handle.await;
+        }
         info!("All background tasks completely flushed.");
     }
 
@@ -289,7 +287,7 @@ impl CoreEngine {
                     ..ChatMessage::new("user", prompt)
                 });
 
-                self.save_and_emit_chat();
+                self.save_and_emit_chat().await;
                 self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone())
                     .await;
             }
@@ -303,7 +301,7 @@ impl CoreEngine {
                             "assistant",
                             format!("{text}\n\n*[Generation cancelled]*"),
                         ));
-                        self.save_session_bg();
+                        self.save_session_bg().await;
                     }
                     self.stream_buffer.clear();
                     self.emit_chat();
@@ -348,7 +346,7 @@ impl CoreEngine {
                 let mut msg = ChatMessage::new("tool", internal_out);
                 msg.truncated = truncated;
                 self.messages.push(msg);
-                self.save_and_emit_chat();
+                self.save_and_emit_chat().await;
 
                 info!("Tool execution resolved and recorded to chat history.");
 
@@ -371,6 +369,10 @@ impl CoreEngine {
             }
             EngineCommand::LoadSession(path) => {
                 info!("Loading session from path: {}", path.display());
+                if let Some(save_handle) = self.save_task.take() {
+                    let _ = save_handle.await;
+                }
+
                 let sessions = Arc::clone(&self.sessions);
                 let res = tokio::task::spawn_blocking(move || sessions.load(&path)).await;
 
@@ -409,6 +411,9 @@ impl CoreEngine {
             }
             EngineCommand::ResetChat => {
                 info!("Resetting chat session");
+                if let Some(save_handle) = self.save_task.take() {
+                    let _ = save_handle.await;
+                }
                 self.abort_active_state();
                 self.session_id = SessionManager::new_id();
                 self.messages.clear();
@@ -437,7 +442,7 @@ impl CoreEngine {
                         tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
                         ..ChatMessage::new("assistant", final_text)
                     });
-                    self.save_session_bg();
+                    self.save_session_bg().await;
                 }
 
                 self.emit_chat();
@@ -462,12 +467,17 @@ impl CoreEngine {
         }
     }
 
-    fn save_and_emit_chat(&mut self) {
-        self.save_session_bg();
+    async fn save_and_emit_chat(&mut self) {
+        self.save_session_bg().await;
         self.emit_chat();
     }
 
-    fn save_session_bg(&mut self) {
+    async fn save_session_bg(&mut self) {
+        // Serialize session writes so two rapid updates never race on disk
+        if let Some(prev) = self.save_task.take() {
+            let _ = prev.await;
+        }
+
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
         let model = self.model.clone();
@@ -479,9 +489,11 @@ impl CoreEngine {
             .map(ChatMessage::without_images)
             .collect();
 
-        self.bg_tasks.spawn_blocking(move || {
-            let _ = sessions.save(&id, &model, &sys, ctx, &msgs);
-        });
+        self.save_task = Some(tokio::task::spawn_blocking(move || {
+            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs) {
+                error!("Failed to save session {id}: {e}");
+            }
+        }));
     }
 
     async fn spawn_ollama_turn(
@@ -542,6 +554,7 @@ impl CoreEngine {
         let _ = self.tx.send(EngineEvent::ChatUpdated {
             messages,
             num_ctx: self.active_num_ctx,
+            system_prompt: self.active_system_prompt.clone(),
         });
     }
 

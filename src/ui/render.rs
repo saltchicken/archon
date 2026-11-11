@@ -1,4 +1,5 @@
 use super::{preset_label, titled_block, ActiveModal, TuiApp};
+use crate::core::session::ChatMessage;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,6 +7,35 @@ use ratatui::{
     widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
+
+fn format_message_display(m: &ChatMessage) -> String {
+    let mut text = m.content.clone();
+    if let Some(calls) = &m.tool_calls {
+        if !calls.is_empty() {
+            if !text.trim().is_empty() {
+                text.push_str("\n\n");
+            }
+            for call in calls {
+                let compact_args = serde_json::to_string(&call.function.arguments)
+                    .unwrap_or_default();
+                let preview: String = compact_args.chars().take(80).collect();
+                let ellipsis = if compact_args.chars().count() > 80 {
+                    "..."
+                } else {
+                    ""
+                };
+                text.push_str(&format!(
+                    "⚙ [Tool Call: {}({preview}{ellipsis})]\n",
+                    call.function.name
+                ));
+            }
+            if text.ends_with('\n') {
+                text.pop();
+            }
+        }
+    }
+    text
+}
 
 fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
     content
@@ -21,6 +51,87 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("  ".to_string())];
+    let trimmed = line.trim_start();
+
+    if trimmed.starts_with("⚙ [Tool Call:") {
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        return spans;
+    }
+
+    if trimmed.starts_with('#') {
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        return spans;
+    }
+
+    // Highlight inline `code` segments
+    let mut in_code = false;
+    for segment in line.split('`') {
+        if !segment.is_empty() {
+            if in_code {
+                spans.push(Span::styled(
+                    format!("`{segment}`"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else {
+                spans.push(Span::raw(segment.to_string()));
+            }
+        }
+        in_code = !in_code;
+    }
+
+    spans
+}
+
+fn format_visible_lines(
+    content_lines: &[String],
+    start: usize,
+    end: usize,
+) -> Vec<Line<'static>> {
+    let mut in_code_block = false;
+    let mut out = Vec::with_capacity(end.saturating_sub(start));
+
+    for (idx, line) in content_lines.iter().enumerate().take(end) {
+        let is_fence = line.trim_start().starts_with("```");
+        if idx >= start {
+            if is_fence {
+                out.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        line.clone(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else if in_code_block {
+                out.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(line.clone(), Style::default().fg(Color::LightYellow)),
+                ]));
+            } else {
+                out.push(Line::from(style_inline_markdown(line)));
+            }
+        }
+        if is_fence {
+            in_code_block = !in_code_block;
+        }
+    }
+
+    out
 }
 
 fn render_message_block(
@@ -69,7 +180,7 @@ fn render_message_block(
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        lines.extend(content_lines[start..end].iter().map(|l| Line::from(format!("  {l}"))));
+        lines.extend(format_visible_lines(content_lines, start, end));
         if end < total_content {
             lines.push(Line::from(Span::styled(
                 format!(
@@ -80,7 +191,7 @@ fn render_message_block(
             )));
         }
     } else {
-        lines.extend(content_lines.iter().map(|l| Line::from(format!("  {l}"))));
+        lines.extend(format_visible_lines(content_lines, 0, total_content));
     }
 
     lines.push(Line::from(""));
@@ -165,6 +276,7 @@ impl TuiApp {
 
         let bindings = [
             ("^⏎", "Send"),
+            ("PgUp/Dn", "Scroll"),
             ("^B", "Sidebar"),
             ("^S", "Sessions"),
             ("^R", "New"),
@@ -175,7 +287,6 @@ impl TuiApp {
             ("^P", "Preset"),
             ("^Y", "SysPrompt"),
             ("^Q", "Quit"),
-            ("?", "Toggle Bar"),
         ];
 
         let mut spans = vec![Span::raw(" ")];
@@ -197,7 +308,7 @@ impl TuiApp {
             .split(area);
 
         let preset_name = preset_label(&self.config.presets, self.preset_idx);
-        let sys_name = preset_label(&self.config.system_presets, self.sys_preset_idx);
+        let sys_name = self.current_system_label();
         let tools_label = if self.enable_tools { "ON" } else { "OFF" };
 
         let settings_text = vec![
@@ -260,7 +371,8 @@ impl TuiApp {
         }
 
         for m in &self.messages[self.wrapped_messages.len()..] {
-            self.wrapped_messages.push(wrap_text(&m.content, &options));
+            let formatted = format_message_display(m);
+            self.wrapped_messages.push(wrap_text(&formatted, &options));
         }
 
         let mut lines = Vec::new();
@@ -318,7 +430,12 @@ impl TuiApp {
         self.total_chat_lines = lines.len().min(u16::MAX as usize) as u16;
         let viewable_height = chunks[0].height.saturating_sub(2);
         let max_scroll = self.total_chat_lines.saturating_sub(viewable_height);
-        self.chat_scroll = self.chat_scroll.min(max_scroll);
+
+        if self.follow_tail {
+            self.chat_scroll = max_scroll;
+        } else {
+            self.chat_scroll = self.chat_scroll.min(max_scroll);
+        }
 
         f.render_widget(
             Paragraph::new(lines)

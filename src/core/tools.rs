@@ -3,6 +3,7 @@ use crate::tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use similar::TextDiff;
+use std::fs;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +73,50 @@ impl ToolRegistry {
                 }
             }
 
+            // Pre-validate against the real file on disk so the diff shows real line numbers
+            // and warns immediately if search_string won't apply cleanly.
+            match tools::resolve_existing_path(file_path)
+                .and_then(|(_, p)| fs::read_to_string(&p).map_err(Into::into))
+            {
+                Ok(file_content) => {
+                    if search.is_empty() {
+                        out.push_str("\n--- WARNING ---\nsearch_string is empty! Execution will fail.\n");
+                    } else {
+                        let matches = file_content.matches(search).count();
+                        if matches == 0 {
+                            out.push_str(
+                                "\n--- WARNING ---\nExact search_string NOT FOUND in target file! Execution will fail.\n",
+                            );
+                        } else if matches > 1 {
+                            out.push_str(&format!(
+                                "\n--- WARNING ---\nsearch_string matched {matches} times (must be unique)! Execution will fail.\n"
+                            ));
+                        } else {
+                            let updated = file_content.replacen(search, replace, 1);
+                            let diff = TextDiff::from_lines(&file_content, &updated)
+                                .unified_diff()
+                                .context_radius(3)
+                                .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
+                                .to_string();
+
+                            out.push_str("\n--- UNIFIED DIFF ---\n");
+                            if diff.trim().is_empty() {
+                                out.push_str("(No differences)\n");
+                            } else {
+                                out.push_str(&diff);
+                            }
+                            return out.trim_end().to_string();
+                        }
+                    }
+                }
+                Err(e) => {
+                    out.push_str(&format!(
+                        "\n--- WARNING ---\nCannot read target file: {e}\n"
+                    ));
+                }
+            }
+
+            // Fallback diff of raw arguments when file validation fails
             let diff = TextDiff::from_lines(search, replace)
                 .unified_diff()
                 .context_radius(3)

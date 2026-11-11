@@ -121,7 +121,7 @@ impl SessionManager {
     }
 
     pub fn new_id() -> String {
-        Local::now().format("%Y%m%d_%H%M%S").to_string()
+        Local::now().format("%Y%m%d_%H%M%S_%3f").to_string()
     }
 
     pub fn asset_dir(&self, id: &str) -> PathBuf {
@@ -159,6 +159,8 @@ impl SessionManager {
             .unwrap_or_else(|| "Untitled Session".into());
 
         let path = self.history_dir.join(format!("session_{id}.json"));
+        let tmp_path = self.history_dir.join(format!(".session_{id}.json.tmp"));
+
         let data = SessionData {
             id: id.into(),
             title,
@@ -170,7 +172,9 @@ impl SessionManager {
             file_path: path.clone(),
         };
 
-        fs::write(path, serde_json::to_string_pretty(&data)?)?;
+        let serialized = serde_json::to_string_pretty(&data)?;
+        fs::write(&tmp_path, serialized)?;
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 
@@ -180,7 +184,12 @@ impl SessionManager {
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| !n.starts_with('.'))
+                    && p.extension().and_then(|s| s.to_str()) == Some("json")
+            })
             .filter_map(|path| {
                 let file = fs::File::open(&path).ok()?;
                 let reader = std::io::BufReader::new(file);

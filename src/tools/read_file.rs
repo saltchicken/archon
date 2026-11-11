@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::fs;
+use std::{fs::File, io::Read};
 
 #[derive(Deserialize, JsonSchema)]
 struct ReadFileArgs {
@@ -17,7 +17,7 @@ pub fn schema() -> Value {
     )
 }
 
-pub fn execute(json_args: &Value) -> Result<String> {
+pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     let args: ReadFileArgs = parse_args(json_args, "read_file")?;
     let (_, target_path) = resolve_existing_path(&args.file_path)?;
 
@@ -25,5 +25,12 @@ pub fn execute(json_args: &Value) -> Result<String> {
         bail!("Target is not a file: {}", args.file_path.trim());
     }
 
-    fs::read_to_string(&target_path).context("Error reading file")
+    let file = File::open(&target_path).context("Error opening file")?;
+    let cap = (max_output_size as u64).saturating_add(1);
+    let mut buf = Vec::new();
+    file.take(cap)
+        .read_to_end(&mut buf)
+        .context("Error reading file")?;
+
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
