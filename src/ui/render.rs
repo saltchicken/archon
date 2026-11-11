@@ -1,5 +1,5 @@
-use super::{preset_label, titled_block, ActiveModal, TuiApp};
-use crate::core::session::ChatMessage;
+use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
+use crate::core::session::{truncate_str, ChatMessage};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -10,28 +10,20 @@ use ratatui::{
 
 fn format_message_display(m: &ChatMessage) -> String {
     let mut text = m.content.clone();
-    if let Some(calls) = &m.tool_calls {
-        if !calls.is_empty() {
-            if !text.trim().is_empty() {
-                text.push_str("\n\n");
-            }
-            for call in calls {
-                let compact_args = serde_json::to_string(&call.function.arguments)
-                    .unwrap_or_default();
-                let preview: String = compact_args.chars().take(80).collect();
-                let ellipsis = if compact_args.chars().count() > 80 {
-                    "..."
-                } else {
-                    ""
-                };
-                text.push_str(&format!(
-                    "⚙ [Tool Call: {}({preview}{ellipsis})]\n",
-                    call.function.name
-                ));
-            }
-            if text.ends_with('\n') {
-                text.pop();
-            }
+    if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
+        if !text.trim().is_empty() {
+            text.push_str("\n\n");
+        }
+        for call in calls {
+            let compact_args = serde_json::to_string(&call.function.arguments).unwrap_or_default();
+            let preview = truncate_str(&compact_args, 80);
+            text.push_str(&format!(
+                "⚙ [Tool Call: {}({preview})]\n",
+                call.function.name
+            ));
+        }
+        if text.ends_with('\n') {
+            text.pop();
         }
     }
     text
@@ -54,7 +46,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
 }
 
 fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw("  ".to_string())];
+    let mut spans = vec![Span::raw("  ")];
     let trimmed = line.trim_start();
 
     if trimmed.starts_with("⚙ [Tool Call:") {
@@ -77,7 +69,6 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
         return spans;
     }
 
-    // Highlight inline `code` segments
     let mut in_code = false;
     for segment in line.split('`') {
         if !segment.is_empty() {
@@ -140,19 +131,18 @@ fn render_message_block(
     color: Color,
     truncated: bool,
     content_lines: &[String],
-    is_unfolded: bool,
     max_folded_lines: usize,
-    scroll: &mut usize,
+    state: &mut MsgUiState,
     lines: &mut Vec<Line<'static>>,
     ranges: &mut Vec<(usize, u16, u16, bool)>,
 ) {
     let start_visual = lines.len() as u16;
-    let max_lines = if is_unfolded {
+    let max_lines = if state.unfolded {
         usize::MAX
     } else {
         max_folded_lines
     };
-    let toggle_hint = if is_unfolded { " [Click to fold]" } else { "" };
+    let toggle_hint = if state.unfolded { " [Click to fold]" } else { "" };
 
     let mut header_spans = vec![Span::styled(
         format!("━━ {header_label}{toggle_hint} "),
@@ -170,8 +160,8 @@ fn render_message_block(
     let is_truncated = total_content > max_lines;
 
     if is_truncated {
-        *scroll = (*scroll).min(total_content.saturating_sub(max_lines));
-        let start = *scroll;
+        state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
+        let start = state.scroll;
         let end = (start + max_lines).min(total_content);
 
         if start > 0 {
@@ -355,8 +345,8 @@ impl TuiApp {
         self.chat_area = chunks[0];
         let available_width = chunks[0].width.saturating_sub(4).max(1) as usize;
 
-        self.msg_scrolls.resize(self.messages.len() + 1, 0);
-        self.msg_unfolded.resize(self.messages.len() + 1, false);
+        self.msg_states
+            .resize(self.messages.len() + 1, MsgUiState::default());
         self.msg_visual_ranges.clear();
 
         let options = textwrap::Options::new(available_width).break_words(true);
@@ -366,9 +356,7 @@ impl TuiApp {
             self.last_wrap_width = available_width;
         }
 
-        if self.wrapped_messages.len() > self.messages.len() {
-            self.wrapped_messages.truncate(self.messages.len());
-        }
+        self.wrapped_messages.truncate(self.messages.len());
 
         for m in &self.messages[self.wrapped_messages.len()..] {
             let formatted = format_message_display(m);
@@ -376,6 +364,7 @@ impl TuiApp {
         }
 
         let mut lines = Vec::new();
+        let max_msg_lines = self.config.app.max_msg_lines;
 
         for (i, (m, wrapped_content)) in self
             .messages
@@ -401,9 +390,8 @@ impl TuiApp {
                 color,
                 m.truncated,
                 wrapped_content,
-                self.msg_unfolded[i],
-                self.config.app.max_msg_lines,
-                &mut self.msg_scrolls[i],
+                max_msg_lines,
+                &mut self.msg_states[i],
                 &mut lines,
                 &mut self.msg_visual_ranges,
             );
@@ -419,17 +407,15 @@ impl TuiApp {
                 Color::Yellow,
                 false,
                 &stream_lines,
-                self.msg_unfolded[i],
-                self.config.app.max_msg_lines,
-                &mut self.msg_scrolls[i],
+                max_msg_lines,
+                &mut self.msg_states[i],
                 &mut lines,
                 &mut self.msg_visual_ranges,
             );
         }
 
         self.total_chat_lines = lines.len().min(u16::MAX as usize) as u16;
-        let viewable_height = chunks[0].height.saturating_sub(2);
-        let max_scroll = self.total_chat_lines.saturating_sub(viewable_height);
+        let max_scroll = self.max_chat_scroll();
 
         if self.follow_tail {
             self.chat_scroll = max_scroll;

@@ -6,7 +6,7 @@ use crate::core::{
     config::{Config, Preset},
     session::{ChatMessage, SessionSummary},
     workspace::ImageAttachment,
-    EngineCommand, EngineEvent,
+    EngineCommand, EngineEvent, TurnConfig,
 };
 use anyhow::Result;
 use crossterm::{
@@ -55,6 +55,12 @@ pub(super) enum ActiveModal {
     ToolApproval,
 }
 
+#[derive(Default, Clone, Copy)]
+pub(super) struct MsgUiState {
+    pub scroll: usize,
+    pub unfolded: bool,
+}
+
 pub struct TuiApp {
     pub(super) model: String,
     pub(super) config: Config,
@@ -80,8 +86,7 @@ pub struct TuiApp {
     pub(super) tool_scroll: u16,
     pub(super) total_chat_lines: u16,
 
-    pub(super) msg_scrolls: Vec<usize>,
-    pub(super) msg_unfolded: Vec<bool>,
+    pub(super) msg_states: Vec<MsgUiState>,
 
     pub(super) chat_area: Rect,
     pub(super) msg_visual_ranges: Vec<(usize, u16, u16, bool)>,
@@ -100,10 +105,7 @@ pub struct TuiApp {
 pub(super) fn create_text_area() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Prompt ")
-            .border_style(Style::default().fg(Color::Cyan)),
+        titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
     );
     ta.set_cursor_line_style(Style::default());
     ta
@@ -144,8 +146,7 @@ impl TuiApp {
             follow_tail: true,
             tool_scroll: 0,
             total_chat_lines: 0,
-            msg_scrolls: Vec::new(),
-            msg_unfolded: Vec::new(),
+            msg_states: Vec::new(),
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
@@ -157,6 +158,20 @@ impl TuiApp {
             pending_tool: None,
             tool_feedback: String::new(),
         }
+    }
+
+    pub(super) fn chat_view_height(&self) -> u16 {
+        self.chat_area.height.saturating_sub(2)
+    }
+
+    pub(super) fn max_chat_scroll(&self) -> u16 {
+        self.total_chat_lines
+            .saturating_sub(self.chat_view_height())
+    }
+
+    pub(super) fn scroll_to_bottom(&mut self) {
+        self.follow_tail = true;
+        self.chat_scroll = u16::MAX;
     }
 
     pub async fn run(mut self, mut ev_rx: UnboundedReceiver<EngineEvent>) -> Result<()> {
@@ -228,8 +243,7 @@ impl TuiApp {
                 self.sync_system_prompt(&system_prompt);
                 self.is_streaming = false;
                 self.streaming_text.clear();
-                self.msg_scrolls.clear();
-                self.msg_unfolded.clear();
+                self.msg_states.clear();
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
@@ -238,8 +252,7 @@ impl TuiApp {
                     "Streaming response from Ollama... (Esc to cancel)".into(),
                     false,
                 );
-                self.follow_tail = true;
-                self.chat_scroll = u16::MAX;
+                self.scroll_to_bottom();
             }
             EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
             EngineEvent::StreamDone { .. } | EngineEvent::StreamError(_) => {
@@ -271,30 +284,24 @@ impl TuiApp {
         {
             self.sys_preset_idx = idx;
             self.custom_system_prompt = None;
-        } else if system_prompt.is_empty() {
-            if let Some(idx) = self
-                .config
-                .system_presets
-                .iter()
-                .position(|p| p.prompt.is_empty())
-            {
-                self.sys_preset_idx = idx;
-            }
-            self.custom_system_prompt = None;
         } else {
-            self.custom_system_prompt = Some(system_prompt.to_string());
+            self.custom_system_prompt = (!system_prompt.is_empty()).then(|| system_prompt.into());
         }
     }
 
-    pub(super) fn current_system_prompt(&self) -> String {
-        if let Some(custom) = &self.custom_system_prompt {
-            return custom.clone();
+    fn current_turn_config(&self) -> TurnConfig {
+        let system_prompt = self.custom_system_prompt.clone().unwrap_or_else(|| {
+            self.config
+                .system_presets
+                .get(self.sys_preset_idx)
+                .map(|p| p.prompt.clone())
+                .unwrap_or_default()
+        });
+        TurnConfig {
+            system_prompt,
+            num_ctx: self.num_ctx,
+            enable_tools: self.enable_tools,
         }
-        self.config
-            .system_presets
-            .get(self.sys_preset_idx)
-            .map(|p| p.prompt.clone())
-            .unwrap_or_default()
     }
 
     pub(super) fn current_system_label(&self) -> &str {
@@ -316,13 +323,10 @@ impl TuiApp {
         }
 
         self.text_area = create_text_area();
-        self.follow_tail = true;
-        self.chat_scroll = u16::MAX;
+        self.scroll_to_bottom();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
             prompt,
-            system_prompt: self.current_system_prompt(),
-            num_ctx: self.num_ctx,
-            enable_tools: self.enable_tools,
+            turn: self.current_turn_config(),
         });
     }
 
@@ -333,9 +337,7 @@ impl TuiApp {
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
                 approved,
                 feedback: std::mem::take(&mut self.tool_feedback),
-                system_prompt: self.current_system_prompt(),
-                num_ctx: self.num_ctx,
-                enable_tools: self.enable_tools,
+                turn: self.current_turn_config(),
             });
         }
     }

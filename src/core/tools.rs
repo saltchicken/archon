@@ -1,9 +1,8 @@
 use crate::core::config::Config;
 use crate::tools;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use similar::TextDiff;
-use std::fs;
 use tracing::{debug, error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +20,59 @@ pub struct ToolRegistry {
     allowed_commands: Vec<String>,
     schemas: Vec<Value>,
     max_output_size: usize,
+}
+
+fn format_kv(k: &str, v: &Value) -> String {
+    match v.as_str() {
+        Some(s) => format!("  {k}: {s}\n"),
+        None => format!("  {k}: {v}\n"),
+    }
+}
+
+fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) {
+    let diff = TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(3)
+        .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
+        .to_string();
+
+    out.push_str("\n--- UNIFIED DIFF ---\n");
+    if diff.trim().is_empty() {
+        out.push_str("(No differences)\n");
+    } else {
+        out.push_str(&diff);
+    }
+}
+
+fn format_edit_approval(mut out: String, obj: &Map<String, Value>) -> String {
+    let get_str = |key| obj.get(key).and_then(Value::as_str).unwrap_or("");
+    let file_path = get_str("file_path");
+    let search = get_str("search_string");
+    let replace = get_str("replace_string");
+
+    out.push_str(&format!("  file_path: {file_path}\n"));
+    for (k, v) in obj {
+        if !matches!(
+            k.as_str(),
+            "file_path" | "search_string" | "replace_string"
+        ) {
+            out.push_str(&format_kv(k, v));
+        }
+    }
+
+    match tools::edit_file::apply_edit(file_path, search, replace) {
+        Ok((_, original, updated)) => {
+            append_unified_diff(&mut out, file_path, &original, &updated);
+        }
+        Err(e) => {
+            out.push_str(&format!(
+                "\n--- WARNING ---\n{e}! Execution will fail.\n"
+            ));
+            append_unified_diff(&mut out, file_path, search, replace);
+        }
+    }
+
+    out.trim_end().to_string()
 }
 
 impl ToolRegistry {
@@ -48,92 +100,11 @@ impl ToolRegistry {
         };
 
         let mut out = format!("Tool: {name}\n");
-
         if name == "edit_file" {
-            let file_path = obj.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let search = obj
-                .get("search_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let replace = obj
-                .get("replace_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            out.push_str(&format!("  file_path: {file_path}\n"));
-            for (k, v) in obj {
-                if !matches!(
-                    k.as_str(),
-                    "file_path" | "search_string" | "replace_string"
-                ) {
-                    match v.as_str() {
-                        Some(s) => out.push_str(&format!("  {k}: {s}\n")),
-                        None => out.push_str(&format!("  {k}: {v}\n")),
-                    }
-                }
-            }
-
-            // Pre-validate against the real file on disk so the diff shows real line numbers
-            // and warns immediately if search_string won't apply cleanly.
-            match tools::resolve_existing_path(file_path)
-                .and_then(|(_, p)| fs::read_to_string(&p).map_err(Into::into))
-            {
-                Ok(file_content) => {
-                    if search.is_empty() {
-                        out.push_str("\n--- WARNING ---\nsearch_string is empty! Execution will fail.\n");
-                    } else {
-                        let matches = file_content.matches(search).count();
-                        if matches == 0 {
-                            out.push_str(
-                                "\n--- WARNING ---\nExact search_string NOT FOUND in target file! Execution will fail.\n",
-                            );
-                        } else if matches > 1 {
-                            out.push_str(&format!(
-                                "\n--- WARNING ---\nsearch_string matched {matches} times (must be unique)! Execution will fail.\n"
-                            ));
-                        } else {
-                            let updated = file_content.replacen(search, replace, 1);
-                            let diff = TextDiff::from_lines(&file_content, &updated)
-                                .unified_diff()
-                                .context_radius(3)
-                                .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
-                                .to_string();
-
-                            out.push_str("\n--- UNIFIED DIFF ---\n");
-                            if diff.trim().is_empty() {
-                                out.push_str("(No differences)\n");
-                            } else {
-                                out.push_str(&diff);
-                            }
-                            return out.trim_end().to_string();
-                        }
-                    }
-                }
-                Err(e) => {
-                    out.push_str(&format!(
-                        "\n--- WARNING ---\nCannot read target file: {e}\n"
-                    ));
-                }
-            }
-
-            // Fallback diff of raw arguments when file validation fails
-            let diff = TextDiff::from_lines(search, replace)
-                .unified_diff()
-                .context_radius(3)
-                .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
-                .to_string();
-
-            out.push_str("\n--- UNIFIED DIFF ---\n");
-            if diff.trim().is_empty() {
-                out.push_str("(No differences)\n");
-            } else {
-                out.push_str(&diff);
-            }
-            return out.trim_end().to_string();
+            return format_edit_approval(out, obj);
         }
 
         let mut multiline_blocks = Vec::new();
-
         for (k, v) in obj {
             match v.as_str() {
                 Some(s)
@@ -142,13 +113,11 @@ impl ToolRegistry {
                 {
                     multiline_blocks.push((k, s));
                 }
-                Some(s) => out.push_str(&format!("  {k}: {s}\n")),
-                None => out.push_str(&format!("  {k}: {v}\n")),
+                _ => out.push_str(&format_kv(k, v)),
             }
         }
 
         multiline_blocks.sort_by(|a, b| b.0.cmp(a.0));
-
         for (k, s) in multiline_blocks {
             out.push_str(&format!("\n--- {} ---\n{s}\n", k.to_uppercase()));
         }
@@ -157,17 +126,14 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> (String, bool) {
-        let name = call.function.name.clone();
-        let args = call.function.arguments.clone();
-        let allowed = self.allowed_commands.clone();
+        let name = &call.function.name;
+        let args = &call.function.arguments;
         let max_size = self.max_output_size;
 
         info!("Executing tool: {}", name);
         debug!("Tool arguments: {}", args);
 
-        let res = tools::execute(&name, &args, &allowed, max_size).await;
-
-        match res {
+        match tools::execute(name, args, &self.allowed_commands, max_size).await {
             Ok(mut out) => {
                 let truncated = out.len() > max_size;
                 if truncated {

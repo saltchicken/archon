@@ -10,6 +10,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub fn truncate_str(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -146,16 +156,7 @@ impl SessionManager {
         let title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
-            .map(|m| {
-                let first_line = m.content.lines().next().unwrap_or("Untitled");
-                let mut chars = first_line.chars();
-                let preview: String = chars.by_ref().take(50).collect();
-                if chars.next().is_some() {
-                    format!("{preview}...")
-                } else {
-                    preview
-                }
-            })
+            .map(|m| truncate_str(m.content.lines().next().unwrap_or("Untitled"), 50))
             .unwrap_or_else(|| "Untitled Session".into());
 
         let path = self.history_dir.join(format!("session_{id}.json"));

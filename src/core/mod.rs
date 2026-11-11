@@ -10,7 +10,7 @@ use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary};
 use std::{
     collections::{HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -22,6 +22,13 @@ use tools::{ToolCall, ToolRegistry};
 use tracing::{debug, error, info, warn};
 use workspace::{ImageAttachment, ImageWorkspace};
 
+#[derive(Debug, Clone)]
+pub struct TurnConfig {
+    pub system_prompt: String,
+    pub num_ctx: u32,
+    pub enable_tools: bool,
+}
+
 #[derive(Debug)]
 pub enum EngineCommand {
     PasteClipboard,
@@ -29,17 +36,13 @@ pub enum EngineCommand {
     ClearImages,
     SendPrompt {
         prompt: String,
-        system_prompt: String,
-        num_ctx: u32,
-        enable_tools: bool,
+        turn: TurnConfig,
     },
     CancelStream,
     ResolveTool {
         approved: bool,
         feedback: String,
-        system_prompt: String,
-        num_ctx: u32,
-        enable_tools: bool,
+        turn: TurnConfig,
     },
     LoadSession(PathBuf),
     DeleteSession(PathBuf),
@@ -95,6 +98,23 @@ pub struct CoreEngine {
     tx: UnboundedSender<EngineEvent>,
 }
 
+fn resolve_session_image_path(p: &Path, asset_dir: &Path) -> PathBuf {
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    let expanded = config::expand_tilde(&p.to_string_lossy());
+    if expanded.exists() {
+        return expanded;
+    }
+    if let Some(fname) = p.file_name() {
+        let candidate = asset_dir.join(fname);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    p.to_path_buf()
+}
+
 impl CoreEngine {
     pub fn new(
         model: String,
@@ -141,6 +161,23 @@ impl CoreEngine {
         self.stream_buffer.clear();
     }
 
+    async fn flush_save_task(&mut self) {
+        if let Some(save_handle) = self.save_task.take() {
+            let _ = save_handle.await;
+        }
+    }
+
+    async fn clear_workspace(&self) {
+        let ws = Arc::clone(&self.workspace);
+        let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
+        let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
+    }
+
+    fn apply_turn_config(&mut self, turn: &TurnConfig) {
+        self.active_system_prompt = turn.system_prompt.clone();
+        self.active_num_ctx = turn.num_ctx;
+    }
+
     fn prompt_next_tool(&mut self) {
         if let Some(call) = self.pending_tools.front() {
             let formatted_preview = self.tools.format_approval(call);
@@ -175,6 +212,40 @@ impl CoreEngine {
             }
             let _ = self.tx.send(EngineEvent::WorkspaceUpdated(list));
         }
+    }
+
+    async fn collect_unsent_images(&mut self) -> (Option<Vec<String>>, Option<Vec<PathBuf>>) {
+        let asset_dir = self.sessions.asset_dir(&self.session_id);
+        let ws = Arc::clone(&self.workspace);
+        let already_sent = self.sent_images.clone();
+
+        let (imgs, paths, newly_sent) = tokio::task::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&asset_dir);
+            let mut imgs = Vec::new();
+            let mut paths = Vec::new();
+            let mut sent = Vec::new();
+
+            for att in ws.list_attachments() {
+                if !already_sent.contains(&att.path) {
+                    let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
+                    let _ = std::fs::copy(&att.path, &dest);
+                    if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
+                        imgs.push(b64);
+                        paths.push(dest);
+                        sent.push(att.path);
+                    }
+                }
+            }
+            (imgs, paths, sent)
+        })
+        .await
+        .unwrap_or_default();
+
+        self.sent_images.extend(newly_sent);
+        (
+            (!imgs.is_empty()).then_some(imgs),
+            (!paths.is_empty()).then_some(paths),
+        )
     }
 
     async fn emit_sessions(&self, delete_first: Option<PathBuf>) {
@@ -212,9 +283,7 @@ impl CoreEngine {
         }
 
         info!("Shutting down CoreEngine, awaiting pending session save...");
-        if let Some(save_handle) = self.save_task.take() {
-            let _ = save_handle.await;
-        }
+        self.flush_save_task().await;
         info!("All background tasks completely flushed.");
     }
 
@@ -237,59 +306,40 @@ impl CoreEngine {
             }
             EngineCommand::ClearImages => {
                 info!("Clearing attached images");
-                let ws = Arc::clone(&self.workspace);
-                let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
+                self.clear_workspace().await;
                 self.notify("Cleared attached images.", false);
-                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
             }
-            EngineCommand::SendPrompt {
-                prompt,
-                system_prompt,
-                num_ctx,
-                enable_tools,
-            } => {
-                info!("User submitted prompt. Enable tools: {}", enable_tools);
+            EngineCommand::SendPrompt { prompt, turn } => {
+                info!("User submitted prompt. Enable tools: {}", turn.enable_tools);
                 debug!("Prompt content: {}", prompt.replace('\n', " "));
 
-                self.active_system_prompt = system_prompt.clone();
-                self.active_num_ctx = num_ctx;
+                if let Some(h) = self.active_task.take() {
+                    h.abort();
+                }
 
-                let asset_dir = self.sessions.asset_dir(&self.session_id);
-                let ws = Arc::clone(&self.workspace);
-                let already_sent = self.sent_images.clone();
+                while let Some(call) = self.pending_tools.pop_front() {
+                    warn!(
+                        "Auto-declining unresolved tool call '{}' before new prompt",
+                        call.function.name
+                    );
+                    self.messages.push(ChatMessage::new(
+                        "tool",
+                        "The user skipped this tool call and sent a new message.",
+                    ));
+                }
+                self.pending_batch_total = 0;
 
-                let (new_imgs, new_img_paths, newly_sent) = tokio::task::spawn_blocking(move || {
-                    let _ = std::fs::create_dir_all(&asset_dir);
-                    let mut imgs = Vec::new();
-                    let mut paths = Vec::new();
-                    let mut sent = Vec::new();
+                self.apply_turn_config(&turn);
+                let (images, image_paths) = self.collect_unsent_images().await;
 
-                    for att in ws.list_attachments() {
-                        if !already_sent.contains(&att.path) {
-                            let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
-                            let _ = std::fs::copy(&att.path, &dest);
-                            if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
-                                imgs.push(b64);
-                                paths.push(dest);
-                                sent.push(att.path);
-                            }
-                        }
-                    }
-                    (imgs, paths, sent)
-                })
-                .await
-                .unwrap_or_default();
-
-                self.sent_images.extend(newly_sent);
                 self.messages.push(ChatMessage {
-                    images: (!new_imgs.is_empty()).then_some(new_imgs),
-                    image_paths: (!new_img_paths.is_empty()).then_some(new_img_paths),
+                    images,
+                    image_paths,
                     ..ChatMessage::new("user", prompt)
                 });
 
                 self.save_and_emit_chat().await;
-                self.spawn_ollama_turn(&system_prompt, num_ctx, enable_tools, internal_tx.clone())
-                    .await;
+                self.spawn_ollama_turn(&turn, internal_tx.clone()).await;
             }
             EngineCommand::CancelStream => {
                 info!("User cancelled stream");
@@ -311,12 +361,9 @@ impl CoreEngine {
             EngineCommand::ResolveTool {
                 approved,
                 feedback,
-                system_prompt,
-                num_ctx,
-                enable_tools,
+                turn,
             } => {
-                self.active_system_prompt = system_prompt.clone();
-                self.active_num_ctx = num_ctx;
+                self.apply_turn_config(&turn);
 
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
@@ -352,13 +399,7 @@ impl CoreEngine {
 
                 if self.pending_tools.is_empty() {
                     self.pending_batch_total = 0;
-                    self.spawn_ollama_turn(
-                        &system_prompt,
-                        num_ctx,
-                        enable_tools,
-                        internal_tx.clone(),
-                    )
-                    .await;
+                    self.spawn_ollama_turn(&turn, internal_tx.clone()).await;
                 } else {
                     self.prompt_next_tool();
                 }
@@ -369,9 +410,7 @@ impl CoreEngine {
             }
             EngineCommand::LoadSession(path) => {
                 info!("Loading session from path: {}", path.display());
-                if let Some(save_handle) = self.save_task.take() {
-                    let _ = save_handle.await;
-                }
+                self.flush_save_task().await;
 
                 let sessions = Arc::clone(&self.sessions);
                 let res = tokio::task::spawn_blocking(move || sessions.load(&path)).await;
@@ -381,23 +420,11 @@ impl CoreEngine {
                         self.abort_active_state();
                         let asset_dir = self.sessions.asset_dir(&data.id);
 
-                        // Resolve image_paths (handling moved history_dir or ~ paths)
-                        // and collect all session images to restore into the workspace UI.
                         let mut session_img_paths = Vec::new();
                         for msg in &mut data.messages {
                             if let Some(paths) = &mut msg.image_paths {
                                 for p in paths.iter_mut() {
-                                    if !p.exists() {
-                                        let expanded = config::expand_tilde(&p.to_string_lossy());
-                                        if expanded.exists() {
-                                            *p = expanded;
-                                        } else if let Some(fname) = p.file_name() {
-                                            let candidate = asset_dir.join(fname);
-                                            if candidate.exists() {
-                                                *p = candidate;
-                                            }
-                                        }
-                                    }
+                                    *p = resolve_session_image_path(p, &asset_dir);
                                     session_img_paths.push(p.clone());
                                 }
                             }
@@ -407,14 +434,11 @@ impl CoreEngine {
                         let (restored_ws_paths, attachments) =
                             tokio::task::spawn_blocking(move || {
                                 let restored = ws.restore_from_session(&session_img_paths);
-                                let list = ws.list_attachments();
-                                (restored, list)
+                                (restored, ws.list_attachments())
                             })
                             .await
                             .unwrap_or_default();
 
-                        // Mark restored images as already sent so they aren't re-attached
-                        // as brand-new images on the next prompt turn.
                         self.sent_images.extend(restored_ws_paths);
                         let _ = self.tx.send(EngineEvent::WorkspaceUpdated(attachments));
 
@@ -450,13 +474,9 @@ impl CoreEngine {
             }
             EngineCommand::ResetChat => {
                 info!("Resetting chat session");
-                if let Some(save_handle) = self.save_task.take() {
-                    let _ = save_handle.await;
-                }
+                self.flush_save_task().await;
                 self.abort_active_state();
-                let ws = Arc::clone(&self.workspace);
-                let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
-                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
+                self.clear_workspace().await;
 
                 self.session_id = SessionManager::new_id();
                 self.messages.clear();
@@ -486,13 +506,23 @@ impl CoreEngine {
                         ..ChatMessage::new("assistant", final_text)
                     });
                     self.save_session_bg().await;
+                    self.emit_chat();
+                    self.notify(
+                        format!("Tokens — Prompt: {prompt_tokens} | Eval: {eval_tokens}"),
+                        false,
+                    );
+                } else {
+                    warn!(
+                        "Stream finished with empty content and no tool calls (Prompt: {prompt_tokens}, Eval: {eval_tokens})"
+                    );
+                    self.emit_chat();
+                    self.notify(
+                        format!(
+                            "Model returned an empty response (Prompt: {prompt_tokens} | Eval: {eval_tokens})"
+                        ),
+                        true,
+                    );
                 }
-
-                self.emit_chat();
-                self.notify(
-                    format!("Tokens — Prompt: {prompt_tokens} | Eval: {eval_tokens}"),
-                    false,
-                );
 
                 if !tool_calls.is_empty() {
                     self.enqueue_tool_calls(tool_calls.clone());
@@ -516,10 +546,7 @@ impl CoreEngine {
     }
 
     async fn save_session_bg(&mut self) {
-        // Serialize session writes so two rapid updates never race on disk
-        if let Some(prev) = self.save_task.take() {
-            let _ = prev.await;
-        }
+        self.flush_save_task().await;
 
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
@@ -541,13 +568,11 @@ impl CoreEngine {
 
     async fn spawn_ollama_turn(
         &mut self,
-        system_prompt: &str,
-        num_ctx: u32,
-        enable_tools: bool,
+        turn: &TurnConfig,
         internal_tx: UnboundedSender<EngineEvent>,
     ) {
         self.stream_buffer.clear();
-        let tools_schema = enable_tools.then(|| self.tools.schemas());
+        let tools_schema = turn.enable_tools.then(|| self.tools.schemas());
         let asset_dir = self.sessions.asset_dir(&self.session_id);
 
         let mut msgs = self.messages.clone();
@@ -555,24 +580,22 @@ impl CoreEngine {
             for msg in &mut msgs {
                 if msg.images.is_none() {
                     if let Some(paths) = &msg.image_paths {
-                        let mut b64s = Vec::new();
-                        for p in paths {
-                            let resolved = if p.exists() {
-                                p.clone()
-                            } else {
-                                p.file_name()
-                                    .map(|name| asset_dir.join(name))
-                                    .unwrap_or_else(|| p.clone())
-                            };
-                            match ImageWorkspace::encode_image(&resolved) {
-                                Ok(b64) => b64s.push(b64),
-                                Err(e) => warn!(
-                                    "Failed to encode session image {}: {}",
-                                    resolved.display(),
-                                    e
-                                ),
-                            }
-                        }
+                        let b64s: Vec<String> = paths
+                            .iter()
+                            .filter_map(|p| {
+                                let resolved = resolve_session_image_path(p, &asset_dir);
+                                ImageWorkspace::encode_image(&resolved)
+                                    .map_err(|e| {
+                                        warn!(
+                                            "Failed to encode session image {}: {}",
+                                            resolved.display(),
+                                            e
+                                        )
+                                    })
+                                    .ok()
+                            })
+                            .collect();
+
                         if !b64s.is_empty() {
                             msg.images = Some(b64s);
                         }
@@ -589,8 +612,8 @@ impl CoreEngine {
         let payload = ollama::build_payload(
             &self.model,
             &self.messages,
-            system_prompt,
-            num_ctx,
+            &turn.system_prompt,
+            turn.num_ctx,
             tools_schema,
         );
 

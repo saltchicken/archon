@@ -1,9 +1,12 @@
-use crate::tools::{auto_schema, parse_args, run_workspace_command, workspace_root};
+use crate::tools::{
+    auto_schema, ensure_within_workspace, parse_args, run_workspace_command,
+    validate_relative_path, workspace_root,
+};
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::{Component, Path};
+use std::path::Path;
 
 #[derive(Deserialize, JsonSchema)]
 struct ExecuteCommandArgs {
@@ -28,29 +31,13 @@ fn check_path_candidate(candidate: &str, cwd: &Path) -> Result<()> {
         bail!("Security violation: home directory expansion ('~') is not allowed in '{trimmed}'");
     }
 
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        bail!("Security violation: absolute path '{trimmed}' is not allowed");
-    }
-
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir))
-    {
-        bail!("Security violation: path traversal ('..') blocked in '{trimmed}'");
-    }
-
+    let path = validate_relative_path(trimmed)?;
     let joined = cwd.join(path);
+
     if joined.exists() {
-        let canon = dunce::canonicalize(&joined)?;
-        if !canon.starts_with(cwd) {
-            bail!("Security violation: '{trimmed}' resolves outside workspace");
-        }
+        ensure_within_workspace(&joined, cwd, trimmed)?;
     } else if let Some(ancestor) = joined.ancestors().skip(1).find(|p| p.exists()) {
-        let canon = dunce::canonicalize(ancestor)?;
-        if !canon.starts_with(cwd) {
-            bail!("Security violation: '{trimmed}' parent resolves outside workspace");
-        }
+        ensure_within_workspace(ancestor, cwd, trimmed)?;
     }
 
     Ok(())
@@ -82,8 +69,6 @@ pub async fn execute(
         if let Some((_, val)) = arg.split_once('=') {
             check_path_candidate(val, &cwd)?;
         } else if arg.starts_with('-') {
-            // Allow standard flags (e.g. -rn, --color), but still block traversal or absolute paths
-            // embedded inside flag arguments like -f../secret or -I/etc
             if arg.contains("..") || arg.contains('/') || arg.contains('\\') || arg.contains('~') {
                 let stripped = arg.trim_start_matches('-');
                 check_path_candidate(stripped, &cwd)?;

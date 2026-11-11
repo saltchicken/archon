@@ -1,5 +1,5 @@
-use crate::tools::{auto_schema, parse_args, resolve_new_path};
-use anyhow::{bail, Context, Result};
+use crate::tools::{auto_schema, ensure_within_workspace, parse_args, resolve_new_path};
+use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -24,9 +24,7 @@ pub fn execute(json_args: &Value) -> Result<String> {
 
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).context("Error creating parent directories")?;
-        if !dunce::canonicalize(parent)?.starts_with(&cwd) {
-            bail!("Security violation: created path escapes workspace");
-        }
+        ensure_within_workspace(parent, &cwd, "created path")?;
     }
 
     fs::write(&target_path, &args.content).context("Error writing new file")?;

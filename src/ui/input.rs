@@ -19,9 +19,7 @@ impl TuiApp {
 
     fn scroll_chat_down(&mut self, lines: u16) {
         self.chat_scroll = self.chat_scroll.saturating_add(lines);
-        let view_height = self.chat_area.height.saturating_sub(2);
-        let max_scroll = self.total_chat_lines.saturating_sub(view_height);
-        if self.chat_scroll >= max_scroll {
+        if self.chat_scroll >= self.max_chat_scroll() {
             self.follow_tail = true;
         }
     }
@@ -51,13 +49,14 @@ impl TuiApp {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
                 if !is_on_scrollbar {
                     if let Some((i, true)) = self.find_msg_at(visual_y) {
-                        let cur = self.msg_scrolls.get(i).copied().unwrap_or(0);
-                        self.msg_scrolls[i] = if is_up {
-                            cur.saturating_sub(3)
-                        } else {
-                            cur.saturating_add(3)
-                        };
-                        return;
+                        if let Some(state) = self.msg_states.get_mut(i) {
+                            state.scroll = if is_up {
+                                state.scroll.saturating_sub(3)
+                            } else {
+                                state.scroll.saturating_add(3)
+                            };
+                            return;
+                        }
                     }
                 }
                 if is_up {
@@ -69,8 +68,8 @@ impl TuiApp {
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
                 if is_on_scrollbar =>
             {
-                let view_height = self.chat_area.height.saturating_sub(2);
-                let max_scroll = self.total_chat_lines.saturating_sub(view_height);
+                let view_height = self.chat_view_height();
+                let max_scroll = self.max_chat_scroll();
                 if max_scroll > 0 && view_height > 1 {
                     let track_height = view_height.saturating_sub(1);
                     let fraction = inner_y.min(track_height) as f32 / track_height as f32;
@@ -80,8 +79,8 @@ impl TuiApp {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((i, _)) = self.find_msg_at(visual_y) {
-                    if let Some(unfolded) = self.msg_unfolded.get_mut(i) {
-                        *unfolded = !*unfolded;
+                    if let Some(state) = self.msg_states.get_mut(i) {
+                        state.unfolded = !state.unfolded;
                     }
                 }
             }
@@ -174,26 +173,18 @@ impl TuiApp {
 
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let page_step = self.chat_area.height.saturating_sub(4).max(3);
 
         match key.code {
             KeyCode::Esc if self.is_streaming => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
-            KeyCode::PageUp => {
-                let page = self.chat_area.height.saturating_sub(4).max(3);
-                self.scroll_chat_up(page);
-            }
-            KeyCode::PageDown => {
-                let page = self.chat_area.height.saturating_sub(4).max(3);
-                self.scroll_chat_down(page);
-            }
+            KeyCode::PageUp => self.scroll_chat_up(page_step),
+            KeyCode::PageDown => self.scroll_chat_down(page_step),
             KeyCode::Up if alt => self.scroll_chat_up(3),
             KeyCode::Down if alt => self.scroll_chat_down(3),
             KeyCode::Home if ctrl => self.scroll_chat_up(u16::MAX),
-            KeyCode::End if ctrl => {
-                self.follow_tail = true;
-                self.chat_scroll = u16::MAX;
-            }
+            KeyCode::End if ctrl => self.scroll_to_bottom(),
             KeyCode::Char('?') if !ctrl && self.is_prompt_empty() => {
                 self.show_help_bar = !self.show_help_bar;
             }

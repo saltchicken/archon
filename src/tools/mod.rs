@@ -33,34 +33,31 @@ pub fn schemas() -> Vec<Value> {
     ]
 }
 
+async fn spawn_blocking_tool<F>(f: F) -> Result<String>
+where
+    F: FnOnce() -> Result<String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+}
+
 pub async fn execute(
     name: &str,
     args: &Value,
     allowed_commands: &[String],
     max_output_size: usize,
 ) -> Result<String> {
+    let cloned = args.clone();
     match name {
         "context" => context::execute(args, max_output_size).await,
         "execute_command" => {
             execute_command::execute(args, allowed_commands, max_output_size).await
         }
-        "create_file" => {
-            let args = args.clone();
-            tokio::task::spawn_blocking(move || create_file::execute(&args))
-                .await
-                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
-        }
-        "edit_file" => {
-            let args = args.clone();
-            tokio::task::spawn_blocking(move || edit_file::execute(&args))
-                .await
-                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
-        }
+        "create_file" => spawn_blocking_tool(move || create_file::execute(&cloned)).await,
+        "edit_file" => spawn_blocking_tool(move || edit_file::execute(&cloned)).await,
         "read_file" => {
-            let args = args.clone();
-            tokio::task::spawn_blocking(move || read_file::execute(&args, max_output_size))
-                .await
-                .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+            spawn_blocking_tool(move || read_file::execute(&cloned, max_output_size)).await
         }
         _ => bail!("Unknown tool: '{name}'"),
     }
@@ -94,6 +91,14 @@ pub fn workspace_root() -> Result<PathBuf> {
     Ok(dunce::canonicalize(env::current_dir()?)?)
 }
 
+pub fn ensure_within_workspace(path: &Path, cwd: &Path, label: &str) -> Result<PathBuf> {
+    let canon = dunce::canonicalize(path)?;
+    if !canon.starts_with(cwd) {
+        bail!("Security violation: '{label}' escapes workspace");
+    }
+    Ok(canon)
+}
+
 pub fn validate_relative_path(raw: &str) -> Result<&Path> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -122,40 +127,28 @@ fn resolve_workspace_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
 
 pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     let (cwd, target) = resolve_workspace_path(raw)?;
+    let trimmed = raw.trim();
     if !target.exists() {
-        bail!("Target path does not exist: '{}'", raw.trim());
+        bail!("Target path does not exist: '{trimmed}'");
     }
-    let canon = dunce::canonicalize(&target)?;
-    if !canon.starts_with(&cwd) {
-        bail!(
-            "Security violation: target '{}' escapes workspace",
-            raw.trim()
-        );
-    }
+    let canon = ensure_within_workspace(&target, &cwd, trimmed)?;
     Ok((cwd, canon))
 }
 
 pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     let (cwd, target) = resolve_workspace_path(raw)?;
+    let trimmed = raw.trim();
     if target.exists() {
-        bail!(
-            "File already exists: {}. Use edit_file instead.",
-            raw.trim()
-        );
+        bail!("File already exists: {trimmed}. Use edit_file instead.");
     }
 
     if let Some(existing_ancestor) = target.ancestors().skip(1).find(|p| p.exists()) {
-        if !dunce::canonicalize(existing_ancestor)?.starts_with(&cwd) {
-            bail!("Security violation: target directory escapes workspace via symlink");
-        }
+        ensure_within_workspace(existing_ancestor, &cwd, trimmed)?;
     }
 
     Ok((cwd, target))
 }
 
-/// Reads up to `cap` bytes into memory, then drops `reader` immediately so the
-/// write end of the OS pipe closes (preventing the child process from deadlocking
-/// on a full pipe buffer when output exceeds `max_output_size`).
 async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, cap: u64) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     (&mut reader).take(cap).read_to_end(&mut buf).await?;
@@ -184,7 +177,6 @@ where
         .spawn()
         .with_context(|| format!("Error executing {program}"))?;
 
-    // Cap reads at max_output_size + 1 so ToolRegistry::execute can still detect truncation
     let cap = (max_output_size as u64).saturating_add(1);
     let stdout = child
         .stdout
@@ -201,10 +193,8 @@ where
             read_capped(stderr, cap),
             child.wait()
         );
-        let out_buf = r1?;
-        let err_buf = r2?;
         let _ = status?;
-        Ok::<_, std::io::Error>((out_buf, err_buf))
+        Ok::<_, std::io::Error>((r1?, r2?))
     })
     .await
     .map_err(|_| {
