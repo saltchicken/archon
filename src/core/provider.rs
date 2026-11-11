@@ -36,6 +36,14 @@ impl Provider {
         }
     }
 
+    pub fn build_client(&self, config: &Config) -> Result<Client> {
+        let (connect_timeout, read_timeout) = self.timeouts(config);
+        Ok(Client::builder()
+            .connect_timeout(connect_timeout)
+            .read_timeout(read_timeout)
+            .build()?)
+    }
+
     pub fn effective_default_ctx(&self, configured_ctx: u32) -> u32 {
         match self {
             // If the user hasn't customized the 32k Ollama default, use Gemini's 1M context window

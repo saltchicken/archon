@@ -1,3 +1,4 @@
+use crate::core::provider::Provider;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
     Figment,
@@ -54,6 +55,7 @@ pub struct Config {
     pub app: AppSettings,
     pub ollama: OllamaSettings,
     pub gemini: GeminiSettings,
+    pub models: Vec<ModelPreset>,
     pub presets: Vec<Preset>,
     pub system_presets: Vec<Preset>,
 }
@@ -97,6 +99,21 @@ impl GeminiSettings {
             .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelPreset {
+    pub name: String,
+    pub context: u32,
+}
+
+impl ModelPreset {
+    pub fn new(name: &str, context: u32) -> Self {
+        Self {
+            name: name.into(),
+            context,
+        }
     }
 }
 
@@ -159,6 +176,11 @@ impl Default for Config {
             app: AppSettings::default(),
             ollama: OllamaSettings::default(),
             gemini: GeminiSettings::default(),
+            models: vec![
+                ModelPreset::new("qwen3.8:27b", 32768),
+                ModelPreset::new("gemini-2.5-flash", 1_048_576),
+                ModelPreset::new("gemini-2.5-pro", 1_048_576),
+            ],
             presets: vec![
                 Preset::new("Custom", ""),
                 Preset::new("Describe in detail", "Describe this image in detail."),
@@ -180,6 +202,16 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn context_for_model(&self, model: &str) -> u32 {
+        self.models
+            .iter()
+            .find(|m| m.name == model)
+            .map(|m| m.context)
+            .unwrap_or_else(|| {
+                Provider::from_model(model).effective_default_ctx(self.app.default_context)
+            })
+    }
+
     pub fn load(
         base_path: impl AsRef<Path>,
         local_path: impl AsRef<Path>,

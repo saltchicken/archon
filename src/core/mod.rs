@@ -50,6 +50,11 @@ pub enum EngineCommand {
     DeleteSession(PathBuf),
     RefreshSessions,
     ResetChat,
+    SwitchModel {
+        model: String,
+        num_ctx: u32,
+    },
+    SetContextWindow(u32),
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +84,10 @@ pub enum EngineEvent {
         total: usize,
     },
     SessionsListed(Vec<SessionSummary>),
+    ModelConfigUpdated {
+        model: String,
+        num_ctx: u32,
+    },
 }
 
 pub struct CoreEngine {
@@ -122,12 +131,8 @@ impl CoreEngine {
         let provider = Provider::from_model(&model);
         let workspace = Arc::new(ImageWorkspace::new()?);
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
-        let (connect_timeout, read_timeout) = provider.timeouts(&config);
-        let client = Client::builder()
-            .connect_timeout(connect_timeout)
-            .read_timeout(read_timeout)
-            .build()?;
-        let active_num_ctx = provider.effective_default_ctx(config.app.default_context);
+        let client = provider.build_client(&config)?;
+        let active_num_ctx = config.context_for_model(&model);
 
         Ok(Self {
             model,
@@ -445,10 +450,27 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.active_system_prompt = data.system_prompt;
-                        let default_ctx = self
-                            .provider
-                            .effective_default_ctx(self.config.app.default_context);
-                        self.active_num_ctx = data.num_ctx.max(default_ctx);
+
+                        if !data.model.is_empty() && data.model != self.model {
+                            let loaded_provider = Provider::from_model(&data.model);
+                            if let Ok(new_client) = loaded_provider.build_client(&self.config) {
+                                self.model = data.model.clone();
+                                self.provider = loaded_provider;
+                                self.client = new_client;
+                            }
+                        }
+
+                        self.active_num_ctx = if data.num_ctx > 0 {
+                            data.num_ctx
+                        } else {
+                            self.config.context_for_model(&self.model)
+                        };
+
+                        let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
+                            model: self.model.clone(),
+                            num_ctx: self.active_num_ctx,
+                        });
+
                         self.messages = data.messages;
                         self.emit_chat();
                         self.notify(format!("Loaded session: {}", data.title), false);
@@ -483,12 +505,66 @@ impl CoreEngine {
                 self.clear_workspace().await;
 
                 self.session_id = SessionManager::new_id();
-                self.active_num_ctx = self
-                    .provider
-                    .effective_default_ctx(self.config.app.default_context);
+                self.active_num_ctx = self.config.context_for_model(&self.model);
+                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
+                    model: self.model.clone(),
+                    num_ctx: self.active_num_ctx,
+                });
                 self.messages.clear();
                 self.emit_chat();
                 self.notify("Started new chat session.", false);
+            }
+            EngineCommand::SwitchModel { model, num_ctx } => {
+                if self.active_task.is_some() {
+                    self.notify(
+                        "Cannot switch model while streaming. Cancel stream first.",
+                        true,
+                    );
+                    return;
+                }
+
+                let new_provider = Provider::from_model(&model);
+                info!(
+                    "Hot-swapping to model '{}' ({:?}, ctx: {})",
+                    model, new_provider, num_ctx
+                );
+
+                if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
+                    error!("Hot-swap preflight failed for '{}': {}", model, e);
+                    self.notify(format!("Model switch failed: {e}"), true);
+                    return;
+                }
+
+                let Ok(new_client) = new_provider.build_client(&self.config) else {
+                    self.notify("Failed to build HTTP client for new model.", true);
+                    return;
+                };
+
+                self.model = model;
+                self.provider = new_provider;
+                self.client = new_client;
+                self.active_num_ctx = num_ctx.max(512);
+
+                self.save_session_bg().await;
+                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
+                    model: self.model.clone(),
+                    num_ctx: self.active_num_ctx,
+                });
+                self.notify(
+                    format!("Switched to {} (Ctx: {})", self.model, self.active_num_ctx),
+                    false,
+                );
+            }
+            EngineCommand::SetContextWindow(new_ctx) => {
+                let clamped = new_ctx.max(512);
+                info!("Updating context window to {}", clamped);
+                self.active_num_ctx = clamped;
+                self.save_session_bg().await;
+                let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
+                    model: self.model.clone(),
+                    num_ctx: self.active_num_ctx,
+                });
+                self.notify(format!("Context window set to {} tokens.", clamped), false);
             }
         }
     }

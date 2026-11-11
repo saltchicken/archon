@@ -53,6 +53,8 @@ pub(super) enum ActiveModal {
     AddFile,
     Sessions,
     ToolApproval,
+    ModelSelect,
+    ContextWindow,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -74,6 +76,9 @@ pub struct TuiApp {
     pub(super) is_streaming: bool,
     pub(super) status_bar: (String, bool),
 
+    pub(super) model_idx: usize,
+    pub(super) ctx_preset_idx: usize,
+    pub(super) ctx_input: String,
     pub(super) preset_idx: usize,
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
@@ -121,8 +126,14 @@ pub(super) fn preset_label(presets: &[Preset], idx: usize) -> &str {
 
 impl TuiApp {
     pub fn new(model: String, config: Config, cmd_tx: UnboundedSender<EngineCommand>) -> Self {
-        let num_ctx = config.app.default_context;
+        let num_ctx = config.context_for_model(&model);
         let show_thinking = config.app.show_thinking;
+        let model_idx = config
+            .models
+            .iter()
+            .position(|m| m.name == model)
+            .unwrap_or(0);
+
         Self {
             model,
             config,
@@ -137,6 +148,9 @@ impl TuiApp {
                 "Ready. Press Ctrl+⏎ to send prompt, ? to toggle help.".into(),
                 false,
             ),
+            model_idx,
+            ctx_preset_idx: 0,
+            ctx_input: String::new(),
             preset_idx: 0,
             sys_preset_idx: 0,
             custom_system_prompt: None,
@@ -223,10 +237,15 @@ impl TuiApp {
                             match self.modal {
                                 ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
                                 ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
+                                ActiveModal::ContextWindow => {
+                                    for c in single_line.chars().filter(|c| c.is_ascii_digit()) {
+                                        self.ctx_input.push(c);
+                                    }
+                                }
                                 ActiveModal::None => {
                                     self.text_area.insert_str(text.replace('\r', ""));
                                 }
-                                ActiveModal::Sessions => {}
+                                ActiveModal::Sessions | ActiveModal::ModelSelect => {}
                             }
                         }
                         _ => {}
@@ -267,7 +286,7 @@ impl TuiApp {
                 self.is_streaming = true;
                 self.streaming_text.clear();
                 self.status_bar = (
-                    "Streaming response from Ollama... (Esc to cancel)".into(),
+                    format!("Streaming response from {}... (Esc to cancel)", self.model),
                     false,
                 );
                 self.scroll_to_bottom();
@@ -295,6 +314,13 @@ impl TuiApp {
             EngineEvent::SessionsListed(list) => {
                 self.sessions = list;
                 self.session_idx = 0;
+            }
+            EngineEvent::ModelConfigUpdated { model, num_ctx } => {
+                self.model = model;
+                self.num_ctx = num_ctx;
+                if let Some(idx) = self.config.models.iter().position(|m| m.name == self.model) {
+                    self.model_idx = idx;
+                }
             }
         }
     }

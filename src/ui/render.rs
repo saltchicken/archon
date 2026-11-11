@@ -510,6 +510,8 @@ impl TuiApp {
             ActiveModal::AddFile => self.draw_file_modal(f),
             ActiveModal::Sessions => self.draw_sessions_modal(f),
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
+            ActiveModal::ModelSelect => self.draw_model_modal(f),
+            ActiveModal::ContextWindow => self.draw_context_modal(f),
             ActiveModal::None => {}
         }
     }
@@ -551,7 +553,8 @@ impl TuiApp {
 
         let bindings = [
             ("^⏎", "Send"),
-            ("PgUp/Dn", "Scroll"),
+            ("^M", "Model"),
+            ("^W", "Ctx"),
             ("^B", "Sidebar"),
             ("^S", "Sessions"),
             ("^R", "New"),
@@ -590,6 +593,7 @@ impl TuiApp {
             Line::from(vec![
                 Span::raw("Model:   "),
                 Span::styled(&self.model, Style::default().fg(Color::Green)),
+                Span::raw(" (^M)"),
             ]),
             Line::from(vec![
                 Span::raw("Context: "),
@@ -597,6 +601,7 @@ impl TuiApp {
                     format!("{}/{} ({pct:.0}%)", self.used_tokens, self.num_ctx),
                     Style::default().fg(ctx_color),
                 ),
+                Span::raw(" (^W)"),
             ]),
             Line::from(format!("Tools:   {} (^T)", toggle(self.enable_tools))),
             Line::from(format!("Think:   {} (^K)", toggle(self.show_thinking))),
@@ -704,7 +709,7 @@ impl TuiApp {
                 }
                 stripped
             };
-            
+
             // Sanitize stream text too to avoid cursor drift during active generation
             let sanitized_stream = sanitize_line(&text_to_wrap);
             let stream_lines = wrap_text(&sanitized_stream, &options);
@@ -740,7 +745,7 @@ impl TuiApp {
 
         let (pct, ctx_color) = self.ctx_usage(Color::DarkGray);
         let title_line = Line::from(vec![
-            Span::raw(" Conversation "),
+            Span::raw(format!(" Conversation [{}] ", self.model)),
             Span::styled(
                 format!("[Ctx: {} / {} ({pct:.0}%)] ", self.used_tokens, self.num_ctx),
                 Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),

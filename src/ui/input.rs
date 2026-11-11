@@ -93,6 +93,8 @@ impl TuiApp {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code),
+            ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
+            ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
             ActiveModal::None => self.handle_main_key(key, ctrl),
         }
         false
@@ -160,6 +162,59 @@ impl TuiApp {
         }
     }
 
+    fn handle_model_select_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.modal = ActiveModal::None,
+            KeyCode::Up => self.model_idx = self.model_idx.saturating_sub(1),
+            KeyCode::Down if self.model_idx + 1 < self.config.models.len() => {
+                self.model_idx += 1;
+            }
+            KeyCode::Enter => {
+                if let Some(preset) = self.config.models.get(self.model_idx) {
+                    let _ = self.cmd_tx.send(EngineCommand::SwitchModel {
+                        model: preset.name.clone(),
+                        num_ctx: preset.context,
+                    });
+                }
+                self.modal = ActiveModal::None;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_context_window_key(&mut self, code: KeyCode) {
+        let presets = super::modals::CTX_PRESETS;
+        match code {
+            KeyCode::Esc => self.modal = ActiveModal::None,
+            KeyCode::Up => {
+                self.ctx_input.clear();
+                self.ctx_preset_idx = self.ctx_preset_idx.saturating_sub(1);
+            }
+            KeyCode::Down if self.ctx_preset_idx + 1 < presets.len() => {
+                self.ctx_input.clear();
+                self.ctx_preset_idx += 1;
+            }
+            KeyCode::Backspace => {
+                self.ctx_input.pop();
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                self.ctx_input.push(c);
+            }
+            KeyCode::Enter => {
+                let target_ctx = if !self.ctx_input.is_empty() {
+                    self.ctx_input.parse::<u32>().ok()
+                } else {
+                    presets.get(self.ctx_preset_idx).map(|(v, _)| *v)
+                };
+                if let Some(ctx) = target_ctx {
+                    let _ = self.cmd_tx.send(EngineCommand::SetContextWindow(ctx));
+                }
+                self.modal = ActiveModal::None;
+            }
+            _ => {}
+        }
+    }
+
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
@@ -191,6 +246,20 @@ impl TuiApp {
             KeyCode::Char('s') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
                 self.modal = ActiveModal::Sessions;
+            }
+            KeyCode::Char('m') if ctrl && !self.config.models.is_empty() => {
+                if let Some(idx) = self.config.models.iter().position(|m| m.name == self.model) {
+                    self.model_idx = idx;
+                }
+                self.modal = ActiveModal::ModelSelect;
+            }
+            KeyCode::Char('w') if ctrl => {
+                self.ctx_input.clear();
+                self.ctx_preset_idx = super::modals::CTX_PRESETS
+                    .iter()
+                    .position(|(v, _)| *v == self.num_ctx)
+                    .unwrap_or(3);
+                self.modal = ActiveModal::ContextWindow;
             }
             KeyCode::Char('r') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);

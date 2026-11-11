@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         .nth(1)
         .unwrap_or_else(|| config.app.default_model.clone());
     let provider = Provider::from_model(&target_model);
-    config.app.default_context = provider.effective_default_ctx(config.app.default_context);
+    config.app.default_context = config.context_for_model(&target_model);
 
     info!("Targeting model: {} (Provider: {:?})", target_model, provider);
 
