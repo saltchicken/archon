@@ -3,7 +3,11 @@ mod tools;
 mod ui;
 
 use anyhow::Result;
-use core::{config::Config, ollama::run_preflight, CoreEngine, EngineEvent};
+use core::{
+    config::{load_dotenv, Config},
+    provider::Provider,
+    CoreEngine, EngineEvent,
+};
 use std::env;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -17,11 +21,14 @@ async fn main() -> Result<()> {
         original_hook(panic_info);
     }));
 
+    // Load .env from the working directory before reading config or environment variables
+    load_dotenv(".env");
+
     let base_config_path = dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon/config.toml");
 
-    let (config, config_err) = Config::load(&base_config_path, ".archon.toml");
+    let (mut config, config_err) = Config::load(&base_config_path, ".archon.toml");
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
@@ -32,9 +39,12 @@ async fn main() -> Result<()> {
     let target_model = env::args()
         .nth(1)
         .unwrap_or_else(|| config.app.default_model.clone());
-    info!("Targeting model: {}", target_model);
+    let provider = Provider::from_model(&target_model);
+    config.app.default_context = provider.effective_default_ctx(config.app.default_context);
 
-    if let Err(e) = run_preflight(&target_model, &config).await {
+    info!("Targeting model: {} (Provider: {:?})", target_model, provider);
+
+    if let Err(e) = provider.run_preflight(&target_model, &config).await {
         error!("Preflight failed: {}", e);
         if let Some(cfg_err) = config_err {
             eprintln!("Warning: {cfg_err}");

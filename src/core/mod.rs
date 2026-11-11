@@ -1,18 +1,20 @@
 pub mod config;
+pub mod gemini;
 pub mod logger;
 pub mod ollama;
+pub mod provider;
 pub mod session;
 pub mod tools;
 pub mod workspace;
 
 use config::Config;
+use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary};
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -81,6 +83,7 @@ pub enum EngineEvent {
 
 pub struct CoreEngine {
     model: String,
+    provider: Provider,
     config: Config,
     client: Client,
     workspace: Arc<ImageWorkspace>,
@@ -116,16 +119,19 @@ impl CoreEngine {
         config: Config,
         tx: UnboundedSender<EngineEvent>,
     ) -> anyhow::Result<Self> {
+        let provider = Provider::from_model(&model);
         let workspace = Arc::new(ImageWorkspace::new()?);
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
+        let (connect_timeout, read_timeout) = provider.timeouts(&config);
         let client = Client::builder()
-            .connect_timeout(Duration::from_secs(config.ollama.status_timeout.max(5)))
-            .read_timeout(Duration::from_secs(config.ollama.chat_timeout))
+            .connect_timeout(connect_timeout)
+            .read_timeout(read_timeout)
             .build()?;
-        let active_num_ctx = config.app.default_context;
+        let active_num_ctx = provider.effective_default_ctx(config.app.default_context);
 
         Ok(Self {
             model,
+            provider,
             config,
             client,
             workspace,
@@ -331,7 +337,7 @@ impl CoreEngine {
                 });
 
                 self.save_and_emit_chat().await;
-                self.spawn_ollama_turn(&turn, internal_tx.clone()).await;
+                self.spawn_model_turn(&turn, internal_tx.clone()).await;
             }
             EngineCommand::CancelStream => {
                 info!("User cancelled stream");
@@ -394,7 +400,7 @@ impl CoreEngine {
                 info!("Tool execution resolved and recorded to chat history.");
 
                 if self.pending_tools.is_empty() {
-                    self.spawn_ollama_turn(&turn, internal_tx.clone()).await;
+                    self.spawn_model_turn(&turn, internal_tx.clone()).await;
                 } else {
                     self.prompt_next_tool();
                 }
@@ -439,7 +445,10 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.active_system_prompt = data.system_prompt;
-                        self.active_num_ctx = data.num_ctx.max(self.config.app.default_context);
+                        let default_ctx = self
+                            .provider
+                            .effective_default_ctx(self.config.app.default_context);
+                        self.active_num_ctx = data.num_ctx.max(default_ctx);
                         self.messages = data.messages;
                         self.emit_chat();
                         self.notify(format!("Loaded session: {}", data.title), false);
@@ -474,7 +483,9 @@ impl CoreEngine {
                 self.clear_workspace().await;
 
                 self.session_id = SessionManager::new_id();
-                self.active_num_ctx = self.config.app.default_context;
+                self.active_num_ctx = self
+                    .provider
+                    .effective_default_ctx(self.config.app.default_context);
                 self.messages.clear();
                 self.emit_chat();
                 self.notify("Started new chat session.", false);
@@ -579,7 +590,7 @@ impl CoreEngine {
         }));
     }
 
-    async fn spawn_ollama_turn(
+    async fn spawn_model_turn(
         &mut self,
         turn: &TurnConfig,
         internal_tx: UnboundedSender<EngineEvent>,
@@ -619,20 +630,26 @@ impl CoreEngine {
             self.messages = updated_msgs;
         }
 
-        let payload = ollama::build_payload(
-            &self.model,
-            &self.messages,
-            &turn.system_prompt,
-            turn.num_ctx,
-            tools_schema,
-        );
-
         let _ = self.tx.send(EngineEvent::StreamStarted);
+        let provider = self.provider;
         let client = self.client.clone();
-        let url = self.config.ollama.base_url.clone();
+        let model = self.model.clone();
+        let config = self.config.clone();
+        let messages = self.messages.clone();
+        let turn_cfg = turn.clone();
 
         self.active_task = Some(tokio::spawn(async move {
-            ollama::stream_chat(client, url, payload, internal_tx).await;
+            provider
+                .stream_turn(
+                    client,
+                    model,
+                    config,
+                    messages,
+                    turn_cfg,
+                    tools_schema,
+                    internal_tx,
+                )
+                .await;
         }));
     }
 

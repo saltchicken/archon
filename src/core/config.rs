@@ -15,11 +15,45 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         .into()
 }
 
+/// Loads `.env` from the current directory into process environment variables
+/// without overwriting variables already set in the shell environment.
+pub fn load_dotenv(path: impl AsRef<Path>) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some((key, val)) = trimmed.split_once('=') {
+            let key = key.trim();
+            if key.is_empty() || std::env::var_os(key).is_some() {
+                continue;
+            }
+            let val = val.trim();
+            let unquoted = if (val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\''))
+            {
+                &val[1..val.len().saturating_sub(1)]
+            } else {
+                val
+            };
+            // Safe here because `load_dotenv` is called once at startup before spawning worker threads.
+            unsafe {
+                std::env::set_var(key, unquoted);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
     pub ollama: OllamaSettings,
+    pub gemini: GeminiSettings,
     pub presets: Vec<Preset>,
     pub system_presets: Vec<Preset>,
 }
@@ -42,6 +76,28 @@ pub struct OllamaSettings {
     pub base_url: String,
     pub chat_timeout: u64,
     pub status_timeout: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeminiSettings {
+    pub api_key: String,
+    pub base_url: String,
+    pub chat_timeout: u64,
+    pub status_timeout: u64,
+}
+
+impl GeminiSettings {
+    pub fn resolve_api_key(&self) -> Option<String> {
+        if !self.api_key.trim().is_empty() {
+            return Some(self.api_key.trim().to_string());
+        }
+        std::env::var("GEMINI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,11 +142,23 @@ impl Default for OllamaSettings {
     }
 }
 
+impl Default for GeminiSettings {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+            chat_timeout: 180,
+            status_timeout: 5,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             app: AppSettings::default(),
             ollama: OllamaSettings::default(),
+            gemini: GeminiSettings::default(),
             presets: vec![
                 Preset::new("Custom", ""),
                 Preset::new("Describe in detail", "Describe this image in detail."),
