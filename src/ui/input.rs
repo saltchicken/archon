@@ -218,6 +218,7 @@ impl TuiApp {
 
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
 
         match key.code {
@@ -233,7 +234,10 @@ impl TuiApp {
             KeyCode::Char('?') if !ctrl && self.text_area.lines().iter().all(|l| l.is_empty()) => {
                 self.show_help_bar = !self.show_help_bar;
             }
-            KeyCode::Enter if ctrl => self.submit_prompt(),
+            KeyCode::Enter if shift => {
+                self.text_area.insert_newline();
+            }
+            KeyCode::Enter => self.submit_prompt(),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }

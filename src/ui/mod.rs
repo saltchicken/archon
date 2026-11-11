@@ -147,7 +147,7 @@ impl TuiApp {
             streaming_text: String::new(),
             is_streaming: false,
             status_bar: (
-                "Ready. Press Ctrl+⏎ to send prompt, ? to toggle help.".into(),
+                "Ready. Press ⏎ to send prompt (⇧⏎ newline), ? to toggle help.".into(),
                 false,
             ),
             model_idx,

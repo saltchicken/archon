@@ -552,7 +552,8 @@ impl TuiApp {
         let sep_style = Style::default().fg(Color::DarkGray);
 
         let bindings = [
-            ("^⏎", "Send"),
+            ("⏎", "Send"),
+            ("⇧⏎", "Newline"),
             ("^M", "Model"),
             ("^W", "Ctx"),
             ("^B", "Sidebar"),
