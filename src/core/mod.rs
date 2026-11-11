@@ -19,7 +19,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tools::{ToolCall, ToolRegistry};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use workspace::{ImageAttachment, ImageWorkspace};
 
 #[derive(Debug)]
@@ -377,8 +377,47 @@ impl CoreEngine {
                 let res = tokio::task::spawn_blocking(move || sessions.load(&path)).await;
 
                 match res {
-                    Ok(Ok(data)) => {
+                    Ok(Ok(mut data)) => {
                         self.abort_active_state();
+                        let asset_dir = self.sessions.asset_dir(&data.id);
+
+                        // Resolve image_paths (handling moved history_dir or ~ paths)
+                        // and collect all session images to restore into the workspace UI.
+                        let mut session_img_paths = Vec::new();
+                        for msg in &mut data.messages {
+                            if let Some(paths) = &mut msg.image_paths {
+                                for p in paths.iter_mut() {
+                                    if !p.exists() {
+                                        let expanded = config::expand_tilde(&p.to_string_lossy());
+                                        if expanded.exists() {
+                                            *p = expanded;
+                                        } else if let Some(fname) = p.file_name() {
+                                            let candidate = asset_dir.join(fname);
+                                            if candidate.exists() {
+                                                *p = candidate;
+                                            }
+                                        }
+                                    }
+                                    session_img_paths.push(p.clone());
+                                }
+                            }
+                        }
+
+                        let ws = Arc::clone(&self.workspace);
+                        let (restored_ws_paths, attachments) =
+                            tokio::task::spawn_blocking(move || {
+                                let restored = ws.restore_from_session(&session_img_paths);
+                                let list = ws.list_attachments();
+                                (restored, list)
+                            })
+                            .await
+                            .unwrap_or_default();
+
+                        // Mark restored images as already sent so they aren't re-attached
+                        // as brand-new images on the next prompt turn.
+                        self.sent_images.extend(restored_ws_paths);
+                        let _ = self.tx.send(EngineEvent::WorkspaceUpdated(attachments));
+
                         self.session_id = data.id;
                         self.active_system_prompt = data.system_prompt;
                         self.active_num_ctx = data.num_ctx;
@@ -415,6 +454,10 @@ impl CoreEngine {
                     let _ = save_handle.await;
                 }
                 self.abort_active_state();
+                let ws = Arc::clone(&self.workspace);
+                let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
+                let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
+
                 self.session_id = SessionManager::new_id();
                 self.messages.clear();
                 self.emit_chat();
@@ -505,16 +548,31 @@ impl CoreEngine {
     ) {
         self.stream_buffer.clear();
         let tools_schema = enable_tools.then(|| self.tools.schemas());
+        let asset_dir = self.sessions.asset_dir(&self.session_id);
 
         let mut msgs = self.messages.clone();
         if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
             for msg in &mut msgs {
                 if msg.images.is_none() {
                     if let Some(paths) = &msg.image_paths {
-                        let b64s: Vec<String> = paths
-                            .iter()
-                            .filter_map(|p| ImageWorkspace::encode_image(p).ok())
-                            .collect();
+                        let mut b64s = Vec::new();
+                        for p in paths {
+                            let resolved = if p.exists() {
+                                p.clone()
+                            } else {
+                                p.file_name()
+                                    .map(|name| asset_dir.join(name))
+                                    .unwrap_or_else(|| p.clone())
+                            };
+                            match ImageWorkspace::encode_image(&resolved) {
+                                Ok(b64) => b64s.push(b64),
+                                Err(e) => warn!(
+                                    "Failed to encode session image {}: {}",
+                                    resolved.display(),
+                                    e
+                                ),
+                            }
+                        }
                         if !b64s.is_empty() {
                             msg.images = Some(b64s);
                         }

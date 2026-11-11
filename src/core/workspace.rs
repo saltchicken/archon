@@ -121,6 +121,30 @@ impl ImageWorkspace {
         Ok(out_path)
     }
 
+    /// Restores saved session asset images into the active temporary workspace
+    /// and returns their workspace paths so they can be marked as already sent.
+    pub fn restore_from_session(&self, asset_paths: &[PathBuf]) -> Vec<PathBuf> {
+        self.clear();
+        let mut restored = Vec::new();
+
+        for (idx, src) in asset_paths.iter().enumerate() {
+            if !src.exists() {
+                continue;
+            }
+            let file_name = src
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("restored_{idx}.png"));
+            let dest = self.img_dir.join(file_name);
+            if fs::copy(src, &dest).is_ok() {
+                restored.push(dest);
+            }
+        }
+
+        restored
+    }
+
     pub fn clear(&self) {
         if let Ok(entries) = fs::read_dir(&self.img_dir) {
             for entry in entries.flatten() {
