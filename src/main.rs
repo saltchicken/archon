@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         .join("archon/config.toml");
 
     let config = Config::load(&base_config_path, ".archon.toml");
-    let _guard = core::logger::init(&config.app.history_dir);
+    let guard = core::logger::init(&config.app.history_dir);
     info!("Archon starting up. Config loaded successfully.");
 
     let target_model = env::args()
@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
     if let Err(e) = run_preflight(&target_model, &config).await {
         error!("Preflight failed: {}", e);
         eprintln!("{e}");
+        drop(guard);
         std::process::exit(1);
     }
 
@@ -42,7 +43,13 @@ async fn main() -> Result<()> {
     let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
     let engine_handle = tokio::spawn(engine.run(cmd_rx));
 
-    TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await?;
+    let res = TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await;
     let _ = engine_handle.await;
-    Ok(())
+    drop(guard);
+
+    if let Err(e) = res {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }

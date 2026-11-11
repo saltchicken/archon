@@ -263,9 +263,11 @@ impl CoreEngine {
 
         loop {
             tokio::select! {
-                Some(cmd) = cmd_rx.recv() => self.handle_command(cmd, &internal_tx).await,
+                maybe_cmd = cmd_rx.recv() => match maybe_cmd {
+                    Some(cmd) => self.handle_command(cmd, &internal_tx).await,
+                    None => break,
+                },
                 Some(ev) = internal_rx.recv() => self.handle_internal_event(ev).await,
-                else => break,
             }
         }
 
