@@ -18,7 +18,7 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
-use tools::{ToolCall, ToolRegistry};
+use tools::ToolCall;
 use tracing::{debug, error, info, warn};
 use workspace::{ImageAttachment, ImageWorkspace};
 
@@ -85,7 +85,6 @@ pub struct CoreEngine {
     client: Client,
     workspace: Arc<ImageWorkspace>,
     sessions: Arc<SessionManager>,
-    tools: ToolRegistry,
     session_id: String,
     active_system_prompt: String,
     active_num_ctx: u32,
@@ -95,25 +94,20 @@ pub struct CoreEngine {
     active_task: Option<JoinHandle<()>>,
     save_task: Option<JoinHandle<()>>,
     pending_tools: VecDeque<ToolCall>,
-    pending_batch_total: usize,
     tx: UnboundedSender<EngineEvent>,
 }
 
 fn resolve_session_image_path(p: &Path, asset_dir: &Path) -> PathBuf {
-    if p.exists() {
-        return p.to_path_buf();
-    }
-    let expanded = config::expand_tilde(&p.to_string_lossy());
-    if expanded.exists() {
-        return expanded;
-    }
-    if let Some(fname) = p.file_name() {
-        let candidate = asset_dir.join(fname);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    p.to_path_buf()
+    let candidates = [
+        Some(p.to_path_buf()),
+        Some(config::expand_tilde(&p.to_string_lossy())),
+        p.file_name().map(|f| asset_dir.join(f)),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|c| c.exists())
+        .unwrap_or_else(|| p.to_path_buf())
 }
 
 impl CoreEngine {
@@ -124,7 +118,6 @@ impl CoreEngine {
     ) -> anyhow::Result<Self> {
         let workspace = Arc::new(ImageWorkspace::new()?);
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
-        let tools = ToolRegistry::new(&config);
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(config.ollama.status_timeout.max(5)))
             .read_timeout(Duration::from_secs(config.ollama.chat_timeout))
@@ -137,7 +130,6 @@ impl CoreEngine {
             client,
             workspace,
             sessions,
-            tools,
             session_id: SessionManager::new_id(),
             active_system_prompt: String::new(),
             active_num_ctx,
@@ -147,7 +139,6 @@ impl CoreEngine {
             active_task: None,
             save_task: None,
             pending_tools: VecDeque::new(),
-            pending_batch_total: 0,
             tx,
         })
     }
@@ -157,7 +148,6 @@ impl CoreEngine {
             h.abort();
         }
         self.pending_tools.clear();
-        self.pending_batch_total = 0;
         self.sent_images.clear();
         self.stream_buffer.clear();
     }
@@ -180,22 +170,26 @@ impl CoreEngine {
     }
 
     fn prompt_next_tool(&mut self) {
-        if let Some(call) = self.pending_tools.front() {
-            let formatted_preview = self.tools.format_approval(call);
-            let index = self.pending_batch_total - self.pending_tools.len() + 1;
-            let _ = self.tx.send(EngineEvent::ToolApprovalRequested {
-                formatted_preview,
-                index,
-                total: self.pending_batch_total,
-            });
-        } else {
-            self.pending_batch_total = 0;
-        }
+        let Some(call) = self.pending_tools.front() else {
+            return;
+        };
+        let total = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| m.tool_calls.as_ref().map(Vec::len))
+            .unwrap_or(self.pending_tools.len())
+            .max(self.pending_tools.len());
+        let index = total - self.pending_tools.len() + 1;
+        let _ = self.tx.send(EngineEvent::ToolApprovalRequested {
+            formatted_preview: tools::format_approval(call),
+            index,
+            total,
+        });
     }
 
     fn enqueue_tool_calls(&mut self, calls: Vec<ToolCall>) {
         self.pending_tools = VecDeque::from(calls);
-        self.pending_batch_total = self.pending_tools.len();
         self.prompt_next_tool();
     }
 
@@ -227,14 +221,15 @@ impl CoreEngine {
             let mut sent = Vec::new();
 
             for att in ws.list_attachments() {
-                if !already_sent.contains(&att.path) {
-                    let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
-                    let _ = std::fs::copy(&att.path, &dest);
-                    if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
-                        imgs.push(b64);
-                        paths.push(dest);
-                        sent.push(att.path);
-                    }
+                if already_sent.contains(&att.path) {
+                    continue;
+                }
+                let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
+                let _ = std::fs::copy(&att.path, &dest);
+                if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
+                    imgs.push(b64);
+                    paths.push(dest);
+                    sent.push(att.path);
                 }
             }
             (imgs, paths, sent)
@@ -268,14 +263,9 @@ impl CoreEngine {
 
         loop {
             tokio::select! {
-                cmd_opt = cmd_rx.recv() => {
-                    let Some(cmd) = cmd_opt else { break };
-                    self.handle_command(cmd, &internal_tx).await;
-                }
-                ev_opt = internal_rx.recv() => {
-                    let Some(ev) = ev_opt else { break };
-                    self.handle_internal_event(ev).await;
-                }
+                Some(cmd) = cmd_rx.recv() => self.handle_command(cmd, &internal_tx).await,
+                Some(ev) = internal_rx.recv() => self.handle_internal_event(ev).await,
+                else => break,
             }
         }
 
@@ -318,7 +308,7 @@ impl CoreEngine {
                     h.abort();
                 }
 
-                while let Some(call) = self.pending_tools.pop_front() {
+                for call in self.pending_tools.drain(..) {
                     warn!(
                         "Auto-declining unresolved tool call '{}' before new prompt",
                         call.function.name
@@ -328,7 +318,6 @@ impl CoreEngine {
                         "The user skipped this tool call and sent a new message.",
                     ));
                 }
-                self.pending_batch_total = 0;
 
                 self.apply_turn_config(&turn);
                 let (images, image_paths) = self.collect_unsent_images().await;
@@ -344,20 +333,20 @@ impl CoreEngine {
             }
             EngineCommand::CancelStream => {
                 info!("User cancelled stream");
-                if let Some(handle) = self.active_task.take() {
-                    handle.abort();
-                    if !self.stream_buffer.trim().is_empty() {
-                        let text = std::mem::take(&mut self.stream_buffer);
-                        self.messages.push(ChatMessage::new(
-                            "assistant",
-                            format!("{text}\n\n*[Generation cancelled]*"),
-                        ));
-                        self.save_session_bg().await;
-                    }
-                    self.stream_buffer.clear();
-                    self.emit_chat();
-                    self.notify("Stream cancelled.", false);
+                let Some(handle) = self.active_task.take() else {
+                    return;
+                };
+                handle.abort();
+                let text = std::mem::take(&mut self.stream_buffer);
+                if !text.trim().is_empty() {
+                    self.messages.push(ChatMessage::new(
+                        "assistant",
+                        format!("{text}\n\n*[Generation cancelled]*"),
+                    ));
+                    self.save_session_bg().await;
                 }
+                self.emit_chat();
+                self.notify("Stream cancelled.", false);
             }
             EngineCommand::ResolveTool {
                 approved,
@@ -365,7 +354,6 @@ impl CoreEngine {
                 turn,
             } => {
                 self.apply_turn_config(&turn);
-
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
                 };
@@ -376,7 +364,12 @@ impl CoreEngine {
                 );
 
                 let (mut internal_out, truncated) = if approved {
-                    self.tools.execute(&call).await
+                    tools::execute(
+                        &call,
+                        &self.config.app.allowed_commands,
+                        self.config.app.max_tool_output_size,
+                    )
+                    .await
                 } else {
                     ("The user declined to run this command.".into(), false)
                 };
@@ -391,15 +384,14 @@ impl CoreEngine {
                     internal_out.push_str(&format!("{prefix} {trimmed_fb}"));
                 }
 
-                let mut msg = ChatMessage::new("tool", internal_out);
-                msg.truncated = truncated;
-                self.messages.push(msg);
+                self.messages.push(ChatMessage {
+                    truncated,
+                    ..ChatMessage::new("tool", internal_out)
+                });
                 self.save_and_emit_chat().await;
-
                 info!("Tool execution resolved and recorded to chat history.");
 
                 if self.pending_tools.is_empty() {
-                    self.pending_batch_total = 0;
                     self.spawn_ollama_turn(&turn, internal_tx.clone()).await;
                 } else {
                     self.prompt_next_tool();
@@ -422,20 +414,20 @@ impl CoreEngine {
                         let asset_dir = self.sessions.asset_dir(&data.id);
 
                         let mut session_img_paths = Vec::new();
-                        for msg in &mut data.messages {
-                            if let Some(paths) = &mut msg.image_paths {
-                                for p in paths.iter_mut() {
-                                    *p = resolve_session_image_path(p, &asset_dir);
-                                    session_img_paths.push(p.clone());
-                                }
-                            }
+                        for p in data
+                            .messages
+                            .iter_mut()
+                            .filter_map(|m| m.image_paths.as_mut())
+                            .flatten()
+                        {
+                            *p = resolve_session_image_path(p, &asset_dir);
+                            session_img_paths.push(p.clone());
                         }
 
                         let ws = Arc::clone(&self.workspace);
                         let (restored_ws_paths, attachments) =
                             tokio::task::spawn_blocking(move || {
-                                let restored = ws.restore_from_session(&session_img_paths);
-                                (restored, ws.list_attachments())
+                                (ws.restore_from_session(&session_img_paths), ws.list_attachments())
                             })
                             .await
                             .unwrap_or_default();
@@ -445,7 +437,7 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.active_system_prompt = data.system_prompt;
-                        self.active_num_ctx = data.num_ctx;
+                        self.active_num_ctx = data.num_ctx.max(self.config.app.default_context);
                         self.messages = data.messages;
                         self.emit_chat();
                         self.notify(format!("Loaded session: {}", data.title), false);
@@ -480,6 +472,7 @@ impl CoreEngine {
                 self.clear_workspace().await;
 
                 self.session_id = SessionManager::new_id();
+                self.active_num_ctx = self.config.app.default_context;
                 self.messages.clear();
                 self.emit_chat();
                 self.notify("Started new chat session.", false);
@@ -514,15 +507,12 @@ impl CoreEngine {
                         tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
                         ..ChatMessage::new("assistant", final_text)
                     });
-                    self.save_session_bg().await;
-                    self.emit_chat();
+                    self.save_and_emit_chat().await;
 
-                    let prefix = if hit_length {
-                        "⚠️ CTX MAXED OUT (Truncated) — "
-                    } else if is_near_limit {
-                        "⚠️ CTX LIMIT NEAR — "
-                    } else {
-                        ""
+                    let prefix = match (hit_length, is_near_limit) {
+                        (true, _) => "⚠️ CTX MAXED OUT (Truncated) — ",
+                        (false, true) => "⚠️ CTX LIMIT NEAR — ",
+                        _ => "",
                     };
 
                     self.notify(
@@ -545,7 +535,6 @@ impl CoreEngine {
                 }
 
                 let _ = self.tx.send(ev.clone());
-
                 if !tool_calls.is_empty() {
                     self.enqueue_tool_calls(tool_calls.clone());
                 }
@@ -594,34 +583,31 @@ impl CoreEngine {
         internal_tx: UnboundedSender<EngineEvent>,
     ) {
         self.stream_buffer.clear();
-        let tools_schema = turn.enable_tools.then(|| self.tools.schemas());
+        let tools_schema = turn.enable_tools.then(crate::tools::schemas);
         let asset_dir = self.sessions.asset_dir(&self.session_id);
 
         let mut msgs = self.messages.clone();
         if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
             for msg in &mut msgs {
-                if msg.images.is_none() {
-                    if let Some(paths) = &msg.image_paths {
-                        let b64s: Vec<String> = paths
-                            .iter()
-                            .filter_map(|p| {
-                                let resolved = resolve_session_image_path(p, &asset_dir);
-                                ImageWorkspace::encode_image(&resolved)
-                                    .map_err(|e| {
-                                        warn!(
-                                            "Failed to encode session image {}: {}",
-                                            resolved.display(),
-                                            e
-                                        )
-                                    })
-                                    .ok()
+                if msg.images.is_some() {
+                    continue;
+                }
+                let Some(paths) = &msg.image_paths else {
+                    continue;
+                };
+                let b64s: Vec<String> = paths
+                    .iter()
+                    .filter_map(|p| {
+                        let resolved = resolve_session_image_path(p, &asset_dir);
+                        ImageWorkspace::encode_image(&resolved)
+                            .inspect_err(|e| {
+                                warn!("Failed to encode session image {}: {e}", resolved.display())
                             })
-                            .collect();
-
-                        if !b64s.is_empty() {
-                            msg.images = Some(b64s);
-                        }
-                    }
+                            .ok()
+                    })
+                    .collect();
+                if !b64s.is_empty() {
+                    msg.images = Some(b64s);
                 }
             }
             msgs

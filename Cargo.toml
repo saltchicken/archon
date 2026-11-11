@@ -14,8 +14,8 @@ dunce = "1.0"
 figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
 image = "0.25"
-ollama-rs = "0.3"
 ratatui = "0.30.2"
+ratatui-textarea = "0.9.4"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 schemars = "1.2.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -31,7 +31,6 @@ toml = "1.2.1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-ratatui-textarea = "0.9.4"
 wl-clipboard-rs = "0.9"
 
 [[bin]]

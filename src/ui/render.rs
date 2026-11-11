@@ -1,5 +1,8 @@
 use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
-use crate::core::session::{truncate_str, ChatMessage};
+use crate::core::{
+    ollama::strip_thinking,
+    session::{truncate_str, ChatMessage},
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,54 +11,29 @@ use ratatui::{
     Frame,
 };
 
-fn strip_thinking(text: &str) -> (String, bool) {
-    if !text.contains("<think>") {
-        return (text.to_string(), false);
-    }
-    
-    let mut result = String::with_capacity(text.len());
-    let mut current = text;
-    let mut is_thinking = false;
-    
-    while let Some(start) = current.find("<think>") {
-        result.push_str(&current[..start]);
-        if let Some(end_offset) = current[start..].find("</think>") {
-            current = &current[start + end_offset + 8..];
-            while current.starts_with('\n') {
-                current = &current[1..];
-            }
-        } else {
-            is_thinking = true;
-            current = "";
-            break;
-        }
-    }
-    result.push_str(current);
-    (result, is_thinking)
-}
-
 fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
     let mut text = if show_thinking {
         m.content.clone()
     } else {
         strip_thinking(&m.content).0
     };
-    
+
     if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        for call in calls {
-            let compact_args = serde_json::to_string(&call.function.arguments).unwrap_or_default();
-            let preview = truncate_str(&compact_args, 80);
-            text.push_str(&format!(
-                "⚙ [Tool Call: {}({preview})]\n",
-                call.function.name
-            ));
-        }
-        if text.ends_with('\n') {
-            text.pop();
-        }
+        let call_lines: Vec<String> = calls
+            .iter()
+            .map(|c| {
+                let args = serde_json::to_string(&c.function.arguments).unwrap_or_default();
+                format!(
+                    "⚙ [Tool Call: {}({})]",
+                    c.function.name,
+                    truncate_str(&args, 80)
+                )
+            })
+            .collect();
+        text.push_str(&call_lines.join("\n"));
     }
     text
 }
@@ -100,10 +78,9 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
         return spans;
     }
 
-    let mut in_code = false;
-    for segment in line.split('`') {
+    for (idx, segment) in line.split('`').enumerate() {
         if !segment.is_empty() {
-            if in_code {
+            if idx % 2 == 1 {
                 spans.push(Span::styled(
                     format!("`{segment}`"),
                     Style::default().fg(Color::Yellow),
@@ -112,7 +89,6 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
                 spans.push(Span::raw(segment.to_string()));
             }
         }
-        in_code = !in_code;
     }
 
     spans
@@ -129,24 +105,23 @@ fn format_visible_lines(
     for (idx, line) in content_lines.iter().enumerate().take(end) {
         let is_fence = line.trim_start().starts_with("```");
         if idx >= start {
-            if is_fence {
-                out.push(Line::from(vec![
+            let formatted = if is_fence {
+                vec![
                     Span::raw("  "),
                     Span::styled(
                         line.clone(),
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
                     ),
-                ]));
+                ]
             } else if in_code_block {
-                out.push(Line::from(vec![
+                vec![
                     Span::styled("  │ ", Style::default().fg(Color::Blue)),
                     Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
-                ]));
+                ]
             } else {
-                out.push(Line::from(style_inline_markdown(line)));
-            }
+                style_inline_markdown(line)
+            };
+            out.push(Line::from(formatted));
         }
         if is_fence {
             in_code_block = !in_code_block;
@@ -165,9 +140,9 @@ fn render_message_block(
     max_folded_lines: usize,
     state: &mut MsgUiState,
     lines: &mut Vec<Line<'static>>,
-    ranges: &mut Vec<(usize, u16, u16, bool)>,
+    ranges: &mut Vec<(usize, usize, usize, bool)>,
 ) {
-    let start_visual = lines.len() as u16;
+    let start_visual = lines.len();
     let max_lines = if state.unfolded {
         usize::MAX
     } else {
@@ -216,20 +191,15 @@ fn render_message_block(
     }
 
     lines.push(Line::from(""));
-    ranges.push((idx, start_visual, lines.len() as u16, is_truncated));
+    ranges.push((idx, start_visual, lines.len(), is_truncated));
 }
 
 impl TuiApp {
     pub(super) fn draw(&mut self, f: &mut Frame) {
-        let root_constraints = if self.show_help_bar {
-            vec![
-                Constraint::Min(10),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ]
-        } else {
-            vec![Constraint::Min(10), Constraint::Length(1)]
-        };
+        let mut root_constraints = vec![Constraint::Min(10), Constraint::Length(1)];
+        if self.show_help_bar {
+            root_constraints.push(Constraint::Length(1));
+        }
 
         let root = Layout::default()
             .direction(Direction::Vertical)
@@ -277,13 +247,13 @@ impl TuiApp {
             status_chunks[0],
         );
 
-        let help_toggle_label = if self.show_help_bar {
+        let help_label = if self.show_help_bar {
             "[?] Hide Help "
         } else {
             "[?] Show Help "
         };
         f.render_widget(
-            Paragraph::new(help_toggle_label).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(help_label).style(Style::default().fg(Color::DarkGray)),
             status_chunks[1],
         );
     }
@@ -329,19 +299,8 @@ impl TuiApp {
             .constraints([Constraint::Length(10), Constraint::Min(6)])
             .split(area);
 
-        let preset_name = preset_label(&self.config.presets, self.preset_idx);
-        let sys_name = self.current_system_label();
-        let tools_label = if self.enable_tools { "ON" } else { "OFF" };
-        let think_label = if self.show_thinking { "ON" } else { "OFF" };
-
-        let pct = (self.used_tokens as f64 / self.num_ctx.max(1) as f64) * 100.0;
-        let ctx_color = if pct >= 90.0 {
-            Color::Red
-        } else if pct >= 75.0 {
-            Color::Yellow
-        } else {
-            Color::Cyan
-        };
+        let toggle = |on| if on { "ON" } else { "OFF" };
+        let (pct, ctx_color) = self.ctx_usage(Color::Cyan);
 
         let settings_text = vec![
             Line::from(vec![
@@ -351,14 +310,17 @@ impl TuiApp {
             Line::from(vec![
                 Span::raw("Context: "),
                 Span::styled(
-                    format!("{}/{} ({:.0}%)", self.used_tokens, self.num_ctx, pct),
+                    format!("{}/{} ({pct:.0}%)", self.used_tokens, self.num_ctx),
                     Style::default().fg(ctx_color),
                 ),
             ]),
-            Line::from(format!("Tools:   {tools_label} (^T)")),
-            Line::from(format!("Think:   {think_label} (^K)")),
-            Line::from(format!("Preset:  {preset_name} (^P)")),
-            Line::from(format!("System:  {sys_name} (^Y)")),
+            Line::from(format!("Tools:   {} (^T)", toggle(self.enable_tools))),
+            Line::from(format!("Think:   {} (^K)", toggle(self.show_thinking))),
+            Line::from(format!(
+                "Preset:  {} (^P)",
+                preset_label(&self.config.presets, self.preset_idx)
+            )),
+            Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(
             Paragraph::new(settings_text).block(titled_block(" Config ")),
@@ -406,7 +368,6 @@ impl TuiApp {
         }
 
         self.wrapped_messages.truncate(self.messages.len());
-
         for m in &self.messages[self.wrapped_messages.len()..] {
             let formatted = format_message_display(m, self.show_thinking);
             self.wrapped_messages.push(wrap_text(&formatted, &options));
@@ -430,8 +391,7 @@ impl TuiApp {
             let img_badge = m
                 .images
                 .as_ref()
-                .map(|v| format!(" [+{} img]", v.len()))
-                .unwrap_or_default();
+                .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
 
             render_message_block(
                 i,
@@ -475,39 +435,33 @@ impl TuiApp {
             );
         }
 
-        self.total_chat_lines = lines.len().min(u16::MAX as usize) as u16;
+        self.total_chat_lines = lines.len();
         let max_scroll = self.max_chat_scroll();
-
-        if self.follow_tail {
-            self.chat_scroll = max_scroll;
+        self.chat_scroll = if self.follow_tail {
+            max_scroll
         } else {
-            self.chat_scroll = self.chat_scroll.min(max_scroll);
-        }
-
-        let pct = (self.used_tokens as f64 / self.num_ctx.max(1) as f64) * 100.0;
-        let ctx_color = if pct >= 90.0 {
-            Color::Red
-        } else if pct >= 75.0 {
-            Color::Yellow
-        } else {
-            Color::DarkGray
+            self.chat_scroll.min(max_scroll)
         };
 
+        let view_height = self.chat_view_height();
+        let visible_end = (self.chat_scroll + view_height).min(lines.len());
+        let visible_lines: Vec<Line<'static>> = if self.chat_scroll < visible_end {
+            lines.drain(self.chat_scroll..visible_end).collect()
+        } else {
+            Vec::new()
+        };
+
+        let (pct, ctx_color) = self.ctx_usage(Color::DarkGray);
         let title_line = Line::from(vec![
             Span::raw(" Conversation "),
             Span::styled(
-                format!(
-                    "[Ctx: {} / {} ({:.0}%)] ",
-                    self.used_tokens, self.num_ctx, pct
-                ),
+                format!("[Ctx: {} / {} ({pct:.0}%)] ", self.used_tokens, self.num_ctx),
                 Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
             ),
         ]);
 
         f.render_widget(
-            Paragraph::new(lines)
-                .scroll((self.chat_scroll, 0))
-                .block(titled_block(title_line)),
+            Paragraph::new(visible_lines).block(titled_block(title_line)),
             chunks[0],
         );
 
@@ -515,7 +469,7 @@ impl TuiApp {
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
         let mut scrollbar_state =
-            ScrollbarState::new(max_scroll as usize).position(self.chat_scroll as usize);
+            ScrollbarState::new(max_scroll).position(self.chat_scroll);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
         f.render_widget(&self.text_area, chunks[1]);

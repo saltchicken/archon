@@ -33,51 +33,48 @@ fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget
 }
 
 fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
-    let mut lines = Vec::new();
     let mut section_color = Color::White;
     let mut in_diff = false;
 
-    for line in preview.lines() {
-        if line.starts_with("--- ") && line.ends_with(" ---") {
-            in_diff = line == "--- UNIFIED DIFF ---";
-            let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
-                section_color = Color::LightRed;
-                Color::Red
-            } else if line.contains("REPLACE") || line.contains("CONTENT") {
-                section_color = Color::Cyan;
-                Color::Green
+    preview
+        .lines()
+        .map(|line| {
+            if line.starts_with("--- ") && line.ends_with(" ---") {
+                in_diff = line == "--- UNIFIED DIFF ---";
+                let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
+                    section_color = Color::LightRed;
+                    Color::Red
+                } else if line.contains("REPLACE") || line.contains("CONTENT") {
+                    section_color = Color::Cyan;
+                    Color::Green
+                } else {
+                    section_color = Color::White;
+                    Color::Cyan
+                };
+                Line::from(Span::styled(
+                    line,
+                    Style::default().fg(header_color).add_modifier(Modifier::BOLD),
+                ))
+            } else if in_diff {
+                let style = if line.starts_with("+++") || line.starts_with("---") {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if line.starts_with("@@") {
+                    Style::default().fg(Color::Cyan)
+                } else if line.starts_with('+') {
+                    Style::default().fg(Color::Green)
+                } else if line.starts_with('-') {
+                    Style::default().fg(Color::LightRed)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                Line::from(Span::styled(line, style))
             } else {
-                section_color = Color::White;
-                Color::Cyan
-            };
-            lines.push(Line::from(Span::styled(
-                line,
-                Style::default().fg(header_color).add_modifier(Modifier::BOLD),
-            )));
-        } else if in_diff {
-            let style = if line.starts_with("+++") || line.starts_with("---") {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else if line.starts_with("@@") {
-                Style::default().fg(Color::Cyan)
-            } else if line.starts_with('+') {
-                Style::default().fg(Color::Green)
-            } else if line.starts_with('-') {
-                Style::default().fg(Color::LightRed)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            lines.push(Line::from(Span::styled(line, style)));
-        } else {
-            lines.push(Line::from(Span::styled(
-                line,
-                Style::default().fg(section_color),
-            )));
-        }
-    }
-
-    lines
+                Line::from(Span::styled(line, Style::default().fg(section_color)))
+            }
+        })
+        .collect()
 }
 
 impl TuiApp {
@@ -104,8 +101,8 @@ impl TuiApp {
             })
             .collect();
 
-        let widget = List::new(items)
-            .block(titled_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
+        let widget =
+            List::new(items).block(titled_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
         render_modal(f, 70, 60, widget);
     }
 
@@ -113,11 +110,9 @@ impl TuiApp {
         let (preview, idx, total) = self
             .pending_tool
             .as_ref()
-            .map(|(p, i, t)| (p.as_str(), *i, *t))
-            .unwrap_or(("", 1, 1));
+            .map_or(("", 1, 1), |(p, i, t)| (p.as_str(), *i, *t));
 
         let mut lines = format_tool_preview_lines(preview);
-
         lines.extend([
             Line::from(""),
             Line::from(Span::styled(

@@ -11,12 +11,9 @@ use std::{
 };
 
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
-    let mut chars = s.chars();
-    let preview: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{preview}...")
-    } else {
-        preview
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => format!("{}...", &s[..idx]),
+        None => s.to_string(),
     }
 }
 
@@ -54,12 +51,9 @@ impl ChatMessage {
     }
 
     pub fn with_ui_image_placeholders(&self) -> Self {
-        let count = self
-            .images
-            .as_ref()
-            .map(Vec::len)
-            .or_else(|| self.image_paths.as_ref().map(Vec::len))
-            .unwrap_or(0);
+        let img_count = self.images.as_ref().map_or(0, Vec::len);
+        let path_count = self.image_paths.as_ref().map_or(0, Vec::len);
+        let count = img_count.max(path_count);
 
         Self {
             images: (count > 0).then(|| vec![String::new(); count]),
@@ -77,8 +71,6 @@ pub struct SessionData {
     pub system_prompt: String,
     pub num_ctx: u32,
     pub messages: Vec<ChatMessage>,
-    #[serde(skip)]
-    pub file_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,23 +83,14 @@ pub struct SessionSummary {
     pub file_path: PathBuf,
 }
 
-fn count_sequence<'de, D>(deserializer: D) -> std::result::Result<usize, D::Error>
-where
-    D: Deserializer<'de>,
-{
+fn count_sequence<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<usize, D::Error> {
     struct CountVisitor;
-
     impl<'de> Visitor<'de> for CountVisitor {
         type Value = usize;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a sequence of messages")
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a sequence of messages")
         }
-
-        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
             let mut count = 0;
             while seq.next_element::<IgnoredAny>()?.is_some() {
                 count += 1;
@@ -115,7 +98,6 @@ where
             Ok(count)
         }
     }
-
     deserializer.deserialize_seq(CountVisitor)
 }
 
@@ -156,8 +138,8 @@ impl SessionManager {
         let title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
-            .map(|m| truncate_str(m.content.lines().next().unwrap_or("Untitled"), 50))
-            .unwrap_or_else(|| "Untitled Session".into());
+            .and_then(|m| m.content.lines().next())
+            .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50));
 
         let path = self.history_dir.join(format!("session_{id}.json"));
         let tmp_path = self.history_dir.join(format!(".session_{id}.json.tmp"));
@@ -170,11 +152,9 @@ impl SessionManager {
             system_prompt: system_prompt.into(),
             num_ctx,
             messages: clean_msgs,
-            file_path: path.clone(),
         };
 
-        let serialized = serde_json::to_string_pretty(&data)?;
-        fs::write(&tmp_path, serialized)?;
+        fs::write(&tmp_path, serde_json::to_string_pretty(&data)?)?;
         fs::rename(&tmp_path, &path)?;
         Ok(())
     }
@@ -189,12 +169,12 @@ impl SessionManager {
                 p.file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| !n.starts_with('.'))
-                    && p.extension().and_then(|s| s.to_str()) == Some("json")
+                    && p.extension().is_some_and(|ext| ext == "json")
             })
             .filter_map(|path| {
                 let file = fs::File::open(&path).ok()?;
-                let reader = std::io::BufReader::new(file);
-                let mut summary: SessionSummary = serde_json::from_reader(reader).ok()?;
+                let mut summary: SessionSummary =
+                    serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
                 summary.file_path = path;
                 Some(summary)
             })
@@ -207,23 +187,22 @@ impl SessionManager {
     pub fn load(&self, path: &Path) -> Result<SessionData> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read session file: {}", path.display()))?;
-        let mut data: SessionData = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse session file: {}", path.display()))?;
-        data.file_path = path.to_path_buf();
-        Ok(data)
+        serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse session file: {}", path.display()))
     }
 
     pub fn delete(&self, path: &Path) -> Result<()> {
-        if path.exists() {
-            if let Some(id) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_prefix("session_"))
-            {
-                let _ = fs::remove_dir_all(self.asset_dir(id));
-            }
-            fs::remove_file(path)?;
+        if !path.exists() {
+            return Ok(());
         }
+        if let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("session_"))
+        {
+            let _ = fs::remove_dir_all(self.asset_dir(id));
+        }
+        fs::remove_file(path)?;
         Ok(())
     }
 }

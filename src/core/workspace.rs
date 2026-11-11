@@ -38,8 +38,9 @@ impl ImageWorkspace {
         let mut paths: Vec<PathBuf> = fs::read_dir(&self.img_dir)
             .into_iter()
             .flatten()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("png"))
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "png"))
             .collect();
 
         paths.sort_by_key(|p| {
@@ -52,104 +53,91 @@ impl ImageWorkspace {
             .into_iter()
             .filter_map(|path| {
                 let dimensions = image::image_dimensions(&path).ok()?;
-                let size_kb = path.metadata().ok()?.len() / 1024;
-                let name = path.file_name()?.to_string_lossy().to_string();
+                let size_kb = (path.metadata().ok()?.len() / 1024).max(1);
+                let name = path.file_name()?.to_string_lossy().into_owned();
                 Some(ImageAttachment {
                     path,
                     name,
                     dimensions,
-                    size_kb: size_kb.max(1),
+                    size_kb,
                 })
             })
             .collect()
     }
 
     pub fn encode_image(path: &Path) -> Result<String> {
-        let bytes = fs::read(path)?;
-        Ok(STANDARD.encode(bytes))
+        Ok(STANDARD.encode(fs::read(path)?))
     }
 
     pub fn paste_clipboard(&self) -> Result<PathBuf> {
         let out_path = self.gen_path("paste");
 
-        // 1. Primary path: Native Wayland protocol (wlr-data-control / ext-data-control)
-        // Ideal for Hyprland / CachyOS without requiring external binaries or XWayland.
-        if let Ok(bytes) = Self::read_wayland_clipboard_image() {
-            let img = image::load_from_memory(&bytes)
-                .context("Failed to decode image from Wayland clipboard")?;
-            img.save_with_format(&out_path, ImageFormat::Png)?;
+        if let Some(bytes) = Self::read_wayland_clipboard_image() {
+            image::load_from_memory(&bytes)
+                .context("Failed to decode image from Wayland clipboard")?
+                .save_with_format(&out_path, ImageFormat::Png)?;
             return Ok(out_path);
         }
 
-        // 2. Fallback path: Arboard for X11 / other desktop environments
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            if let Ok(img_data) = clipboard.get_image() {
-                let width = img_data.width as u32;
-                let height = img_data.height as u32;
-                let raw = img_data.bytes.into_owned();
-
-                if let Some(buffer) = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, raw) {
-                    buffer.save_with_format(&out_path, ImageFormat::Png)?;
-                    return Ok(out_path);
-                }
-            }
+        if let Some(buffer) = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_image().ok())
+            .and_then(|img| {
+                ImageBuffer::<Rgba<u8>, _>::from_raw(
+                    img.width as u32,
+                    img.height as u32,
+                    img.bytes.into_owned(),
+                )
+            })
+        {
+            buffer.save_with_format(&out_path, ImageFormat::Png)?;
+            return Ok(out_path);
         }
 
         bail!("No valid image found in clipboard")
     }
 
-    fn read_wayland_clipboard_image() -> Result<Vec<u8>> {
-        for mime in ["image/png", "image/jpeg", "image/webp", "image/bmp"] {
-            if let Ok((mut pipe, _)) =
-                get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
-            {
+    fn read_wayland_clipboard_image() -> Option<Vec<u8>> {
+        ["image/png", "image/jpeg", "image/webp", "image/bmp"]
+            .into_iter()
+            .find_map(|mime| {
+                let (mut pipe, _) =
+                    get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
+                        .ok()?;
                 let mut buf = Vec::new();
-                if pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                    return Ok(buf);
-                }
-            }
-        }
-        bail!("No supported image MIME type in Wayland clipboard")
+                (pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty()).then_some(buf)
+            })
     }
 
     pub fn import_file(&self, src: impl AsRef<Path>) -> Result<PathBuf> {
         let src = src.as_ref();
-        let img =
-            image::open(src).with_context(|| format!("Cannot open image: {}", src.display()))?;
         let out_path = self.gen_path("file");
-        img.save_with_format(&out_path, ImageFormat::Png)?;
+        image::open(src)
+            .with_context(|| format!("Cannot open image: {}", src.display()))?
+            .save_with_format(&out_path, ImageFormat::Png)?;
         Ok(out_path)
     }
 
-    /// Restores saved session asset images into the active temporary workspace
-    /// and returns their workspace paths so they can be marked as already sent.
     pub fn restore_from_session(&self, asset_paths: &[PathBuf]) -> Vec<PathBuf> {
         self.clear();
-        let mut restored = Vec::new();
-
-        for (idx, src) in asset_paths.iter().enumerate() {
-            if !src.exists() {
-                continue;
-            }
-            let file_name = src
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(String::from)
-                .unwrap_or_else(|| format!("restored_{idx}.png"));
-            let dest = self.img_dir.join(file_name);
-            if fs::copy(src, &dest).is_ok() {
-                restored.push(dest);
-            }
-        }
-
-        restored
+        asset_paths
+            .iter()
+            .enumerate()
+            .filter(|(_, src)| src.exists())
+            .filter_map(|(idx, src)| {
+                let name = src
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map_or_else(|| format!("restored_{idx}.png"), String::from);
+                let dest = self.img_dir.join(name);
+                fs::copy(src, &dest).ok().map(|_| dest)
+            })
+            .collect()
     }
 
     pub fn clear(&self) {
-        if let Ok(entries) = fs::read_dir(&self.img_dir) {
-            for entry in entries.flatten() {
-                let _ = fs::remove_file(entry.path());
-            }
+        for entry in fs::read_dir(&self.img_dir).into_iter().flatten().flatten() {
+            let _ = fs::remove_file(entry.path());
         }
     }
 

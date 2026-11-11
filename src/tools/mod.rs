@@ -69,9 +69,7 @@ pub fn parse_args<T: DeserializeOwned>(json_args: &Value, tool_name: &str) -> Re
 }
 
 pub fn auto_schema<T: JsonSchema>(name: &str, description: &str) -> Value {
-    let schema = schemars::schema_for!(T);
-    let mut parameters = serde_json::to_value(&schema).unwrap();
-
+    let mut parameters = serde_json::to_value(schemars::schema_for!(T)).unwrap();
     if let Some(obj) = parameters.as_object_mut() {
         obj.remove("$schema");
         obj.remove("title");
@@ -99,6 +97,17 @@ pub fn ensure_within_workspace(path: &Path, cwd: &Path, label: &str) -> Result<P
     Ok(canon)
 }
 
+pub fn ensure_path_or_ancestor_within_workspace(
+    target: &Path,
+    cwd: &Path,
+    label: &str,
+) -> Result<()> {
+    if let Some(existing) = target.ancestors().find(|p| p.exists()) {
+        ensure_within_workspace(existing, cwd, label)?;
+    }
+    Ok(())
+}
+
 pub fn validate_relative_path(raw: &str) -> Result<&Path> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -122,7 +131,8 @@ pub fn validate_relative_path(raw: &str) -> Result<&Path> {
 fn resolve_workspace_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     let rel_path = validate_relative_path(raw)?;
     let cwd = workspace_root()?;
-    Ok((cwd.clone(), cwd.join(rel_path)))
+    let target = cwd.join(rel_path);
+    Ok((cwd, target))
 }
 
 pub fn resolve_existing_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
@@ -141,18 +151,13 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     if target.exists() {
         bail!("File already exists: {trimmed}. Use edit_file instead.");
     }
-
-    if let Some(existing_ancestor) = target.ancestors().skip(1).find(|p| p.exists()) {
-        ensure_within_workspace(existing_ancestor, &cwd, trimmed)?;
-    }
-
+    ensure_path_or_ancestor_within_workspace(&target, &cwd, trimmed)?;
     Ok((cwd, target))
 }
 
 async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, cap: u64) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     (&mut reader).take(cap).read_to_end(&mut buf).await?;
-    drop(reader);
     Ok(buf)
 }
 
@@ -178,14 +183,8 @@ where
         .with_context(|| format!("Error executing {program}"))?;
 
     let cap = (max_output_size as u64).saturating_add(1);
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to capture child stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("Failed to capture child stderr")?;
+    let stdout = child.stdout.take().context("Failed to capture child stdout")?;
+    let stderr = child.stderr.take().context("Failed to capture child stderr")?;
 
     let (out_bytes, err_bytes) = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), async {
         let (r1, r2, status) = tokio::join!(

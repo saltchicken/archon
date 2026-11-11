@@ -9,10 +9,10 @@ use std::{
 };
 
 pub fn expand_tilde(path: &str) -> PathBuf {
-    match shellexpand::full(path) {
-        Ok(expanded) => PathBuf::from(expanded.into_owned()),
-        Err(_) => PathBuf::from(shellexpand::tilde(path).into_owned()),
-    }
+    shellexpand::full(path)
+        .unwrap_or_else(|_| shellexpand::tilde(path))
+        .into_owned()
+        .into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +114,6 @@ impl Default for Config {
 impl Config {
     pub fn load(base_path: impl AsRef<Path>, local_path: impl AsRef<Path>) -> Self {
         let base_path = base_path.as_ref();
-
         if !base_path.exists() {
             if let Some(parent) = base_path.parent() {
                 let _ = fs::create_dir_all(parent);

@@ -83,15 +83,15 @@ pub struct TuiApp {
     pub(super) used_tokens: u64,
     pub(super) text_area: TextArea<'static>,
 
-    pub(super) chat_scroll: u16,
+    pub(super) chat_scroll: usize,
     pub(super) follow_tail: bool,
     pub(super) tool_scroll: u16,
-    pub(super) total_chat_lines: u16,
+    pub(super) total_chat_lines: usize,
 
     pub(super) msg_states: Vec<MsgUiState>,
 
     pub(super) chat_area: Rect,
-    pub(super) msg_visual_ranges: Vec<(usize, u16, u16, bool)>,
+    pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) show_help_bar: bool,
@@ -106,9 +106,7 @@ pub struct TuiApp {
 
 pub(super) fn create_text_area() -> TextArea<'static> {
     let mut ta = TextArea::default();
-    ta.set_block(
-        titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
-    );
+    ta.set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
     ta.set_cursor_line_style(Style::default());
     ta
 }
@@ -118,7 +116,7 @@ pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
 }
 
 pub(super) fn preset_label(presets: &[Preset], idx: usize) -> &str {
-    presets.get(idx).map(|p| p.name.as_str()).unwrap_or("None")
+    presets.get(idx).map_or("None", |p| p.name.as_str())
 }
 
 impl TuiApp {
@@ -165,18 +163,30 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn chat_view_height(&self) -> u16 {
-        self.chat_area.height.saturating_sub(2)
+    pub(super) fn chat_view_height(&self) -> usize {
+        usize::from(self.chat_area.height.saturating_sub(2))
     }
 
-    pub(super) fn max_chat_scroll(&self) -> u16 {
+    pub(super) fn max_chat_scroll(&self) -> usize {
         self.total_chat_lines
             .saturating_sub(self.chat_view_height())
     }
 
     pub(super) fn scroll_to_bottom(&mut self) {
         self.follow_tail = true;
-        self.chat_scroll = u16::MAX;
+        self.chat_scroll = usize::MAX;
+    }
+
+    pub(super) fn ctx_usage(&self, default_color: Color) -> (f64, Color) {
+        let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
+        let color = if pct >= 90.0 {
+            Color::Red
+        } else if pct >= 75.0 {
+            Color::Yellow
+        } else {
+            default_color
+        };
+        (pct, color)
     }
 
     pub async fn run(mut self, mut ev_rx: UnboundedReceiver<EngineEvent>) -> Result<()> {
@@ -271,9 +281,7 @@ impl TuiApp {
                 self.is_streaming = false;
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
-            EngineEvent::StreamError(_) => {
-                self.is_streaming = false;
-            }
+            EngineEvent::StreamError(_) => self.is_streaming = false,
             EngineEvent::ToolApprovalRequested {
                 formatted_preview,
                 index,
