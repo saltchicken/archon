@@ -4,6 +4,7 @@ pub mod edit_file;
 pub mod execute_command;
 pub mod read_file;
 
+use crate::core::config::Config;
 use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -45,14 +46,17 @@ where
 pub async fn execute(
     name: &str,
     args: &Value,
-    allowed_commands: &[String],
+    config: &Config,
     max_output_size: usize,
 ) -> Result<String> {
     let cloned = args.clone();
     match name {
-        "context" => context::execute(args, max_output_size).await,
+        "context" => {
+            let ctx_cfg = config.context.clone();
+            spawn_blocking_tool(move || context::execute(&cloned, &ctx_cfg, max_output_size)).await
+        }
         "execute_command" => {
-            execute_command::execute(args, allowed_commands, max_output_size).await
+            execute_command::execute(args, &config.app.allowed_commands, max_output_size).await
         }
         "create_file" => spawn_blocking_tool(move || create_file::execute(&cloned)).await,
         "edit_file" => spawn_blocking_tool(move || edit_file::execute(&cloned)).await,

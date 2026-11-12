@@ -1,0 +1,8 @@
+[context]
+git_root = true
+include = ["**/*"]
+exclude = ["target/**", "Cargo.lock"]
+include_in_tree = ["Cargo.lock"]
+file = ["~/.config/archon/config.toml"]
+max_size = 1048576
+max_files = 10000

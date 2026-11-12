@@ -390,12 +390,7 @@ impl CoreEngine {
                 );
 
                 let (mut internal_out, truncated) = if approved {
-                    tools::execute(
-                        &call,
-                        &self.config.app.allowed_commands,
-                        self.active_max_tool_output_size,
-                    )
-                    .await
+                    tools::execute(&call, &self.config, self.active_max_tool_output_size).await
                 } else {
                     ("The user declined to run this command.".into(), false)
                 };
@@ -453,7 +448,10 @@ impl CoreEngine {
                         let ws = Arc::clone(&self.workspace);
                         let (restored_ws_paths, attachments) =
                             tokio::task::spawn_blocking(move || {
-                                (ws.restore_from_session(&session_img_paths), ws.list_attachments())
+                                (
+                                    ws.restore_from_session(&session_img_paths),
+                                    ws.list_attachments(),
+                                )
                             })
                             .await
                             .unwrap_or_default();

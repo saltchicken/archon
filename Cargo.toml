@@ -13,7 +13,10 @@ dirs = "7.0.0"
 dunce = "1.0"
 figment = { version = "0.10", features = ["toml", "env"] }
 futures-util = "0.3"
+globset = "0.4"
+ignore = "0.4"
 image = "0.25"
+pathdiff = "0.2"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.4"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }

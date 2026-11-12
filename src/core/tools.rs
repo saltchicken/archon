@@ -1,4 +1,4 @@
-use crate::tools;
+use crate::{core::config::Config, tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use similar::TextDiff;
@@ -100,18 +100,14 @@ pub fn format_approval(call: &ToolCall) -> String {
     out.trim_end().to_string()
 }
 
-pub async fn execute(
-    call: &ToolCall,
-    allowed_commands: &[String],
-    max_size: usize,
-) -> (String, bool) {
+pub async fn execute(call: &ToolCall, config: &Config, max_size: usize) -> (String, bool) {
     let name = &call.function.name;
     let args = &call.function.arguments;
 
     info!("Executing tool: {}", name);
     debug!("Tool arguments: {}", args);
 
-    match tools::execute(name, args, allowed_commands, max_size).await {
+    match tools::execute(name, args, config, max_size).await {
         Ok(mut out) => {
             let truncated = out.len() > max_size;
             if truncated {

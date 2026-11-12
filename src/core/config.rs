@@ -53,6 +53,7 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
+    pub context: ContextSettings,
     pub ollama: OllamaSettings,
     pub gemini: GeminiSettings,
     pub models: Vec<ModelPreset>,
@@ -68,6 +69,18 @@ pub struct AppSettings {
     pub history_dir: String,
     pub allowed_commands: Vec<String>,
     pub show_thinking: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextSettings {
+    pub git_root: bool,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub include_in_tree: Vec<String>,
+    pub file: Vec<String>,
+    pub max_size: u64,
+    pub max_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +160,24 @@ impl Default for AppSettings {
     }
 }
 
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            git_root: true,
+            include: vec!["**/*".into()],
+            exclude: vec![
+                "target/**".into(),
+                "node_modules/**".into(),
+                "Cargo.lock".into(),
+            ],
+            include_in_tree: vec!["Cargo.lock".into()],
+            file: Vec::new(),
+            max_size: 1_048_576,
+            max_files: 10_000,
+        }
+    }
+}
+
 impl Default for OllamaSettings {
     fn default() -> Self {
         Self {
@@ -172,6 +203,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             app: AppSettings::default(),
+            context: ContextSettings::default(),
             ollama: OllamaSettings::default(),
             gemini: GeminiSettings::default(),
             models: vec![
