@@ -68,6 +68,7 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub allowed_commands: Vec<String>,
+    pub auto_approve: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +155,18 @@ impl Default for AppSettings {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            auto_approve: [
+                "read_file",
+                "context",
+                "git:status",
+                "git:diff",
+                "git:log",
+                "git:show",
+                "git:blame",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         }
     }
 }

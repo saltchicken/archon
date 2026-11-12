@@ -92,7 +92,7 @@ impl TuiApp {
         match self.modal {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
-            ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code),
+            ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
             ActiveModal::None => self.handle_main_key(key, ctrl),
@@ -146,10 +146,11 @@ impl TuiApp {
         }
     }
 
-    fn handle_tool_approval_key(&mut self, code: KeyCode) {
+    fn handle_tool_approval_key(&mut self, code: KeyCode, ctrl: bool) {
         match code {
-            KeyCode::Enter => self.resolve_modal_tool(true),
-            KeyCode::Esc => self.resolve_modal_tool(false),
+            KeyCode::Enter => self.resolve_modal_tool(true, false),
+            KeyCode::Char('a') if ctrl => self.resolve_modal_tool(true, true),
+            KeyCode::Esc => self.resolve_modal_tool(false, false),
             KeyCode::Up => self.tool_scroll = self.tool_scroll.saturating_sub(1),
             KeyCode::Down => self.tool_scroll = self.tool_scroll.saturating_add(1),
             KeyCode::PageUp => self.tool_scroll = self.tool_scroll.saturating_sub(10),
@@ -157,7 +158,7 @@ impl TuiApp {
             KeyCode::Backspace => {
                 self.tool_feedback.pop();
             }
-            KeyCode::Char(c) => self.tool_feedback.push(c),
+            KeyCode::Char(c) if !ctrl => self.tool_feedback.push(c),
             _ => {}
         }
     }

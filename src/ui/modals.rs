@@ -82,8 +82,7 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
                     Style::default().fg(Color::LightRed)
                 } else {
                     Style::default().fg(Color::Gray)
-                }
-                ;
+                };
                 Line::from(Span::styled(line, style))
             } else {
                 Line::from(Span::styled(line, Style::default().fg(section_color)))
@@ -232,7 +231,7 @@ impl TuiApp {
             Line::from(format!("> {}", self.tool_feedback)),
             Line::from(""),
             Line::from(Span::styled(
-                "[⏎] Approve & Run      [Esc] Decline      [↑/↓/PgUp/PgDn] Scroll",
+                "[⏎] Approve Once   [^A] Always (Session)   [Esc] Decline   [↑/↓/PgUp/PgDn] Scroll",
                 Style::default().fg(Color::Yellow),
             )),
         ]);

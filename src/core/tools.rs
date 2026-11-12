@@ -17,6 +17,69 @@ pub struct ToolFunction {
     pub arguments: Value,
 }
 
+/// Computes a canonical signature for a tool call, such as:
+/// - `"read_file"`
+/// - `"git:status"`
+/// - `"execute_command:ls"`
+pub fn call_signature(call: &ToolCall) -> String {
+    let name = call.function.name.as_str();
+    let args = &call.function.arguments;
+
+    match name {
+        "git" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if action.is_empty() {
+                "git".to_string()
+            } else {
+                format!("git:{action}")
+            }
+        }
+        "execute_command" => {
+            let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+            let base = shlex::split(cmd)
+                .and_then(|parts| parts.into_iter().next())
+                .unwrap_or_default();
+            if base.is_empty() {
+                "execute_command".to_string()
+            } else {
+                format!("execute_command:{base}")
+            }
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// Checks whether a tool call matches any rule in `rules`.
+/// Supported patterns:
+/// - `"*"` (matches all tools)
+/// - `"<tool_name>"` or `"<tool_name>:*"` (matches any invocation of `<tool_name>`)
+/// - `"<tool_name>:<sub_action>"` (e.g. `"git:status"`, `"execute_command:ls"`)
+pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let name = call.function.name.as_str();
+    let sig = call_signature(call);
+
+    rules.into_iter().any(|rule| {
+        let r = rule.trim();
+        if r.is_empty() {
+            return false;
+        }
+        if r == "*" || r == name || r == sig {
+            return true;
+        }
+        if let Some(prefix) = r.strip_suffix(":*") {
+            return name == prefix || sig.starts_with(&format!("{prefix}:"));
+        }
+        false
+    })
+}
+
 fn format_kv(k: &str, v: &Value) -> String {
     match v.as_str() {
         Some(s) => format!("  {k}: {s}\n"),
@@ -66,15 +129,16 @@ fn format_edit_approval(mut out: String, obj: &Map<String, Value>) -> String {
 pub fn format_approval(call: &ToolCall) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
+    let sig = call_signature(call);
 
     let Some(obj) = args.as_object() else {
         return format!(
-            "Tool: {name}\n{}",
+            "Tool: {name} [{sig}]\n{}",
             serde_json::to_string_pretty(args).unwrap_or_default()
         );
     };
 
-    let mut out = format!("Tool: {name}\n");
+    let mut out = format!("Tool: {name} (Rule: {sig})\n");
     if name == "edit_file" {
         return format_edit_approval(out, obj);
     }

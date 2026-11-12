@@ -393,12 +393,13 @@ impl TuiApp {
         });
     }
 
-    pub(super) fn resolve_modal_tool(&mut self, approved: bool) {
+    pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {
         if self.pending_tool.take().is_some() {
             self.modal = ActiveModal::None;
             self.follow_tail = true;
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
                 approved,
+                always_approve,
                 feedback: std::mem::take(&mut self.tool_feedback),
                 turn: self.current_turn_config(),
             });

@@ -43,6 +43,7 @@ pub enum EngineCommand {
     CancelStream,
     ResolveTool {
         approved: bool,
+        always_approve: bool,
         feedback: String,
         turn: TurnConfig,
     },
@@ -103,6 +104,8 @@ pub struct CoreEngine {
     active_system_prompt: String,
     active_num_ctx: u32,
     active_max_tool_output_size: usize,
+    active_enable_tools: bool,
+    session_auto_approve: HashSet<String>,
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
@@ -149,6 +152,8 @@ impl CoreEngine {
             active_system_prompt: String::new(),
             active_num_ctx,
             active_max_tool_output_size,
+            active_enable_tools: true,
+            session_auto_approve: HashSet::new(),
             messages: Vec::new(),
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
@@ -183,6 +188,15 @@ impl CoreEngine {
     fn apply_turn_config(&mut self, turn: &TurnConfig) {
         self.active_system_prompt = turn.system_prompt.clone();
         self.active_num_ctx = turn.num_ctx;
+        self.active_enable_tools = turn.enable_tools;
+    }
+
+    fn active_turn_config(&self) -> TurnConfig {
+        TurnConfig {
+            system_prompt: self.active_system_prompt.clone(),
+            num_ctx: self.active_num_ctx,
+            enable_tools: self.active_enable_tools,
+        }
     }
 
     fn emit_model_config(&self) {
@@ -191,6 +205,17 @@ impl CoreEngine {
             num_ctx: self.active_num_ctx,
             max_tool_output_size: self.active_max_tool_output_size,
         });
+    }
+
+    fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
+        let all_rules = self
+            .config
+            .app
+            .auto_approve
+            .iter()
+            .chain(self.session_auto_approve.iter())
+            .map(String::as_str);
+        tools::is_auto_approved(call, all_rules)
     }
 
     fn prompt_next_tool(&mut self) {
@@ -212,9 +237,41 @@ impl CoreEngine {
         });
     }
 
-    fn enqueue_tool_calls(&mut self, calls: Vec<ToolCall>) {
-        self.pending_tools = VecDeque::from(calls);
-        self.prompt_next_tool();
+    async fn process_pending_tools(&mut self, internal_tx: &UnboundedSender<EngineEvent>) {
+        let mut auto_executed = false;
+
+        while let Some(call) = self.pending_tools.front() {
+            if !self.is_call_auto_approved(call) {
+                if auto_executed {
+                    self.save_and_emit_chat().await;
+                }
+                self.prompt_next_tool();
+                return;
+            }
+
+            let call = self.pending_tools.pop_front().unwrap();
+            let sig = tools::call_signature(&call);
+            info!(
+                "Auto-approving tool call '{}' (max_tool_output_size: {})",
+                sig, self.active_max_tool_output_size
+            );
+
+            let (internal_out, truncated) =
+                tools::execute(&call, &self.config, self.active_max_tool_output_size).await;
+
+            self.messages.push(ChatMessage {
+                truncated,
+                ..ChatMessage::new("tool", internal_out)
+            });
+            auto_executed = true;
+        }
+
+        if auto_executed {
+            self.save_and_emit_chat().await;
+        }
+
+        let turn = self.active_turn_config();
+        self.spawn_model_turn(&turn, internal_tx.clone()).await;
     }
 
     async fn update_workspace<F>(&self, op: F, success_msg: impl Into<String>)
@@ -291,7 +348,7 @@ impl CoreEngine {
                     Some(cmd) => self.handle_command(cmd, &internal_tx).await,
                     None => break,
                 },
-                Some(ev) = internal_rx.recv() => self.handle_internal_event(ev).await,
+                Some(ev) = internal_rx.recv() => self.handle_internal_event(ev, &internal_tx).await,
             }
         }
 
@@ -376,6 +433,7 @@ impl CoreEngine {
             }
             EngineCommand::ResolveTool {
                 approved,
+                always_approve,
                 feedback,
                 turn,
             } => {
@@ -384,9 +442,19 @@ impl CoreEngine {
                     return;
                 };
 
+                let sig = tools::call_signature(&call);
+                if approved && always_approve {
+                    info!("Adding '{}' to session auto-approve rules", sig);
+                    self.session_auto_approve.insert(sig.clone());
+                    self.notify(
+                        format!("Auto-approving '{sig}' for the rest of this session."),
+                        false,
+                    );
+                }
+
                 info!(
-                    "Resolving tool call: {}. Approved: {} (max_tool_output_size: {})",
-                    call.function.name, approved, self.active_max_tool_output_size
+                    "Resolving tool call: {}. Approved: {}, Always: {} (max_tool_output_size: {})",
+                    sig, approved, always_approve, self.active_max_tool_output_size
                 );
 
                 let (mut internal_out, truncated) = if approved {
@@ -412,11 +480,7 @@ impl CoreEngine {
                 self.save_and_emit_chat().await;
                 info!("Tool execution resolved and recorded to chat history.");
 
-                if self.pending_tools.is_empty() {
-                    self.spawn_model_turn(&turn, internal_tx.clone()).await;
-                } else {
-                    self.prompt_next_tool();
-                }
+                self.process_pending_tools(internal_tx).await;
             }
             EngineCommand::RefreshSessions => {
                 info!("Refreshing sessions list");
@@ -490,7 +554,8 @@ impl CoreEngine {
                             .and_then(|m| m.tool_calls.clone())
                             .filter(|c| !c.is_empty())
                         {
-                            self.enqueue_tool_calls(calls);
+                            self.pending_tools = VecDeque::from(calls);
+                            self.process_pending_tools(internal_tx).await;
                         }
                     }
                     Ok(Err(e)) => {
@@ -514,6 +579,7 @@ impl CoreEngine {
                 self.clear_workspace().await;
 
                 self.session_id = SessionManager::new_id();
+                self.session_auto_approve.clear();
                 self.active_num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
@@ -581,7 +647,11 @@ impl CoreEngine {
         }
     }
 
-    async fn handle_internal_event(&mut self, ev: EngineEvent) {
+    async fn handle_internal_event(
+        &mut self,
+        ev: EngineEvent,
+        internal_tx: &UnboundedSender<EngineEvent>,
+    ) {
         match ev {
             EngineEvent::StreamChunk(ref chunk) => {
                 self.stream_buffer.push_str(chunk);
@@ -637,7 +707,8 @@ impl CoreEngine {
 
                 let _ = self.tx.send(ev.clone());
                 if !tool_calls.is_empty() {
-                    self.enqueue_tool_calls(tool_calls.clone());
+                    self.pending_tools = VecDeque::from(tool_calls.clone());
+                    self.process_pending_tools(internal_tx).await;
                 }
             }
             EngineEvent::StreamError(ref err) => {
