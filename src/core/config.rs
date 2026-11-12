@@ -160,7 +160,9 @@ impl Default for AppSettings {
             auto_approve: [
                 "read_file",
                 "search",
+                "repo_map",
                 "workspace_snapshot",
+                "fs:list",
                 "git:status",
                 "git:diff",
                 "git:log",
@@ -243,6 +245,10 @@ impl Default for Config {
                 Preset::new(
                     "Helpful Assistant",
                     "You are a highly capable and helpful AI visual assistant. Provide concise and accurate answers.",
+                ),
+                Preset::new(
+                    "Codebase Architect",
+                    "You are an expert software architect working inside Archon. For medium or large codebases, call `repo_map` first to inspect the PageRank-ranked AST symbol graph and signatures with line ranges, then use `search` and `read_file` with `start_line`/`end_line` to inspect specific implementations.",
                 ),
                 Preset::new(
                     "JSON Only",

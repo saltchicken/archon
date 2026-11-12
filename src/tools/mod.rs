@@ -6,6 +6,7 @@ pub mod fetch_url;
 pub mod fs;
 pub mod git;
 pub mod read_file;
+pub mod repo_map;
 pub mod search;
 pub mod workspace_snapshot;
 
@@ -39,6 +40,7 @@ pub fn schemas() -> Vec<Value> {
         fs::schema(),
         git::schema(),
         read_file::schema(),
+        repo_map::schema(),
         search::schema(),
         workspace_snapshot::schema(),
     ]
@@ -62,6 +64,10 @@ pub async fn execute(
     let cloned = args.clone();
     match name {
         "cargo" => cargo::execute(args, max_output_size).await,
+        "repo_map" => {
+            let ws_cfg = config.workspace_snapshot.clone();
+            spawn_blocking_tool(move || repo_map::execute(&cloned, &ws_cfg, max_output_size)).await
+        }
         "workspace_snapshot" => {
             let ws_cfg = config.workspace_snapshot.clone();
             spawn_blocking_tool(move || {
