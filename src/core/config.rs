@@ -79,6 +79,8 @@ pub struct ContextSettings {
     pub exclude: Vec<String>,
     pub include_in_tree: Vec<String>,
     pub file: Vec<String>,
+    #[serde(skip)]
+    pub global_files: Vec<String>,
     pub max_size: u64,
     pub max_files: usize,
 }
@@ -183,6 +185,7 @@ impl Default for ContextSettings {
             ],
             include_in_tree: vec!["Cargo.lock".into()],
             file: Vec::new(),
+            global_files: Vec::new(),
             max_size: 1_048_576,
             max_files: 10_000,
         }
@@ -289,13 +292,23 @@ impl Config {
             }
         }
 
+        // Extract `context.file` entries defined in the trusted global config file
+        let global_files: Vec<String> = Figment::from(Serialized::defaults(Self::default()))
+            .merge(Toml::file(base_path))
+            .extract::<Self>()
+            .map(|c| c.context.file)
+            .unwrap_or_default();
+
         match Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file(base_path))
             .merge(Toml::file(local_path.as_ref()))
             .merge(Env::prefixed("ARCHON_"))
-            .extract()
+            .extract::<Self>()
         {
-            Ok(cfg) => (cfg, None),
+            Ok(mut cfg) => {
+                cfg.context.global_files = global_files;
+                (cfg, None)
+            }
             Err(e) => (
                 Self::default(),
                 Some(format!("Config error (using defaults): {e}")),

@@ -130,14 +130,33 @@ fn read_text_file(path: &Path) -> std::io::Result<FileReadResult> {
     }
 }
 
-fn read_to_file_data(path: &Path, display_path: String) -> FileData {
-    match read_text_file(path) {
-        Ok(FileReadResult::Text(content)) => FileData {
+fn read_to_file_data(
+    path: &Path,
+    display_path: String,
+    used_bytes: &mut usize,
+    max_output_size: usize,
+) -> FileData {
+    if *used_bytes > max_output_size {
+        return FileData {
             path: display_path,
-            content: Some(content),
+            content: None,
             error: None,
-            skipped: None,
-        },
+            skipped: Some("Context output size limit reached.".into()),
+        };
+    }
+
+    match read_text_file(path) {
+        Ok(FileReadResult::Text(content)) => {
+            *used_bytes = used_bytes
+                .saturating_add(content.len())
+                .saturating_add(display_path.len() + 32);
+            FileData {
+                path: display_path,
+                content: Some(content),
+                error: None,
+                skipped: None,
+            }
+        }
         Ok(FileReadResult::Binary) => FileData {
             path: display_path,
             content: None,
@@ -210,10 +229,63 @@ fn run_git_diff(git_root: &Path, target: &str) -> Result<Option<(String, String)
     }
 }
 
+fn archon_config_dir() -> Option<PathBuf> {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("archon");
+    dunce::canonicalize(&dir).ok().or(Some(dir))
+}
+
+/// Validates whether an extra `context.file` entry is safe to read:
+/// 1. Allowed if explicitly configured in the user's global `~/.config/archon/config.toml`.
+/// 2. Allowed if it resides inside `~/.config/archon/` (e.g. `file = ["~/.config/archon/config.toml"]`).
+/// 3. Allowed if it resolves inside `base_root` and does not match any secret/exclude pattern.
+fn validate_extra_file(
+    raw_file: &str,
+    expanded: &Path,
+    base_root: &Path,
+    exclude_set: &GlobSet,
+    trusted_global_files: &HashSet<PathBuf>,
+    config_dir: Option<&Path>,
+) -> std::result::Result<PathBuf, String> {
+    let candidate = if expanded.is_relative() {
+        base_root.join(expanded)
+    } else {
+        expanded.to_path_buf()
+    };
+
+    let canon = dunce::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+
+    if trusted_global_files.contains(&canon) || trusted_global_files.contains(expanded) {
+        return Ok(canon);
+    }
+
+    if let Some(cfg_dir) = config_dir
+        && canon.starts_with(cfg_dir)
+    {
+        return Ok(canon);
+    }
+
+    if canon.starts_with(base_root) {
+        if let Some(rel) = diff_paths(&canon, base_root)
+            && exclude_set.is_match(&rel)
+        {
+            return Err(format!(
+                "Security violation: '{raw_file}' matches an excluded pattern."
+            ));
+        }
+        return Ok(canon);
+    }
+
+    Err(format!(
+        "Security violation: local .archon.toml cannot read external file '{raw_file}' outside the workspace."
+    ))
+}
+
 pub fn execute(
     json_args: &Value,
     settings: &ContextSettings,
-    _max_output_size: usize,
+    max_output_size: usize,
 ) -> Result<String> {
     let args: ContextArgs = parse_args(json_args, "context")?;
     let cwd = workspace_root()?;
@@ -223,6 +295,7 @@ pub fn execute(
     } else {
         cwd.clone()
     };
+    let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
 
     let scan_root = if args.target_path.trim().is_empty() || args.target_path.trim() == "." {
         base_root.clone()
@@ -344,8 +417,15 @@ pub fn execute(
         };
 
         let _ = writeln!(tree_out, "{indent}{name}{marker}");
+    }
 
-        if !args.tree_only && entry.include_content {
+    let mut used_bytes = tree_out.len() + 128;
+
+    if !args.tree_only {
+        for entry in &entries {
+            if !entry.include_content {
+                continue;
+            }
             if entry.exceeds_size {
                 files.push(FileData {
                     path: entry.display_path.clone(),
@@ -354,41 +434,103 @@ pub fn execute(
                     skipped: None,
                 });
             } else {
-                files.push(read_to_file_data(&entry.path, entry.display_path.clone()));
+                files.push(read_to_file_data(
+                    &entry.path,
+                    entry.display_path.clone(),
+                    &mut used_bytes,
+                    max_output_size,
+                ));
             }
         }
     }
 
     if args.target_path.trim().is_empty() {
+        let trusted_global_files: HashSet<PathBuf> = settings
+            .global_files
+            .iter()
+            .flat_map(|f| {
+                let exp = expand_tilde(f);
+                let canon = dunce::canonicalize(&exp).unwrap_or_else(|_| exp.clone());
+                [exp, canon]
+            })
+            .collect();
+        let cfg_dir = archon_config_dir();
+
         let mut seen = HashSet::new();
         for raw_file in &settings.file {
             let expanded = expand_tilde(raw_file);
             if !seen.insert(expanded.clone()) {
                 continue;
             }
-            let display_path = shrink_tilde(&expanded);
-            if !expanded.exists() {
-                let _ = writeln!(tree_out, "{display_path} (not found)");
-                if !args.tree_only {
-                    files.push(FileData {
-                        path: display_path,
-                        content: None,
-                        error: Some("File does not exist.".into()),
-                        skipped: None,
-                    });
+
+            match validate_extra_file(
+                raw_file,
+                &expanded,
+                &base_root,
+                &exclude_set,
+                &trusted_global_files,
+                cfg_dir.as_deref(),
+            ) {
+                Ok(valid_path) => {
+                    let display_path = shrink_tilde(&valid_path);
+                    if !valid_path.exists() {
+                        let _ = writeln!(tree_out, "{display_path} (not found)");
+                        if !args.tree_only {
+                            files.push(FileData {
+                                path: display_path,
+                                content: None,
+                                error: Some("File does not exist.".into()),
+                                skipped: None,
+                            });
+                        }
+                    } else if valid_path.is_dir() {
+                        let _ = writeln!(tree_out, "{display_path}/");
+                    } else {
+                        let _ = writeln!(tree_out, "{display_path}");
+                        if !args.tree_only {
+                            let exceeds = valid_path
+                                .metadata()
+                                .map(|m| m.len() > settings.max_size)
+                                .unwrap_or(false);
+                            if exceeds {
+                                files.push(FileData {
+                                    path: display_path,
+                                    content: None,
+                                    error: Some("File exceeds maximum size limit.".into()),
+                                    skipped: None,
+                                });
+                            } else {
+                                files.push(read_to_file_data(
+                                    &valid_path,
+                                    display_path,
+                                    &mut used_bytes,
+                                    max_output_size,
+                                ));
+                            }
+                        }
+                    }
                 }
-            } else if expanded.is_dir() {
-                let _ = writeln!(tree_out, "{display_path}/");
-            } else {
-                let _ = writeln!(tree_out, "{display_path}");
-                if !args.tree_only {
-                    files.push(read_to_file_data(&expanded, display_path));
+                Err(sec_err) => {
+                    let display_path = shrink_tilde(&expanded);
+                    let _ = writeln!(tree_out, "{display_path} (blocked)");
+                    if !args.tree_only {
+                        files.push(FileData {
+                            path: display_path,
+                            content: None,
+                            error: Some(sec_err),
+                            skipped: None,
+                        });
+                    }
                 }
             }
         }
     }
 
-    let git_diff = run_git_diff(&base_root, &args.diff)?;
+    let git_diff = if used_bytes <= max_output_size {
+        run_git_diff(&base_root, &args.diff)?
+    } else {
+        None
+    };
 
     let mut out = String::new();
     let _ = writeln!(out, "# Project: {project_name}\n");
