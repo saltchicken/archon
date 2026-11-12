@@ -55,7 +55,10 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
                 let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
                     section_color = Color::LightRed;
                     Color::Red
-                } else if line.contains("REPLACE") || line.contains("CONTENT") {
+                } else if line.contains("REPLACE")
+                    || line.contains("CONTENT")
+                    || line.contains("MESSAGE")
+                {
                     section_color = Color::Cyan;
                     Color::Green
                 } else {
@@ -79,7 +82,8 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
                     Style::default().fg(Color::LightRed)
                 } else {
                     Style::default().fg(Color::Gray)
-                };
+                }
+                ;
                 Line::from(Span::styled(line, style))
             } else {
                 Line::from(Span::styled(line, Style::default().fg(section_color)))

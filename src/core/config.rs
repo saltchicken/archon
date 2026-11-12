@@ -211,6 +211,10 @@ impl Default for Config {
             ],
             presets: vec![
                 Preset::new("Custom", ""),
+                Preset::new(
+                    "Git Commit",
+                    "Inspect the repository using the `git` tool (`status`, `diff` with `target: \"--staged\"`, and `log` with `limit: 5`). If no changes are staged, inspect the unstaged `diff` and stage the relevant files using `git` (`action: \"add\"`). Then commit the staged changes using `git` (`action: \"commit\"`) with a clear, conventional commit message (concise summary line followed by bullet points explaining key changes).",
+                ),
                 Preset::new("Describe in detail", "Describe this image in detail."),
                 Preset::new("Extract text", "Extract all the text from this image."),
             ],

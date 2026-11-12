@@ -84,7 +84,10 @@ pub fn format_approval(call: &ToolCall) -> String {
         match v.as_str() {
             Some(s)
                 if s.contains('\n')
-                    || matches!(k.as_str(), "search_string" | "replace_string" | "content") =>
+                    || matches!(
+                        k.as_str(),
+                        "search_string" | "replace_string" | "content" | "message"
+                    ) =>
             {
                 multiline_blocks.push((k, s));
             }

@@ -20,27 +20,34 @@ enum GitAction {
     Show,
     /// Show what revision and author last modified each line of a file (`git blame <path>`)
     Blame,
+    /// Stage files (`git add -- <path>`). Pass "." in `path` to stage all changes.
+    Add,
+    /// Commit staged changes (`git commit -m <message>`)
+    Commit,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct GitArgs {
-    /// The read-only git operation to perform.
+    /// The git operation to perform.
     action: GitAction,
     /// Optional git ref, commit SHA, branch, range (e.g. "HEAD~2..HEAD", "main"), or "--staged" (for diff).
     #[serde(default)]
     target: String,
-    /// Optional relative file or directory path within the workspace to scope the operation. Required for `blame`.
+    /// Optional relative file or directory path within the workspace to scope the operation. Required for `blame` and `add` (use "." to stage all).
     #[serde(default)]
     path: String,
     /// Maximum number of log entries to return for `log` (default: 15, max: 100).
     #[serde(default)]
     limit: Option<usize>,
+    /// Commit message required when `action` is `commit`.
+    #[serde(default)]
+    message: String,
 }
 
 pub fn schema() -> Value {
     auto_schema::<GitArgs>(
         "git",
-        "Executes read-only git operations (status, diff, log, show, blame) within the workspace.",
+        "Executes git operations (status, diff, log, show, blame, add, commit) within the workspace.",
     )
 }
 
@@ -143,6 +150,20 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             cmd_args.push("--".into());
             cmd_args.push(path);
             "No blame output."
+        }
+        GitAction::Add => {
+            let path = validate_scoped_path(&args.path, false)?
+                .ok_or_else(|| anyhow::anyhow!("'path' is required for git add (use '.' for all)"))?;
+            cmd_args.extend(["add".into(), "--".into(), path]);
+            "Files staged successfully."
+        }
+        GitAction::Commit => {
+            let msg = args.message.trim();
+            if msg.is_empty() {
+                bail!("'message' cannot be empty for git commit");
+            }
+            cmd_args.extend(["commit".into(), "-m".into(), msg.to_string()]);
+            "Commit created."
         }
     };
 
