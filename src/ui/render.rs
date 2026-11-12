@@ -693,14 +693,14 @@ impl TuiApp {
 
             let sanitized_stream = sanitize_line(&self.streaming_text);
             let stream_lines = if sanitized_stream.trim().is_empty() {
-                vec!["...".to_string()]
+                Vec::new()
             } else {
                 wrap_text(&sanitized_stream, &options)
             };
 
             render_message_block(
                 i,
-                "ARCHON (streaming...)",
+                "ARCHON (...)",
                 Color::Yellow,
                 false,
                 &stream_lines,
