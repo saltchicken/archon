@@ -53,7 +53,7 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
-    pub context: ContextSettings,
+    pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: OllamaSettings,
     pub gemini: GeminiSettings,
     pub models: Vec<ModelPreset>,
@@ -73,7 +73,7 @@ pub struct AppSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ContextSettings {
+pub struct WorkspaceSnapshotSettings {
     pub git_root: bool,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -159,7 +159,7 @@ impl Default for AppSettings {
                 .collect(),
             auto_approve: [
                 "read_file",
-                "context",
+                "workspace_snapshot",
                 "git:status",
                 "git:diff",
                 "git:log",
@@ -177,7 +177,7 @@ impl Default for AppSettings {
     }
 }
 
-impl Default for ContextSettings {
+impl Default for WorkspaceSnapshotSettings {
     fn default() -> Self {
         Self {
             git_root: true,
@@ -221,7 +221,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             app: AppSettings::default(),
-            context: ContextSettings::default(),
+            workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: OllamaSettings::default(),
             gemini: GeminiSettings::default(),
             models: vec![
@@ -295,11 +295,11 @@ impl Config {
             }
         }
 
-        // Extract `context.file` entries defined in the trusted global config file
+        // Extract `workspace_snapshot.file` entries defined in the trusted global config file
         let global_files: Vec<String> = Figment::from(Serialized::defaults(Self::default()))
             .merge(Toml::file(base_path))
             .extract::<Self>()
-            .map(|c| c.context.file)
+            .map(|c| c.workspace_snapshot.file)
             .unwrap_or_default();
 
         match Figment::from(Serialized::defaults(Self::default()))
@@ -309,7 +309,7 @@ impl Config {
             .extract::<Self>()
         {
             Ok(mut cfg) => {
-                cfg.context.global_files = global_files;
+                cfg.workspace_snapshot.global_files = global_files;
                 (cfg, None)
             }
             Err(e) => (

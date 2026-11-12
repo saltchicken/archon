@@ -1,10 +1,10 @@
 pub mod cargo;
-pub mod context;
 pub mod create_file;
 pub mod edit_file;
 pub mod execute_command;
 pub mod git;
 pub mod read_file;
+pub mod workspace_snapshot;
 
 use crate::core::config::Config;
 use anyhow::{bail, Context, Result};
@@ -29,12 +29,12 @@ const COMMAND_TIMEOUT_SECS: u64 = 30;
 pub fn schemas() -> Vec<Value> {
     vec![
         cargo::schema(),
-        context::schema(),
         create_file::schema(),
         edit_file::schema(),
         execute_command::schema(),
         git::schema(),
         read_file::schema(),
+        workspace_snapshot::schema(),
     ]
 }
 
@@ -56,9 +56,9 @@ pub async fn execute(
     let cloned = args.clone();
     match name {
         "cargo" => cargo::execute(args, max_output_size).await,
-        "context" => {
-            let ctx_cfg = config.context.clone();
-            spawn_blocking_tool(move || context::execute(&cloned, &ctx_cfg, max_output_size)).await
+        "workspace_snapshot" => {
+            let ws_cfg = config.workspace_snapshot.clone();
+            spawn_blocking_tool(move || workspace_snapshot::execute(&cloned, &ws_cfg, max_output_size)).await
         }
         "execute_command" => {
             execute_command::execute(args, &config.app.allowed_commands, max_output_size).await

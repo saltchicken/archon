@@ -1,5 +1,5 @@
 use crate::{
-    core::config::{expand_tilde, ContextSettings},
+    core::config::{expand_tilde, WorkspaceSnapshotSettings},
     tools::{auto_schema, parse_args, validate_relative_path, workspace_root},
 };
 use anyhow::{bail, Context, Result};
@@ -18,7 +18,7 @@ use std::{
 };
 
 #[derive(Deserialize, JsonSchema)]
-struct ContextArgs {
+struct WorkspaceSnapshotArgs {
     /// Optional relative subdirectory or file path within the workspace (defaults to project root).
     #[serde(default)]
     target_path: String,
@@ -34,9 +34,9 @@ struct ContextArgs {
 }
 
 pub fn schema() -> Value {
-    auto_schema::<ContextArgs>(
-        "context",
-        "Generates a formatted project snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [context] settings.",
+    auto_schema::<WorkspaceSnapshotArgs>(
+        "workspace_snapshot",
+        "Generates a formatted project snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [workspace_snapshot] settings.",
     )
 }
 
@@ -137,7 +137,7 @@ fn read_to_file_data(
             path: display_path,
             content: None,
             error: None,
-            skipped: Some("Context output size limit reached.".into()),
+            skipped: Some("Workspace snapshot output size limit reached.".into()),
         };
     }
 
@@ -202,7 +202,7 @@ fn archon_config_dir() -> Option<PathBuf> {
     dunce::canonicalize(&dir).ok().or(Some(dir))
 }
 
-/// Validates whether an extra `context.file` entry is safe to read:
+/// Validates whether an extra `workspace_snapshot.file` entry is safe to read:
 /// 1. Allowed if explicitly configured in the user's global `~/.config/archon/config.toml`.
 /// 2. Allowed if it resides inside `~/.config/archon/` (e.g. `file = ["~/.config/archon/config.toml"]`).
 /// 3. Allowed if it resolves inside `base_root` and does not match any secret/exclude pattern.
@@ -250,10 +250,10 @@ fn validate_extra_file(
 
 pub fn execute(
     json_args: &Value,
-    settings: &ContextSettings,
+    settings: &WorkspaceSnapshotSettings,
     max_output_size: usize,
 ) -> Result<String> {
-    let args: ContextArgs = parse_args(json_args, "context")?;
+    let args: WorkspaceSnapshotArgs = parse_args(json_args, "workspace_snapshot")?;
     let cwd = workspace_root()?;
 
     let base_root = if settings.git_root {

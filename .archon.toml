@@ -1,4 +1,4 @@
-[context]
+[workspace_snapshot]
 git_root = true
 include = ["**/*"]
 exclude = ["target/**", "Cargo.lock"]
