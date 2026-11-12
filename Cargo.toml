@@ -19,6 +19,7 @@ image = "0.25"
 pathdiff = "0.2"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.4"
+regex = "1.11"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 schemars = "1.2.3"
 serde = { version = "1.0", features = ["derive"] }

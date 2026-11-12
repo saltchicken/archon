@@ -4,6 +4,7 @@ pub mod edit_file;
 pub mod execute_command;
 pub mod git;
 pub mod read_file;
+pub mod search;
 pub mod workspace_snapshot;
 
 use crate::core::config::Config;
@@ -34,6 +35,7 @@ pub fn schemas() -> Vec<Value> {
         execute_command::schema(),
         git::schema(),
         read_file::schema(),
+        search::schema(),
         workspace_snapshot::schema(),
     ]
 }
@@ -58,7 +60,14 @@ pub async fn execute(
         "cargo" => cargo::execute(args, max_output_size).await,
         "workspace_snapshot" => {
             let ws_cfg = config.workspace_snapshot.clone();
-            spawn_blocking_tool(move || workspace_snapshot::execute(&cloned, &ws_cfg, max_output_size)).await
+            spawn_blocking_tool(move || {
+                workspace_snapshot::execute(&cloned, &ws_cfg, max_output_size)
+            })
+            .await
+        }
+        "search" => {
+            let ws_cfg = config.workspace_snapshot.clone();
+            spawn_blocking_tool(move || search::execute(&cloned, &ws_cfg, max_output_size)).await
         }
         "execute_command" => {
             execute_command::execute(args, &config.app.allowed_commands, max_output_size).await

@@ -120,6 +120,7 @@ dependencies = [
  "pathdiff",
  "ratatui",
  "ratatui-textarea",
+ "regex",
  "reqwest",
  "schemars",
  "serde",

@@ -159,6 +159,7 @@ impl Default for AppSettings {
                 .collect(),
             auto_approve: [
                 "read_file",
+                "search",
                 "workspace_snapshot",
                 "git:status",
                 "git:diff",
