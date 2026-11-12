@@ -14,7 +14,7 @@ use std::{
     env,
     ffi::OsStr,
     path::{Component, Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 use tokio::{
@@ -193,14 +193,13 @@ where
     let stdout = child.stdout.take().context("Failed to capture child stdout")?;
     let stderr = child.stderr.take().context("Failed to capture child stderr")?;
 
-    let (out_bytes, err_bytes) = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), async {
+    let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), async {
         let (r1, r2, status) = tokio::join!(
             read_capped(stdout, cap),
             read_capped(stderr, cap),
             child.wait()
         );
-        let _ = status?;
-        Ok::<_, std::io::Error>((r1?, r2?))
+        Ok::<_, std::io::Error>((r1?, r2?, status?))
     })
     .await
     .map_err(|_| {
@@ -208,10 +207,15 @@ where
     })?
     .with_context(|| format!("Error reading output from {program}"))?;
 
-    Ok(format_process_bytes(&out_bytes, &err_bytes, empty_msg))
+    Ok(format_process_bytes(&out_bytes, &err_bytes, status, empty_msg))
 }
 
-pub fn format_process_bytes(stdout: &[u8], stderr: &[u8], empty_msg: &str) -> String {
+pub fn format_process_bytes(
+    stdout: &[u8],
+    stderr: &[u8],
+    status: ExitStatus,
+    empty_msg: &str,
+) -> String {
     let mut combined = String::from_utf8_lossy(stdout).into_owned();
     if !stderr.is_empty() {
         if !combined.is_empty() {
@@ -220,6 +224,17 @@ pub fn format_process_bytes(stdout: &[u8], stderr: &[u8], empty_msg: &str) -> St
         combined.push_str("[STDERR]\n");
         combined.push_str(&String::from_utf8_lossy(stderr));
     }
+
+    if !status.success() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        match status.code() {
+            Some(code) => combined.push_str(&format!("[Exit code: {code}]")),
+            None => combined.push_str("[Process terminated by signal]"),
+        }
+    }
+
     if combined.trim().is_empty() {
         empty_msg.to_string()
     } else {
