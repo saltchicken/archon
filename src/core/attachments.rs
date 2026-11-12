@@ -18,12 +18,12 @@ pub struct ImageAttachment {
     pub size_kb: u64,
 }
 
-pub struct ImageWorkspace {
+pub struct ImageStaging {
     _tmp_dir: TempDir,
     img_dir: PathBuf,
 }
 
-impl ImageWorkspace {
+impl ImageStaging {
     pub fn new() -> Result<Self> {
         let tmp_dir = tempfile::Builder::new().prefix("archon-").tempdir()?;
         let img_dir = tmp_dir.path().join("images");

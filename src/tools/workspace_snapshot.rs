@@ -19,7 +19,7 @@ use std::{
 
 #[derive(Deserialize, JsonSchema)]
 struct WorkspaceSnapshotArgs {
-    /// Optional relative subdirectory or file path within the workspace (defaults to project root).
+    /// Optional relative subdirectory or file path within the workspace (defaults to workspace root).
     #[serde(default)]
     target_path: String,
     /// If true, only output the directory tree structure without file contents.
@@ -36,7 +36,7 @@ struct WorkspaceSnapshotArgs {
 pub fn schema() -> Value {
     auto_schema::<WorkspaceSnapshotArgs>(
         "workspace_snapshot",
-        "Generates a formatted project snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [workspace_snapshot] settings.",
+        "Generates a formatted workspace snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [workspace_snapshot] settings.",
     )
 }
 
@@ -163,10 +163,10 @@ pub fn execute(
     let (base_root, scan_root) = resolve_scan_roots(
         settings.git_root,
         &args.target_path,
-        "target_path escapes project root",
+        "target_path escapes workspace root",
     )?;
 
-    let project_name = base_root.file_name().and_then(|n| n.to_str()).unwrap_or("project");
+    let workspace_name = base_root.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
     let include_patterns = if !args.include.is_empty() {
         args.include
     } else if !settings.include.is_empty() {
@@ -321,7 +321,7 @@ pub fn execute(
     }
 
     let mut out = format!(
-        "# Project: {project_name}\n\n## Directory Structure\n\n```text\n{}\n```\n\n",
+        "# Workspace: {workspace_name}\n\n## Directory Structure\n\n```text\n{}\n```\n\n",
         tree_out.trim_end()
     );
 

@@ -4,9 +4,9 @@ mod render;
 
 use crate::core::{
     EngineCommand, EngineEvent, TurnConfig,
+    attachments::ImageAttachment,
     config::{Config, Preset},
     session::{ChatMessage, SessionSummary},
-    workspace::ImageAttachment,
 };
 use anyhow::Result;
 use crossterm::{
@@ -315,7 +315,7 @@ impl TuiApp {
             EngineEvent::Notification { message, is_error } => {
                 self.status_bar = (message, is_error);
             }
-            EngineEvent::WorkspaceUpdated(list) => self.attachments = list,
+            EngineEvent::AttachmentsUpdated(list) => self.attachments = list,
             EngineEvent::ChatUpdated {
                 messages,
                 num_ctx,

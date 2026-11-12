@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod config;
 pub mod gemini;
 pub mod logger;
@@ -5,8 +6,8 @@ pub mod ollama;
 pub mod provider;
 pub mod session;
 pub mod tools;
-pub mod workspace;
 
+use attachments::{ImageAttachment, ImageStaging};
 use config::Config;
 use provider::Provider;
 use reqwest::Client;
@@ -22,7 +23,6 @@ use tokio::{
 };
 use tools::ToolCall;
 use tracing::{debug, error, info, warn};
-use workspace::{ImageAttachment, ImageWorkspace};
 
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
@@ -65,7 +65,7 @@ pub enum EngineEvent {
         message: String,
         is_error: bool,
     },
-    WorkspaceUpdated(Vec<ImageAttachment>),
+    AttachmentsUpdated(Vec<ImageAttachment>),
     ChatUpdated {
         messages: Vec<ChatMessage>,
         num_ctx: u32,
@@ -99,7 +99,7 @@ pub struct CoreEngine {
     provider: Provider,
     config: Config,
     client: Client,
-    workspace: Arc<ImageWorkspace>,
+    attachments: Arc<ImageStaging>,
     sessions: Arc<SessionManager>,
     session_id: String,
     active_system_prompt: String,
@@ -136,7 +136,7 @@ impl CoreEngine {
         tx: UnboundedSender<EngineEvent>,
     ) -> anyhow::Result<Self> {
         let provider = Provider::from_model(&model);
-        let workspace = Arc::new(ImageWorkspace::new()?);
+        let attachments = Arc::new(ImageStaging::new()?);
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
         let client = provider.build_client(&config)?;
         let active_num_ctx = config.context_for_model(&model);
@@ -147,7 +147,7 @@ impl CoreEngine {
             provider,
             config,
             client,
-            workspace,
+            attachments,
             sessions,
             session_id: SessionManager::new_id(),
             active_system_prompt: String::new(),
@@ -180,10 +180,10 @@ impl CoreEngine {
         }
     }
 
-    async fn clear_workspace(&self) {
-        let ws = Arc::clone(&self.workspace);
-        let _ = tokio::task::spawn_blocking(move || ws.clear()).await;
-        let _ = self.tx.send(EngineEvent::WorkspaceUpdated(vec![]));
+    async fn clear_attachments(&self) {
+        let staging = Arc::clone(&self.attachments);
+        let _ = tokio::task::spawn_blocking(move || staging.clear()).await;
+        let _ = self.tx.send(EngineEvent::AttachmentsUpdated(vec![]));
     }
 
     fn apply_turn_config(&mut self, turn: &TurnConfig) {
@@ -275,25 +275,25 @@ impl CoreEngine {
         self.spawn_model_turn(&turn, internal_tx.clone()).await;
     }
 
-    async fn update_workspace<F>(&self, op: F, success_msg: impl Into<String>)
+    async fn update_attachments<F>(&self, op: F, success_msg: impl Into<String>)
     where
-        F: FnOnce(&ImageWorkspace) -> anyhow::Result<PathBuf> + Send + 'static,
+        F: FnOnce(&ImageStaging) -> anyhow::Result<PathBuf> + Send + 'static,
     {
-        let ws = Arc::clone(&self.workspace);
+        let staging = Arc::clone(&self.attachments);
         if let Ok((res, list)) =
-            tokio::task::spawn_blocking(move || (op(&ws), ws.list_attachments())).await
+            tokio::task::spawn_blocking(move || (op(&staging), staging.list_attachments())).await
         {
             match res {
                 Ok(_) => self.notify(success_msg, false),
                 Err(e) => self.notify(e.to_string(), true),
             }
-            let _ = self.tx.send(EngineEvent::WorkspaceUpdated(list));
+            let _ = self.tx.send(EngineEvent::AttachmentsUpdated(list));
         }
     }
 
     async fn collect_unsent_images(&mut self) -> Option<Vec<PathBuf>> {
         let asset_dir = self.sessions.asset_dir(&self.session_id);
-        let ws = Arc::clone(&self.workspace);
+        let staging = Arc::clone(&self.attachments);
         let already_sent = self.sent_images.clone();
 
         let (paths, newly_sent) = tokio::task::spawn_blocking(move || {
@@ -301,7 +301,7 @@ impl CoreEngine {
             let mut paths = Vec::new();
             let mut sent = Vec::new();
 
-            for att in ws.list_attachments() {
+            for att in staging.list_attachments() {
                 if already_sent.contains(&att.path) {
                     continue;
                 }
@@ -364,18 +364,18 @@ impl CoreEngine {
         match cmd {
             EngineCommand::PasteClipboard => {
                 info!("Pasting image from clipboard");
-                self.update_workspace(|ws| ws.paste_clipboard(), "Image pasted from clipboard.")
+                self.update_attachments(|s| s.paste_clipboard(), "Image pasted from clipboard.")
                     .await;
             }
             EngineCommand::ImportFile(path) => {
                 info!("Importing file: {}", path.display());
                 let msg = format!("Added {}", path.display());
-                self.update_workspace(move |ws| ws.import_file(&path), msg)
+                self.update_attachments(move |s| s.import_file(&path), msg)
                     .await;
             }
             EngineCommand::ClearImages => {
                 info!("Clearing attached images");
-                self.clear_workspace().await;
+                self.clear_attachments().await;
                 self.notify("Cleared attached images.", false);
             }
             EngineCommand::SendPrompt { prompt, turn } => {
@@ -505,19 +505,19 @@ impl CoreEngine {
                             }
                         }
 
-                        let ws = Arc::clone(&self.workspace);
-                        let (restored_ws_paths, attachments) =
+                        let staging = Arc::clone(&self.attachments);
+                        let (restored_staging_paths, attachments) =
                             tokio::task::spawn_blocking(move || {
                                 (
-                                    ws.restore_from_session(&session_img_paths),
-                                    ws.list_attachments(),
+                                    staging.restore_from_session(&session_img_paths),
+                                    staging.list_attachments(),
                                 )
                             })
                             .await
                             .unwrap_or_default();
 
-                        self.sent_images.extend(restored_ws_paths);
-                        let _ = self.tx.send(EngineEvent::WorkspaceUpdated(attachments));
+                        self.sent_images.extend(restored_staging_paths);
+                        let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
                         self.session_id = data.id;
                         self.active_system_prompt = data.system_prompt;
@@ -572,7 +572,7 @@ impl CoreEngine {
                 info!("Resetting chat session");
                 self.flush_save_task().await;
                 self.abort_active_state();
-                self.clear_workspace().await;
+                self.clear_attachments().await;
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
@@ -764,7 +764,7 @@ impl CoreEngine {
                     .iter()
                     .filter_map(|p| {
                         let resolved = resolve_session_image_path(p, &asset_dir);
-                        ImageWorkspace::encode_image(&resolved)
+                        ImageStaging::encode_image(&resolved)
                             .inspect_err(|e| {
                                 warn!("Failed to encode session image {}: {e}", resolved.display())
                             })
