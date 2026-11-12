@@ -25,7 +25,7 @@ struct FetchUrlArgs {
 pub fn schema() -> Value {
     auto_schema::<FetchUrlArgs>(
         "fetch_url",
-        "Fetches content from a public HTTP/HTTPS URL. Automatically converts HTML pages into readable text and pretty-prints JSON unless `raw: true` is set.",
+        "Fetches content from a public HTTP/HTTPS URL. Automatically converts HTML pages into readable text and serializes JSON as compact output unless `raw: true` is set.",
     )
 }
 
@@ -361,7 +361,7 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
         html_to_text(&raw_text)
     } else if !args.raw && content_type.contains("json") {
         serde_json::from_str::<Value>(&raw_text)
-            .and_then(|v| serde_json::to_string_pretty(&v))
+            .and_then(|v| serde_json::to_string(&v))
             .unwrap_or(raw_text)
     } else {
         raw_text
