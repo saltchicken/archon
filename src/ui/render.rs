@@ -1,5 +1,8 @@
 use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
-use crate::core::session::{truncate_str, ChatMessage};
+use crate::core::{
+    session::{truncate_str, ChatMessage},
+    tools::ToolCall,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -24,37 +27,47 @@ fn sanitize_line(s: &str) -> String {
         .replace('\t', "    ")
 }
 
-fn format_message_display(m: &ChatMessage, tool_outputs: &[&ChatMessage]) -> String {
+fn format_tool_call_summary(c: &ToolCall) -> String {
+    let args = serde_json::to_string(&c.function.arguments).unwrap_or_default();
+    format!("{}({})", c.function.name, truncate_str(&args, 80))
+}
+
+/// Formats an assistant message's text content, plus any *unresolved* (pending approval) tool calls.
+/// Resolved tool calls are rendered as their own standalone `━━ ⚙ TOOL [...]` message blocks.
+fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> String {
     let mut text = sanitize_line(&m.content);
 
-    if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
+    if let Some(calls) = m.tool_calls.as_ref()
+        && resolved_tool_count < calls.len()
+    {
         if !text.trim().is_empty() {
             text.push_str("\n\n");
         }
-        let mut tool_blocks = Vec::with_capacity(calls.len());
-        for (idx, c) in calls.iter().enumerate() {
-            let args = serde_json::to_string(&c.function.arguments).unwrap_or_default();
-            let mut block = format!(
-                "⚙ [Tool Call: {}({})]",
-                c.function.name,
-                truncate_str(&args, 80)
-            );
-
-            if let Some(tool_msg) = tool_outputs.get(idx) {
-                let sanitized_out = sanitize_line(&tool_msg.content);
-                if tool_msg.truncated {
-                    block.push_str(" ⚠ TRUNCATED");
-                }
-                if !sanitized_out.trim().is_empty() {
-                    block.push('\n');
-                    block.push_str(&sanitized_out);
-                }
-            }
-            tool_blocks.push(block);
-        }
-        text.push_str(&tool_blocks.join("\n\n"));
+        let pending: Vec<String> = calls[resolved_tool_count..]
+            .iter()
+            .map(|c| format!("⚙ [Pending Tool Approval: {}]", format_tool_call_summary(c)))
+            .collect();
+        text.push_str(&pending.join("\n"));
     }
     text
+}
+
+/// Finds the `ToolCall` metadata corresponding to `messages[tool_msg_idx]`.
+fn find_associated_tool_call(messages: &[ChatMessage], tool_msg_idx: usize) -> Option<&ToolCall> {
+    let mut offset = 0usize;
+    for idx in (0..tool_msg_idx).rev() {
+        match messages[idx].role.as_str() {
+            "tool" => offset += 1,
+            "assistant" => {
+                return messages[idx]
+                    .tool_calls
+                    .as_ref()
+                    .and_then(|calls| calls.get(offset));
+            }
+            _ => break,
+        }
+    }
+    None
 }
 
 fn is_table_line(line: &str) -> bool {
@@ -332,26 +345,13 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw("  ")];
     let trimmed = line.trim_start();
 
-    if trimmed.starts_with("⚙ [Tool Call:") {
-        if let Some((call_part, _)) = line.split_once(" ⚠ TRUNCATED") {
-            spans.push(Span::styled(
-                call_part.to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-            spans.push(Span::styled(
-                " ⚠ TRUNCATED".to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                line.to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-        }
+    if trimmed.starts_with("⚙ [") {
+        spans.push(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::ITALIC),
+        ));
         return spans;
     }
 
@@ -461,13 +461,6 @@ fn render_message_block(
         let end = (start + max_lines).min(total_content);
 
         if start > 0 {
-            if let Some(active_tool_header) = styled_content[..start]
-                .iter()
-                .rev()
-                .find(|l| is_tool_call_line(l))
-            {
-                lines.push(active_tool_header.clone());
-            }
             lines.push(Line::from(Span::styled(
                 format!("    ... ({start} lines above) ..."),
                 Style::default().fg(Color::Blue),
@@ -489,12 +482,6 @@ fn render_message_block(
 
     lines.push(Line::from(""));
     ranges.push((idx, start_visual, lines.len(), is_truncated));
-}
-
-fn is_tool_call_line(line: &Line<'_>) -> bool {
-    line.spans
-        .iter()
-        .any(|s| s.content.trim_start().starts_with("⚙ [Tool Call:"))
 }
 
 fn is_message_header_line(line: &Line<'_>) -> bool {
@@ -688,23 +675,22 @@ impl TuiApp {
         if self.styled_messages.len() != self.messages.len() {
             self.styled_messages.clear();
             for (i, m) in self.messages.iter().enumerate() {
-                if m.role == "tool" {
+                let formatted = if m.role == "assistant" {
+                    let resolved_count = self.messages[i + 1..]
+                        .iter()
+                        .take_while(|next| next.role == "tool")
+                        .count();
+                    format_assistant_display(m, resolved_count)
+                } else {
+                    sanitize_line(&m.content)
+                };
+
+                if formatted.trim().is_empty() {
                     self.styled_messages.push(Vec::new());
-                    continue;
+                } else {
+                    let wrapped = wrap_text(&formatted, &options);
+                    self.styled_messages.push(style_lines(&wrapped));
                 }
-                let mut tool_outputs = Vec::new();
-                if m.role == "assistant" {
-                    for next_msg in &self.messages[i + 1..] {
-                        if next_msg.role == "tool" {
-                            tool_outputs.push(next_msg);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                let formatted = format_message_display(m, &tool_outputs);
-                let wrapped = wrap_text(&formatted, &options);
-                self.styled_messages.push(style_lines(&wrapped));
             }
         }
 
@@ -717,30 +703,34 @@ impl TuiApp {
             .zip(self.styled_messages.iter())
             .enumerate()
         {
-            if m.role == "tool" {
+            // Skip empty assistant blocks when all their tool calls have already been resolved
+            // into separate `━━ ⚙ TOOL [...]` message blocks below.
+            if m.role == "assistant" && styled_content.is_empty() {
                 continue;
             }
-            let (tag, color) = match m.role.as_str() {
-                "user" => ("USER", Color::Cyan),
-                "assistant" => ("ARCHON", Color::Green),
-                _ => ("SYS", Color::Gray),
-            };
-            let img_badge = m
-                .images
-                .as_ref()
-                .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
 
-            let any_tool_truncated = m.role == "assistant"
-                && self.messages[i + 1..]
-                    .iter()
-                    .take_while(|next| next.role == "tool")
-                    .any(|t| t.truncated);
+            let (header_label, color) = match m.role.as_str() {
+                "user" => {
+                    let img_badge = m
+                        .images
+                        .as_ref()
+                        .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
+                    (format!("USER{img_badge}"), Color::Cyan)
+                }
+                "assistant" => ("ARCHON".to_string(), Color::Green),
+                "tool" => {
+                    let summary = find_associated_tool_call(&self.messages, i)
+                        .map_or_else(|| "tool".to_string(), format_tool_call_summary);
+                    (format!("⚙ TOOL [{summary}]"), Color::Yellow)
+                }
+                _ => ("SYS".to_string(), Color::Gray),
+            };
 
             render_message_block(
                 i,
-                &format!("{tag}{img_badge}"),
+                &header_label,
                 color,
-                m.truncated || any_tool_truncated,
+                m.truncated,
                 styled_content,
                 max_msg_lines,
                 &mut self.msg_states[i],
@@ -785,19 +775,13 @@ impl TuiApp {
             self.chat_scroll.min(max_scroll)
         };
 
-        // Find active tool call header if the main chat scroll has scrolled past it
-        let sticky_tool_line = if self.chat_scroll > 0 {
-            let mut found = None;
-            for line in lines[..self.chat_scroll].iter().rev() {
-                if is_message_header_line(line) {
-                    break;
-                }
-                if is_tool_call_line(line) {
-                    found = Some(line.clone());
-                    break;
-                }
-            }
-            found
+        // Keep the active message/tool header (`━━ ...`) pinned at the top of the viewport when scrolling through it
+        let sticky_header_line = if self.chat_scroll > 0 {
+            lines[..self.chat_scroll]
+                .iter()
+                .rev()
+                .find(|l| is_message_header_line(l))
+                .cloned()
         } else {
             None
         };
@@ -810,10 +794,10 @@ impl TuiApp {
             Vec::new()
         };
 
-        if let Some(sticky) = sticky_tool_line
+        if let Some(sticky) = sticky_header_line
             && !visible_lines.is_empty()
-            && !is_tool_call_line(&visible_lines[0])
             && !is_message_header_line(&visible_lines[0])
+            && !visible_lines[0].spans.is_empty()
         {
             visible_lines[0] = sticky;
         }

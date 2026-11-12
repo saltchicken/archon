@@ -336,16 +336,13 @@ impl TuiApp {
                 self.msg_states
                     .resize(self.messages.len() + 1, MsgUiState::default());
 
-                // Only auto-unfold the final assistant response (when it has no pending/inline tool calls)
-                // so large tool outputs stay folded and scrollable with a pinned [Tool Call: ...] header.
-                if let Some(last_idx) = self.messages.len().checked_sub(1)
-                    && self.messages[last_idx].role == "assistant"
-                    && self.messages[last_idx]
-                        .tool_calls
-                        .as_ref()
-                        .is_none_or(Vec::is_empty)
+                // Unfold the latest assistant response while keeping separate `tool` blocks folded.
+                if let Some(last_assistant_idx) = self
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == "assistant")
                 {
-                    self.msg_states[last_idx].unfolded = true;
+                    self.msg_states[last_assistant_idx].unfolded = true;
                 }
             }
             EngineEvent::StreamStarted => {
