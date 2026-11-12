@@ -290,14 +290,13 @@ impl CoreEngine {
         }
     }
 
-    async fn collect_unsent_images(&mut self) -> (Option<Vec<String>>, Option<Vec<PathBuf>>) {
+    async fn collect_unsent_images(&mut self) -> Option<Vec<PathBuf>> {
         let asset_dir = self.sessions.asset_dir(&self.session_id);
         let ws = Arc::clone(&self.workspace);
         let already_sent = self.sent_images.clone();
 
-        let (imgs, paths, newly_sent) = tokio::task::spawn_blocking(move || {
+        let (paths, newly_sent) = tokio::task::spawn_blocking(move || {
             let _ = std::fs::create_dir_all(&asset_dir);
-            let mut imgs = Vec::new();
             let mut paths = Vec::new();
             let mut sent = Vec::new();
 
@@ -306,23 +305,18 @@ impl CoreEngine {
                     continue;
                 }
                 let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
-                let _ = std::fs::copy(&att.path, &dest);
-                if let Ok(b64) = ImageWorkspace::encode_image(&att.path) {
-                    imgs.push(b64);
+                if std::fs::copy(&att.path, &dest).is_ok() {
                     paths.push(dest);
                     sent.push(att.path);
                 }
             }
-            (imgs, paths, sent)
+            (paths, sent)
         })
         .await
         .unwrap_or_default();
 
         self.sent_images.extend(newly_sent);
-        (
-            (!imgs.is_empty()).then_some(imgs),
-            (!paths.is_empty()).then_some(paths),
-        )
+        (!paths.is_empty()).then_some(paths)
     }
 
     async fn emit_sessions(&self, delete_first: Option<PathBuf>) {
@@ -403,10 +397,10 @@ impl CoreEngine {
                 }
 
                 self.apply_turn_config(&turn);
-                let (images, image_paths) = self.collect_unsent_images().await;
+                let image_paths = self.collect_unsent_images().await;
 
                 self.messages.push(ChatMessage {
-                    images,
+                    images: None,
                     image_paths,
                     ..ChatMessage::new("user", prompt)
                 });
@@ -499,14 +493,15 @@ impl CoreEngine {
                         let asset_dir = self.sessions.asset_dir(&data.id);
 
                         let mut session_img_paths = Vec::new();
-                        for p in data
-                            .messages
-                            .iter_mut()
-                            .filter_map(|m| m.image_paths.as_mut())
-                            .flatten()
-                        {
-                            *p = resolve_session_image_path(p, &asset_dir);
-                            session_img_paths.push(p.clone());
+                        for msg in &mut data.messages {
+                            // Ensure no base64 image payloads are retained in memory from disk
+                            msg.images = None;
+                            if let Some(paths) = msg.image_paths.as_mut() {
+                                for p in paths {
+                                    *p = resolve_session_image_path(p, &asset_dir);
+                                    session_img_paths.push(p.clone());
+                                }
+                            }
                         }
 
                         let ws = Arc::clone(&self.workspace);
@@ -736,11 +731,7 @@ impl CoreEngine {
         let model = self.model.clone();
         let sys = self.active_system_prompt.clone();
         let ctx = self.active_num_ctx;
-        let msgs: Vec<ChatMessage> = self
-            .messages
-            .iter()
-            .map(ChatMessage::without_images)
-            .collect();
+        let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
             if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs) {
@@ -758,12 +749,11 @@ impl CoreEngine {
         let tools_schema = turn.enable_tools.then(crate::tools::schemas);
         let asset_dir = self.sessions.asset_dir(&self.session_id);
 
+        // Clone lightweight messages (without Base64 payloads) and hydrate Base64
+        // strings only into the transient `hydrated_msgs` sent to the provider.
         let mut msgs = self.messages.clone();
-        if let Ok(updated_msgs) = tokio::task::spawn_blocking(move || {
+        let hydrated_msgs = tokio::task::spawn_blocking(move || {
             for msg in &mut msgs {
-                if msg.images.is_some() {
-                    continue;
-                }
                 let Some(paths) = &msg.image_paths else {
                     continue;
                 };
@@ -785,16 +775,13 @@ impl CoreEngine {
             msgs
         })
         .await
-        {
-            self.messages = updated_msgs;
-        }
+        .unwrap_or_else(|_| self.messages.clone());
 
         let _ = self.tx.send(EngineEvent::StreamStarted);
         let provider = self.provider;
         let client = self.client.clone();
         let model = self.model.clone();
         let config = self.config.clone();
-        let messages = self.messages.clone();
         let turn_cfg = turn.clone();
 
         self.active_task = Some(tokio::spawn(async move {
@@ -803,7 +790,7 @@ impl CoreEngine {
                     client,
                     model,
                     config,
-                    messages,
+                    hydrated_msgs,
                     turn_cfg,
                     tools_schema,
                     internal_tx,

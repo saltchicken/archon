@@ -21,7 +21,7 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::Rect,
@@ -31,8 +31,11 @@ use ratatui::{
     Terminal,
 };
 use ratatui_textarea::TextArea;
-use std::io;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use std::{io, time::Duration};
+use tokio::{
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
+    time::MissedTickBehavior,
+};
 
 pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
     let _ = disable_raw_mode();
@@ -70,7 +73,9 @@ pub struct TuiApp {
 
     pub(super) attachments: Vec<ImageAttachment>,
     pub(super) messages: Vec<ChatMessage>,
-    pub(super) wrapped_messages: Vec<Vec<String>>,
+    pub(super) styled_messages: Vec<Vec<Line<'static>>>,
+    pub(super) styled_stream: Vec<Line<'static>>,
+    pub(super) stream_dirty: bool,
     pub(super) last_wrap_width: usize,
     pub(super) streaming_text: String,
     pub(super) is_streaming: bool,
@@ -140,7 +145,9 @@ impl TuiApp {
             cmd_tx,
             attachments: Vec::new(),
             messages: Vec::new(),
-            wrapped_messages: Vec::new(),
+            styled_messages: Vec::new(),
+            styled_stream: Vec::new(),
+            stream_dirty: false,
             last_wrap_width: 0,
             streaming_text: String::new(),
             is_streaming: false,
@@ -203,6 +210,31 @@ impl TuiApp {
         (pct, color)
     }
 
+    fn handle_term_event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Key(key) => return self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Paste(text) => {
+                let single_line = text.replace(['\r', '\n'], "");
+                match self.modal {
+                    ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
+                    ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
+                    ActiveModal::ContextWindow => {
+                        for c in single_line.chars().filter(|c| c.is_ascii_digit()) {
+                            self.ctx_input.push(c);
+                        }
+                    }
+                    ActiveModal::None => {
+                        self.text_area.insert_str(text.replace('\r', ""));
+                    }
+                    ActiveModal::Sessions | ActiveModal::ModelSelect => {}
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     pub async fn run(mut self, mut ev_rx: UnboundedReceiver<EngineEvent>) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -224,35 +256,53 @@ impl TuiApp {
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         let mut term_events = EventStream::new();
 
-        loop {
-            terminal.draw(|f| self.draw(f))?;
+        // 16ms (~60 FPS) render ticker to coalesce high-frequency StreamChunk and mouse events
+        let mut render_tick = tokio::time::interval(Duration::from_millis(16));
+        render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        let mut dirty = true;
+
+        'main_loop: loop {
+            if dirty {
+                terminal.draw(|f| self.draw(f))?;
+                dirty = false;
+            }
 
             tokio::select! {
-                Some(Ok(event)) = term_events.next() => {
-                    match event {
-                        Event::Key(key) if self.handle_key(key) => break,
-                        Event::Mouse(mouse) => self.handle_mouse(mouse),
-                        Event::Paste(text) => {
-                            let single_line = text.replace(['\r', '\n'], "");
-                            match self.modal {
-                                ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
-                                ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
-                                ActiveModal::ContextWindow => {
-                                    for c in single_line.chars().filter(|c| c.is_ascii_digit()) {
-                                        self.ctx_input.push(c);
-                                    }
+                _ = render_tick.tick() => {}
+                maybe_term = term_events.next() => {
+                    match maybe_term {
+                        Some(Ok(event)) => {
+                            if self.handle_term_event(event) {
+                                break 'main_loop;
+                            }
+                            dirty = true;
+                            while let Some( Some(Ok(next_ev)) ) = term_events.next().now_or_never() {
+                                if self.handle_term_event(next_ev) {
+                                    break 'main_loop;
                                 }
-                                ActiveModal::None => {
-                                    self.text_area.insert_str(text.replace('\r', ""));
-                                }
-                                ActiveModal::Sessions | ActiveModal::ModelSelect => {}
                             }
                         }
-                        _ => {}
+                        Some(Err(_)) => {}
+                        None => break 'main_loop,
                     }
                 }
-                Some(ev) = ev_rx.recv() => self.handle_engine_event(ev),
-                else => break,
+                maybe_ev = ev_rx.recv() => {
+                    match maybe_ev {
+                        Some(ev) => {
+                            self.handle_engine_event(ev);
+                            dirty = true;
+                            while let Ok(next_ev) = ev_rx.try_recv() {
+                                self.handle_engine_event(next_ev);
+                            }
+                            // Wait for the next 16ms frame tick before redrawing if streaming
+                            if self.is_streaming {
+                                render_tick.tick().await;
+                            }
+                        }
+                        None => break 'main_loop,
+                    }
+                }
             }
         }
 
@@ -275,7 +325,9 @@ impl TuiApp {
                     self.used_tokens = 0;
                 }
                 self.messages = messages;
-                self.wrapped_messages.clear();
+                self.styled_messages.clear();
+                self.styled_stream.clear();
+                self.stream_dirty = false;
                 self.num_ctx = num_ctx;
                 self.sync_system_prompt(&system_prompt);
                 self.is_streaming = false;
@@ -299,22 +351,33 @@ impl TuiApp {
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
                 self.streaming_text.clear();
+                self.styled_stream.clear();
+                self.stream_dirty = true;
                 self.status_bar = (
                     format!("Streaming response from {}... (Esc to cancel)", self.model),
                     false,
                 );
                 self.scroll_to_bottom();
             }
-            EngineEvent::StreamChunk(c) => self.streaming_text.push_str(&c),
+            EngineEvent::StreamChunk(c) => {
+                self.streaming_text.push_str(&c);
+                self.stream_dirty = true;
+            }
             EngineEvent::StreamDone {
                 prompt_tokens,
                 eval_tokens,
                 ..
             } => {
                 self.is_streaming = false;
+                self.styled_stream.clear();
+                self.stream_dirty = false;
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
-            EngineEvent::StreamError(_) => self.is_streaming = false,
+            EngineEvent::StreamError(_) => {
+                self.is_streaming = false;
+                self.styled_stream.clear();
+                self.stream_dirty = false;
+            }
             EngineEvent::ToolApprovalRequested {
                 formatted_preview,
                 index,

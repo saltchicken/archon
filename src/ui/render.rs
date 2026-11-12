@@ -377,16 +377,12 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
     spans
 }
 
-fn format_visible_lines(
-    content_lines: &[String],
-    start: usize,
-    end: usize,
-) -> Vec<Line<'static>> {
+fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut in_table_header = false;
-    let mut out = Vec::with_capacity(end.saturating_sub(start));
+    let mut out = Vec::with_capacity(content_lines.len());
 
-    for (idx, line) in content_lines.iter().enumerate().take(end) {
+    for line in content_lines {
         let trimmed = line.trim_start();
         let is_fence = trimmed.starts_with("```");
 
@@ -398,27 +394,25 @@ fn format_visible_lines(
             }
         }
 
-        if idx >= start {
-            let formatted = if is_fence {
-                vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        line.clone(),
-                        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-                    ),
-                ]
-            } else if in_code_block {
-                vec![
-                    Span::styled("  │ ", Style::default().fg(Color::Blue)),
-                    Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
-                ]
-            } else if trimmed.starts_with('│') && trimmed.ends_with('│') {
-                style_table_row(line, in_table_header)
-            } else {
-                style_inline_markdown(line)
-            };
-            out.push(Line::from(formatted));
-        }
+        let formatted = if is_fence {
+            vec![
+                Span::raw("  "),
+                Span::styled(
+                    line.clone(),
+                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                ),
+            ]
+        } else if in_code_block {
+            vec![
+                Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
+            ]
+        } else if trimmed.starts_with('│') && trimmed.ends_with('│') {
+            style_table_row(line, in_table_header)
+        } else {
+            style_inline_markdown(line)
+        };
+        out.push(Line::from(formatted));
 
         if is_fence {
             in_code_block = !in_code_block;
@@ -434,7 +428,7 @@ fn render_message_block(
     header_label: &str,
     color: Color,
     truncated: bool,
-    content_lines: &[String],
+    styled_content: &[Line<'static>],
     max_folded_lines: usize,
     state: &mut MsgUiState,
     lines: &mut Vec<Line<'static>>,
@@ -458,7 +452,7 @@ fn render_message_block(
     }
     lines.push(Line::from(header_spans));
 
-    let total_content = content_lines.len();
+    let total_content = styled_content.len();
     let is_truncated = total_content > max_lines;
 
     if is_truncated {
@@ -467,19 +461,19 @@ fn render_message_block(
         let end = (start + max_lines).min(total_content);
 
         if start > 0 {
-            if let Some(active_tool_header) = content_lines[..start]
+            if let Some(active_tool_header) = styled_content[..start]
                 .iter()
                 .rev()
-                .find(|l| l.trim_start().starts_with("⚙ [Tool Call:"))
+                .find(|l| is_tool_call_line(l))
             {
-                lines.push(Line::from(style_inline_markdown(active_tool_header)));
+                lines.push(active_tool_header.clone());
             }
             lines.push(Line::from(Span::styled(
                 format!("    ... ({start} lines above) ..."),
                 Style::default().fg(Color::Blue),
             )));
         }
-        lines.extend(format_visible_lines(content_lines, start, end));
+        lines.extend_from_slice(&styled_content[start..end]);
         if end < total_content {
             lines.push(Line::from(Span::styled(
                 format!(
@@ -490,7 +484,7 @@ fn render_message_block(
             )));
         }
     } else {
-        lines.extend(format_visible_lines(content_lines, 0, total_content));
+        lines.extend_from_slice(styled_content);
     }
 
     lines.push(Line::from(""));
@@ -686,15 +680,16 @@ impl TuiApp {
         let options = textwrap::Options::new(available_width).break_words(true);
 
         if self.last_wrap_width != available_width {
-            self.wrapped_messages.clear();
+            self.styled_messages.clear();
+            self.stream_dirty = true;
             self.last_wrap_width = available_width;
         }
 
-        if self.wrapped_messages.len() != self.messages.len() {
-            self.wrapped_messages.clear();
+        if self.styled_messages.len() != self.messages.len() {
+            self.styled_messages.clear();
             for (i, m) in self.messages.iter().enumerate() {
                 if m.role == "tool" {
-                    self.wrapped_messages.push(Vec::new());
+                    self.styled_messages.push(Vec::new());
                     continue;
                 }
                 let mut tool_outputs = Vec::new();
@@ -708,17 +703,18 @@ impl TuiApp {
                     }
                 }
                 let formatted = format_message_display(m, &tool_outputs);
-                self.wrapped_messages.push(wrap_text(&formatted, &options));
+                let wrapped = wrap_text(&formatted, &options);
+                self.styled_messages.push(style_lines(&wrapped));
             }
         }
 
         let mut lines = Vec::new();
         let max_msg_lines = self.config.app.max_msg_lines;
 
-        for (i, (m, wrapped_content)) in self
+        for (i, (m, styled_content)) in self
             .messages
             .iter()
-            .zip(self.wrapped_messages.iter())
+            .zip(self.styled_messages.iter())
             .enumerate()
         {
             if m.role == "tool" {
@@ -745,7 +741,7 @@ impl TuiApp {
                 &format!("{tag}{img_badge}"),
                 color,
                 m.truncated || any_tool_truncated,
-                wrapped_content,
+                styled_content,
                 max_msg_lines,
                 &mut self.msg_states[i],
                 &mut lines,
@@ -757,19 +753,23 @@ impl TuiApp {
             let i = self.messages.len();
             self.msg_states[i].unfolded = true;
 
-            let sanitized_stream = sanitize_line(&self.streaming_text);
-            let stream_lines = if sanitized_stream.trim().is_empty() {
-                Vec::new()
-            } else {
-                wrap_text(&sanitized_stream, &options)
-            };
+            if self.stream_dirty {
+                let sanitized_stream = sanitize_line(&self.streaming_text);
+                if sanitized_stream.trim().is_empty() {
+                    self.styled_stream.clear();
+                } else {
+                    let wrapped = wrap_text(&sanitized_stream, &options);
+                    self.styled_stream = style_lines(&wrapped);
+                }
+                self.stream_dirty = false;
+            }
 
             render_message_block(
                 i,
                 "ARCHON (...)",
                 Color::Yellow,
                 false,
-                &stream_lines,
+                &self.styled_stream,
                 max_msg_lines,
                 &mut self.msg_states[i],
                 &mut lines,
