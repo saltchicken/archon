@@ -20,26 +20,34 @@ enum GitAction {
     Show,
     /// Show what revision and author last modified each line of a file (`git blame <path>`)
     Blame,
+    /// List local and remote branches with tracking and latest commit info (`git branch -a -vv`)
+    Branch,
     /// Stage files (`git add -- <path>`). Pass "." in `path` to stage all changes.
     Add,
+    /// Unstage staged files (`git restore --staged -- <path>`). Pass "." in `path` to unstage all changes.
+    Unstage,
     /// Commit staged changes (`git commit -m <message>`)
     Commit,
+    /// Stash working directory changes including untracked files (`git stash push -u`). Optional `message` and `path`.
+    Stash,
+    /// Apply and remove a stashed state (`git stash pop [target]`). Optional `target` like `stash@{0}`.
+    StashPop,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct GitArgs {
     /// The git operation to perform.
     action: GitAction,
-    /// Optional git ref, commit SHA, branch, range (e.g. "HEAD~2..HEAD", "main"), or "--staged" (for diff).
+    /// Optional git ref, commit SHA, branch, range (e.g. "HEAD~2..HEAD", "main"), "--staged" (for diff), or stash ref (e.g. "stash@{0}" for `stash_pop`).
     #[serde(default)]
     target: String,
-    /// Optional relative file or directory path within the workspace to scope the operation. Required for `blame` and `add` (use "." to stage all).
+    /// Optional relative file or directory path within the workspace to scope the operation. Required for `blame`, `add`, and `unstage` (use "." for all).
     #[serde(default)]
     path: String,
     /// Maximum number of log entries to return for `log` (default: 15, max: 100).
     #[serde(default)]
     limit: Option<usize>,
-    /// Commit message required when `action` is `commit`.
+    /// Commit message (required when `action` is `commit`, optional description when `action` is `stash`).
     #[serde(default)]
     message: String,
 }
@@ -47,7 +55,7 @@ struct GitArgs {
 pub fn schema() -> Value {
     auto_schema::<GitArgs>(
         "git",
-        "Executes git operations (status, diff, log, show, blame, add, commit) within the workspace.",
+        "Executes git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, stash_pop) within the workspace.",
     )
 }
 
@@ -151,11 +159,21 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             cmd_args.push(path);
             "No blame output."
         }
+        GitAction::Branch => {
+            cmd_args.extend(["branch".into(), "-a".into(), "-vv".into()]);
+            "No branches found."
+        }
         GitAction::Add => {
             let path = validate_scoped_path(&args.path, false)?
                 .ok_or_else(|| anyhow::anyhow!("'path' is required for git add (use '.' for all)"))?;
             cmd_args.extend(["add".into(), "--".into(), path]);
             "Files staged successfully."
+        }
+        GitAction::Unstage => {
+            let path = validate_scoped_path(&args.path, false)?
+                .ok_or_else(|| anyhow::anyhow!("'path' is required for git unstage (use '.' for all)"))?;
+            cmd_args.extend(["restore".into(), "--staged".into(), "--".into(), path]);
+            "Files unstaged successfully."
         }
         GitAction::Commit => {
             let msg = args.message.trim();
@@ -164,6 +182,25 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             }
             cmd_args.extend(["commit".into(), "-m".into(), msg.to_string()]);
             "Commit created."
+        }
+        GitAction::Stash => {
+            cmd_args.extend(["stash".into(), "push".into(), "-u".into()]);
+            let msg = args.message.trim();
+            if !msg.is_empty() {
+                cmd_args.extend(["-m".into(), msg.to_string()]);
+            }
+            if let Some(p) = validate_scoped_path(&args.path, false)? {
+                cmd_args.push("--".into());
+                cmd_args.push(p);
+            }
+            "Changes stashed."
+        }
+        GitAction::StashPop => {
+            cmd_args.extend(["stash".into(), "pop".into()]);
+            if let Some(t) = validate_git_target(&args.target, false)? {
+                cmd_args.push(t.into());
+            }
+            "Stash popped successfully."
         }
     };
 

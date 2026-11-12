@@ -15,15 +15,19 @@ enum CargoAction {
     Clippy,
     /// Compile and run unit/integration tests (`cargo test --locked`). Set `no_run: true` to only compile tests.
     Test,
-    /// Verify code formatting without modifying files (`cargo fmt --check`).
+    /// Verify code formatting without modifying files (`cargo fmt --all --check`).
     FmtCheck,
+    /// Format all workspace Rust code in-place (`cargo fmt --all`).
+    Fmt,
+    /// Build package documentation without dependencies (`cargo doc --locked --no-deps`) to verify doc comments and intra-doc links.
+    Doc,
     /// Inspect workspace packages and resolved metadata (`cargo metadata --locked --no-deps --format-version 1`).
     Metadata,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct CargoArgs {
-    /// The read-only Cargo verification action to run.
+    /// The Cargo action to run.
     action: CargoAction,
     /// Optional workspace package name (`--package <name>`).
     #[serde(default)]
@@ -42,7 +46,7 @@ struct CargoArgs {
 pub fn schema() -> Value {
     auto_schema::<CargoArgs>(
         "cargo",
-        "Executes read-only Cargo verification commands (check, clippy, test, fmt_check, metadata) within the workspace.",
+        "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata) within the workspace.",
     )
 }
 
@@ -119,6 +123,23 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
         CargoAction::FmtCheck => {
             cmd_args.extend(["fmt".into(), "--all".into(), "--check".into()]);
             "All files are properly formatted."
+        }
+        CargoAction::Fmt => {
+            cmd_args.extend(["fmt".into(), "--all".into()]);
+            "Formatted all workspace packages."
+        }
+        CargoAction::Doc => {
+            cmd_args.extend([
+                "doc".into(),
+                "--locked".into(),
+                "--no-deps".into(),
+                "--color".into(),
+                "never".into(),
+            ]);
+            if let Some(pkg) = validate_identifier(&args.package, "package")? {
+                cmd_args.extend(["--package".into(), pkg.into()]);
+            }
+            "Documentation built successfully with no warnings or errors."
         }
         CargoAction::Metadata => {
             cmd_args.extend([
