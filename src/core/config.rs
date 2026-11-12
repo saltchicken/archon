@@ -165,6 +165,10 @@ impl Default for AppSettings {
                 "git:log",
                 "git:show",
                 "git:blame",
+                "cargo:check",
+                "cargo:clippy",
+                "cargo:fmt_check",
+                "cargo:metadata",
             ]
             .into_iter()
             .map(String::from)
@@ -222,8 +226,7 @@ impl Default for Config {
             gemini: GeminiSettings::default(),
             models: vec![
                 ModelPreset::new("qwen3.8:27b", 32768, 131_072),
-                ModelPreset::new("gemini-2.5-flash", 1_048_576, 524_288),
-                ModelPreset::new("gemini-2.5-pro", 1_048_576, 524_288),
+                ModelPreset::new("gemini-3.8-flash", 1_048_576, 524_288),
             ],
             presets: vec![
                 Preset::new("Custom", ""),

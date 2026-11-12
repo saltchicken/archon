@@ -20,22 +20,23 @@ pub struct ToolFunction {
 /// Computes a canonical signature for a tool call, such as:
 /// - `"read_file"`
 /// - `"git:status"`
+/// - `"cargo:check"`
 /// - `"execute_command:ls"`
 pub fn call_signature(call: &ToolCall) -> String {
     let name = call.function.name.as_str();
     let args = &call.function.arguments;
 
     match name {
-        "git" => {
+        "git" | "cargo" => {
             let action = args
                 .get("action")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
             if action.is_empty() {
-                "git".to_string()
+                name.to_string()
             } else {
-                format!("git:{action}")
+                format!("{name}:{action}")
             }
         }
         "execute_command" => {

@@ -1,3 +1,4 @@
+pub mod cargo;
 pub mod context;
 pub mod create_file;
 pub mod edit_file;
@@ -27,6 +28,7 @@ const COMMAND_TIMEOUT_SECS: u64 = 30;
 
 pub fn schemas() -> Vec<Value> {
     vec![
+        cargo::schema(),
         context::schema(),
         create_file::schema(),
         edit_file::schema(),
@@ -53,6 +55,7 @@ pub async fn execute(
 ) -> Result<String> {
     let cloned = args.clone();
     match name {
+        "cargo" => cargo::execute(args, max_output_size).await,
         "context" => {
             let ctx_cfg = config.context.clone();
             spawn_blocking_tool(move || context::execute(&cloned, &ctx_cfg, max_output_size)).await
@@ -178,6 +181,27 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_workspace_command_with_timeout(
+        program,
+        args,
+        empty_msg,
+        max_output_size,
+        COMMAND_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub async fn run_workspace_command_with_timeout<I, S>(
+    program: &str,
+    args: I,
+    empty_msg: &str,
+    max_output_size: usize,
+    timeout_secs: u64,
+) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let cwd = workspace_root()?;
     let mut child = Command::new(program)
         .current_dir(&cwd)
@@ -193,7 +217,7 @@ where
     let stdout = child.stdout.take().context("Failed to capture child stdout")?;
     let stderr = child.stderr.take().context("Failed to capture child stderr")?;
 
-    let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), async {
+    let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(timeout_secs), async {
         let (r1, r2, status) = tokio::join!(
             read_capped(stdout, cap),
             read_capped(stderr, cap),
@@ -203,7 +227,7 @@ where
     })
     .await
     .map_err(|_| {
-        anyhow::anyhow!("Command '{program}' timed out after {COMMAND_TIMEOUT_SECS} seconds")
+        anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds")
     })?
     .with_context(|| format!("Error reading output from {program}"))?;
 
