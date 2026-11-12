@@ -120,11 +120,43 @@ fn is_noise_identifier(name: &str) -> bool {
     name.len() < 2
         || matches!(
             name,
-            "self" | "Self" | "super" | "crate" | "new" | "default" | "from" | "into" | "clone"
-                | "iter" | "next" | "len" | "is_empty" | "push" | "get" | "set" | "fmt" | "Result"
-                | "Option" | "Some" | "None" | "Ok" | "Err" | "String" | "Vec" | "Box" | "Arc"
-                | "Path" | "PathBuf" | "Value" | "Error" | "Context" | "true" | "false" | "main"
-                | "init" | "test"
+            "self"
+                | "Self"
+                | "super"
+                | "crate"
+                | "new"
+                | "default"
+                | "from"
+                | "into"
+                | "clone"
+                | "iter"
+                | "next"
+                | "len"
+                | "is_empty"
+                | "push"
+                | "get"
+                | "set"
+                | "fmt"
+                | "Result"
+                | "Option"
+                | "Some"
+                | "None"
+                | "Ok"
+                | "Err"
+                | "String"
+                | "Vec"
+                | "Box"
+                | "Arc"
+                | "Path"
+                | "PathBuf"
+                | "Value"
+                | "Error"
+                | "Context"
+                | "true"
+                | "false"
+                | "main"
+                | "init"
+                | "test"
         )
 }
 
@@ -142,7 +174,10 @@ fn extract_leading_docs(node: Node<'_>, source: &str) -> Option<String> {
         if expected_end_row.saturating_sub(sib.end_position().row) > 1 {
             break;
         }
-        if matches!(kind, "attribute_item" | "inner_attribute_item" | "decorator") {
+        if matches!(
+            kind,
+            "attribute_item" | "inner_attribute_item" | "decorator"
+        ) {
             expected_end_row = sib.start_position().row;
             cur = sib.prev_sibling();
             continue;
@@ -192,7 +227,11 @@ fn extract_python_docstring(node: Node<'_>, source: &str) -> Option<String> {
 fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
     let is_short_rust_adt = lang == SupportedLang::Rust
         && matches!(node.kind(), "struct_item" | "enum_item")
-        && node.end_position().row.saturating_sub(node.start_position().row) <= 10;
+        && node
+            .end_position()
+            .row
+            .saturating_sub(node.start_position().row)
+            <= 10;
 
     if let Some(body) = node.child_by_field_name("body") {
         return (!is_short_rust_adt).then(|| body.start_byte());
@@ -202,10 +241,17 @@ fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
     for child in node.children(&mut cursor) {
         if matches!(
             child.kind(),
-            "block" | "statement_block" | "class_body" | "interface_body"
-                | "declaration_list" | "field_declaration_list" | "enum_variant_list"
+            "block"
+                | "statement_block"
+                | "class_body"
+                | "interface_body"
+                | "declaration_list"
+                | "field_declaration_list"
+                | "enum_variant_list"
         ) {
-            if is_short_rust_adt && matches!(child.kind(), "field_declaration_list" | "enum_variant_list") {
+            if is_short_rust_adt
+                && matches!(child.kind(), "field_declaration_list" | "enum_variant_list")
+            {
                 return None;
             }
             return Some(child.start_byte());
@@ -236,7 +282,10 @@ fn format_node_signature(node: Node<'_>, source: &str, lang: SupportedLang) -> S
         }
     }
 
-    truncate_str(&collapse_whitespace(slice.trim().trim_end_matches(['{', ':', ';'])), 160)
+    truncate_str(
+        &collapse_whitespace(slice.trim().trim_end_matches(['{', ':', ';'])),
+        160,
+    )
 }
 
 fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Option<String> {
@@ -253,14 +302,20 @@ fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Optio
     {
         let ty_name = collapse_whitespace(&source[ty.byte_range()]);
         return Some(match node.child_by_field_name("trait") {
-            Some(tr) => format!("{} for {ty_name}", collapse_whitespace(&source[tr.byte_range()])),
+            Some(tr) => format!(
+                "{} for {ty_name}",
+                collapse_whitespace(&source[tr.byte_range()])
+            ),
             None => ty_name,
         });
     }
 
     let mut cursor = node.walk();
     if lang == SupportedLang::Go
-        && matches!(node.kind(), "type_declaration" | "const_declaration" | "var_declaration")
+        && matches!(
+            node.kind(),
+            "type_declaration" | "const_declaration" | "var_declaration"
+        )
     {
         return node
             .named_children(&mut cursor)
@@ -269,7 +324,9 @@ fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Optio
             .map(|n| source[n.byte_range()].trim().to_string());
     }
 
-    if matches!(lang, SupportedLang::TypeScript | SupportedLang::Tsx) && node.kind() == "lexical_declaration" {
+    if matches!(lang, SupportedLang::TypeScript | SupportedLang::Tsx)
+        && node.kind() == "lexical_declaration"
+    {
         return node
             .named_children(&mut cursor)
             .find(|c| c.kind() == "variable_declarator")
@@ -303,7 +360,9 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
             "type_alias_declaration" => Some(("type", false)),
             "enum_declaration" => Some(("enum", false)),
             "lexical_declaration"
-                if node.parent().is_some_and(|p| matches!(p.kind(), "program" | "export_statement")) =>
+                if node
+                    .parent()
+                    .is_some_and(|p| matches!(p.kind(), "program" | "export_statement")) =>
             {
                 Some(("const", false))
             }
@@ -312,7 +371,10 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
         SupportedLang::Python => match k {
             "class_definition" => Some(("class", true)),
             "function_definition" => {
-                let is_method = node.parent().and_then(|p| p.parent()).is_some_and(|gp| gp.kind() == "class_definition");
+                let is_method = node
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .is_some_and(|gp| gp.kind() == "class_definition");
                 Some((if is_method { "method" } else { "def" }, false))
             }
             _ => None,
@@ -344,8 +406,11 @@ fn collect_ast_symbols(
 
         if let Some((sym_kind, recurse_into_body)) = classify_symbol_node(child, lang) {
             if let Some(name) = extract_node_name(child, source, lang) {
-                let doc = extract_leading_docs(child, source)
-                    .or_else(|| (lang == SupportedLang::Python).then(|| extract_python_docstring(child, source)).flatten());
+                let doc = extract_leading_docs(child, source).or_else(|| {
+                    (lang == SupportedLang::Python)
+                        .then(|| extract_python_docstring(child, source))
+                        .flatten()
+                });
 
                 defs.push(SymbolDef {
                     name,
@@ -364,7 +429,12 @@ fn collect_ast_symbols(
                     collect_ast_symbols(target, source, lang, depth + 1, defs);
                 }
             }
-        } else if depth > 0 && matches!(kind, "declaration_list" | "class_body" | "interface_body" | "block") {
+        } else if depth > 0
+            && matches!(
+                kind,
+                "declaration_list" | "class_body" | "interface_body" | "block"
+            )
+        {
             collect_ast_symbols(child, source, lang, depth, defs);
         }
     }
@@ -373,7 +443,11 @@ fn collect_ast_symbols(
 fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String, usize>) {
     if matches!(
         node.kind(),
-        "identifier" | "type_identifier" | "field_identifier" | "property_identifier" | "shorthand_property_identifier"
+        "identifier"
+            | "type_identifier"
+            | "field_identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
     ) {
         let ident = source[node.byte_range()].trim();
         if !is_noise_identifier(ident) {
@@ -386,7 +460,11 @@ fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String
     }
 }
 
-fn parse_source_file(abs_path: &Path, display_path: String, max_file_size: u64) -> Option<ParsedFile> {
+fn parse_source_file(
+    abs_path: &Path,
+    display_path: String,
+    max_file_size: u64,
+) -> Option<ParsedFile> {
     let lang = SupportedLang::from_path(abs_path)?;
     let len = fs::metadata(abs_path).ok()?.len();
     if len == 0 || len > max_file_size {
@@ -416,7 +494,9 @@ fn parse_source_file(abs_path: &Path, display_path: String, max_file_size: u64) 
 }
 
 fn clean_def_symbol_key(raw_name: &str) -> &str {
-    let base = raw_name.rsplit_once(" for ").map_or(raw_name, |(_, rhs)| rhs);
+    let base = raw_name
+        .rsplit_once(" for ")
+        .map_or(raw_name, |(_, rhs)| rhs);
     base.split('<').next().unwrap_or(base).trim()
 }
 
@@ -432,7 +512,10 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
         for def in &file.defs {
             let key = clean_def_symbol_key(&def.name);
             if !is_noise_identifier(key) && seen.insert(key.to_string()) {
-                symbol_definers.entry(key.to_string()).or_default().push(file_idx);
+                symbol_definers
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(file_idx);
             }
         }
     }
@@ -442,11 +525,15 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
 
     for src_idx in 0..n {
         for (ident, &count) in &files[src_idx].ident_counts {
-            let Some(definers) = symbol_definers.get(ident) else { continue };
+            let Some(definers) = symbol_definers.get(ident) else {
+                continue;
+            };
             let edge_delta = (count as f64).ln_1p() / (definers.len() as f64).sqrt();
             for &dst_idx in definers.iter().filter(|&&d| d != src_idx) {
                 *adj[src_idx].entry(dst_idx).or_insert(0.0) += edge_delta;
-                *cross_file_symbol_hits.entry((dst_idx, ident.clone())).or_insert(0) += count;
+                *cross_file_symbol_hits
+                    .entry((dst_idx, ident.clone()))
+                    .or_insert(0) += count;
             }
         }
     }
@@ -456,7 +543,10 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
 
     for (i, file) in files.iter().enumerate() {
         let p = file.display_path.as_str();
-        if ["main.rs", "lib.rs", "mod.rs", "index.ts", "__init__.py"].iter().any(|s| p.ends_with(s)) {
+        if ["main.rs", "lib.rs", "mod.rs", "index.ts", "__init__.py"]
+            .iter()
+            .any(|s| p.ends_with(s))
+        {
             personalization[i] += 0.5;
         }
         if !lower_focus.is_empty() {
@@ -505,7 +595,10 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
         file.pagerank = ranks[i];
         for def in &mut file.defs {
             let key = clean_def_symbol_key(&def.name);
-            let refs = cross_file_symbol_hits.get(&(i, key.to_string())).copied().unwrap_or(0);
+            let refs = cross_file_symbol_hits
+                .get(&(i, key.to_string()))
+                .copied()
+                .unwrap_or(0);
             def.cross_file_refs = refs;
 
             let kind_boost = match def.kind {
@@ -513,7 +606,10 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
                 "impl" | "mod" => 1.2,
                 _ => 1.0,
             };
-            let focus_boost = if lower_focus.iter().any(|q| def.name.to_ascii_lowercase().contains(q)) {
+            let focus_boost = if lower_focus
+                .iter()
+                .any(|q| def.name.to_ascii_lowercase().contains(q))
+            {
                 4.0
             } else {
                 1.0
@@ -540,9 +636,15 @@ pub fn execute(
         "target_path escapes workspace root",
     )?;
 
-    let include_set = (!args.include.is_empty()).then(|| build_globset(&args.include, true)).transpose()?;
+    let include_set = (!args.include.is_empty())
+        .then(|| build_globset(&args.include, true))
+        .transpose()?;
     let mut exclude_patterns: Vec<String> = [
-        "**/.git/**", "**/*.venv/**", "**/node_modules/**", "**/target/**", "**/.env*",
+        "**/.git/**",
+        "**/*.venv/**",
+        "**/node_modules/**",
+        "**/target/**",
+        "**/.env*",
     ]
     .map(String::from)
     .into();
@@ -553,7 +655,11 @@ pub fn execute(
     let mut parsed_files = Vec::new();
     if scan_root.is_file() {
         let rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
-        if let Some(pf) = parse_source_file(&scan_root, rel.to_string_lossy().into_owned(), settings.max_size) {
+        if let Some(pf) = parse_source_file(
+            &scan_root,
+            rel.to_string_lossy().into_owned(),
+            settings.max_size,
+        ) {
             parsed_files.push(pf);
         }
     } else {
@@ -572,18 +678,31 @@ pub fn execute(
             if !path.is_file() || SupportedLang::from_path(path).is_none() {
                 continue;
             }
-            let Some(relative) = diff_paths(path, &base_root) else { continue };
-            if exclude_set.is_match(&relative) || include_set.as_ref().is_some_and(|inc| !inc.is_match(&relative)) {
+            let Some(relative) = diff_paths(path, &base_root) else {
+                continue;
+            };
+            if exclude_set.is_match(&relative)
+                || include_set
+                    .as_ref()
+                    .is_some_and(|inc| !inc.is_match(&relative))
+            {
                 continue;
             }
-            if let Some(pf) = parse_source_file(path, relative.to_string_lossy().into_owned(), settings.max_size) {
+            if let Some(pf) = parse_source_file(
+                path,
+                relative.to_string_lossy().into_owned(),
+                settings.max_size,
+            ) {
                 parsed_files.push(pf);
             }
         }
     }
 
     if parsed_files.is_empty() {
-        return Ok("No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope.".into());
+        return Ok(
+            "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
+                .into(),
+        );
     }
 
     compute_pagerank_and_scores(&mut parsed_files, &args.focus_symbols);
@@ -612,7 +731,11 @@ pub fn execute(
                 .map(move |d| (f.display_path.as_str(), d))
         })
         .collect();
-    top_symbols.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
+    top_symbols.sort_by(|a, b| {
+        b.1.score
+            .partial_cmp(&a.1.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if !top_symbols.is_empty() {
         out.push_str("## Top Central Symbols (Cross-File Hotspots)\n\n");
@@ -645,11 +768,16 @@ pub fn execute(
             let _ = writeln!(block, "```{}", file.lang.code_fence_tag());
             for def in &file.defs {
                 let indent = "    ".repeat(def.depth);
-                if args.include_docs && let Some(doc) = &def.doc {
+                if args.include_docs
+                    && let Some(doc) = &def.doc
+                {
                     let _ = writeln!(block, "{indent}/// {doc}");
                 }
                 let ref_tag = if def.cross_file_refs > 0 {
-                    format!(" // [L{}-L{} | {} refs]", def.start_line, def.end_line, def.cross_file_refs)
+                    format!(
+                        " // [L{}-L{} | {} refs]",
+                        def.start_line, def.end_line, def.cross_file_refs
+                    )
                 } else {
                     format!(" // [L{}-L{}]", def.start_line, def.end_line)
                 };

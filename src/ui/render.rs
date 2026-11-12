@@ -258,7 +258,9 @@ fn style_table_row(line: &str, is_header: bool) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw("  ")];
     let border_style = Style::default().fg(Color::DarkGray);
     let cell_style = if is_header {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
     };
@@ -283,7 +285,11 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
                 .add_modifier(Modifier::ITALIC),
         )
     } else if trimmed.starts_with('#') {
-        Some(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Some(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if trimmed.starts_with(['┌', '├', '└']) {
         Some(Style::default().fg(Color::DarkGray))
     } else {
@@ -320,7 +326,9 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
                 Span::raw("  "),
                 Span::styled(
                     line.clone(),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]
         } else if in_code_block {
@@ -563,7 +571,10 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items).block(titled_block(format!(" Images ({}) ", self.attachments.len()))),
+            List::new(items).block(titled_block(format!(
+                " Images ({}) ",
+                self.attachments.len()
+            ))),
             chunks[1],
         );
     }
@@ -718,7 +729,10 @@ impl TuiApp {
         let title_line = Line::from(vec![
             Span::raw(format!(" Conversation [{}] ", self.model)),
             Span::styled(
-                format!("[Ctx: {} / {} ({pct:.0}%)] ", self.used_tokens, self.num_ctx),
+                format!(
+                    "[Ctx: {} / {} ({pct:.0}%)] ",
+                    self.used_tokens, self.num_ctx
+                ),
                 Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
             ),
         ]);

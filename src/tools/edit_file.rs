@@ -30,7 +30,11 @@ pub fn schema() -> Value {
 
 fn normalize_eol(s: &str, use_crlf: bool) -> String {
     let lf = s.replace("\r\n", "\n");
-    if use_crlf { lf.replace('\n', "\r\n") } else { lf }
+    if use_crlf {
+        lf.replace('\n', "\r\n")
+    } else {
+        lf
+    }
 }
 
 fn apply_single_hunk(
@@ -62,7 +66,9 @@ fn apply_single_hunk(
     match match_count {
         0 => bail!("{hunk_label}: exact search_string not found in {file_path}"),
         1 => Ok(content.replacen(effective_search.as_ref(), effective_replace.as_ref(), 1)),
-        n => bail!("{hunk_label}: search_string matched {n} times in {file_path}. Provide more surrounding context to make it unique."),
+        n => bail!(
+            "{hunk_label}: search_string matched {n} times in {file_path}. Provide more surrounding context to make it unique."
+        ),
     }
 }
 
@@ -78,8 +84,18 @@ pub fn apply_edits_from_value(json_args: &Value) -> Result<(PathBuf, String, Str
     let total = args.edits.len();
 
     for (idx, hunk) in args.edits.iter().enumerate() {
-        let label = if total == 1 { "Edit".into() } else { format!("Hunk {}/{total}", idx + 1) };
-        buf = apply_single_hunk(&buf, args.file_path.trim(), &hunk.search_string, &hunk.replace_string, &label)?;
+        let label = if total == 1 {
+            "Edit".into()
+        } else {
+            format!("Hunk {}/{total}", idx + 1)
+        };
+        buf = apply_single_hunk(
+            &buf,
+            args.file_path.trim(),
+            &hunk.search_string,
+            &hunk.replace_string,
+            &label,
+        )?;
     }
 
     Ok((target_path, original, buf, total))
@@ -89,8 +105,17 @@ pub fn fallback_hunk_preview(json_args: &Value) -> (String, String) {
     let Ok(args) = parse_args::<EditFileArgs>(json_args, "edit_file") else {
         return (String::new(), String::new());
     };
-    let join_field = |f: fn(&EditHunk) -> &str| args.edits.iter().map(f).collect::<Vec<_>>().join("\n// ---\n");
-    (join_field(|h| &h.search_string), join_field(|h| &h.replace_string))
+    let join_field = |f: fn(&EditHunk) -> &str| {
+        args.edits
+            .iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .join("\n// ---\n")
+    };
+    (
+        join_field(|h| &h.search_string),
+        join_field(|h| &h.replace_string),
+    )
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {

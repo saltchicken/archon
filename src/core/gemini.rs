@@ -52,7 +52,9 @@ fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) 
     }
     match val {
         Value::Object(obj) => {
-            if let Some(ref_str) = obj.remove("$ref").and_then(|v| v.as_str().map(String::from))
+            if let Some(ref_str) = obj
+                .remove("$ref")
+                .and_then(|v| v.as_str().map(String::from))
                 && let Some(name) = ref_str
                     .strip_prefix("#/$defs/")
                     .or_else(|| ref_str.strip_prefix("#/definitions/"))
@@ -127,7 +129,10 @@ fn sanitize_schema_node(val: &mut Value) {
                 obj.remove(k);
             }
 
-            if let Some(s) = obj.remove("const").and_then(|v| v.as_str().map(String::from)) {
+            if let Some(s) = obj
+                .remove("const")
+                .and_then(|v| v.as_str().map(String::from))
+            {
                 obj.insert("type".into(), json!("string"));
                 obj.insert("enum".into(), json!([s]));
             }

@@ -61,7 +61,11 @@ fn shrink_tilde(path: &Path) -> String {
         && let Ok(stripped) = canonical.strip_prefix(&home)
     {
         let s = stripped.to_string_lossy();
-        return if s.is_empty() { "~".into() } else { format!("~/{s}") };
+        return if s.is_empty() {
+            "~".into()
+        } else {
+            format!("~/{s}")
+        };
     }
     canonical.to_string_lossy().into_owned()
 }
@@ -109,11 +113,7 @@ fn read_to_outcome(
 }
 
 fn get_fence(content: &str) -> String {
-    let max_backticks = content
-        .split(|c| c != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
+    let max_backticks = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     "`".repeat(max_backticks.max(2) + 1)
 }
 
@@ -132,7 +132,11 @@ fn validate_extra_file(
     trusted_global_files: &HashSet<PathBuf>,
     config_dir: Option<&Path>,
 ) -> std::result::Result<PathBuf, String> {
-    let candidate = if expanded.is_relative() { base_root.join(expanded) } else { expanded.to_path_buf() };
+    let candidate = if expanded.is_relative() {
+        base_root.join(expanded)
+    } else {
+        expanded.to_path_buf()
+    };
     let canon = dunce::canonicalize(&candidate).unwrap_or(candidate);
 
     if trusted_global_files.contains(&canon)
@@ -144,7 +148,9 @@ fn validate_extra_file(
 
     if canon.starts_with(base_root) {
         if diff_paths(&canon, base_root).is_some_and(|rel| exclude_set.is_match(&rel)) {
-            return Err(format!("Security violation: '{raw_file}' matches an excluded pattern."));
+            return Err(format!(
+                "Security violation: '{raw_file}' matches an excluded pattern."
+            ));
         }
         return Ok(canon);
     }
@@ -166,7 +172,10 @@ pub fn execute(
         "target_path escapes workspace root",
     )?;
 
-    let workspace_name = base_root.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
+    let workspace_name = base_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
     let include_patterns = if !args.include.is_empty() {
         args.include
     } else if !settings.include.is_empty() {
@@ -176,7 +185,13 @@ pub fn execute(
     };
 
     let mut exclude_patterns: Vec<String> = [
-        "**/.git/**", "**/*.venv/**", "**/.env*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/secrets.json",
+        "**/.git/**",
+        "**/*.venv/**",
+        "**/.env*",
+        "**/*.pem",
+        "**/*.key",
+        "**/id_rsa*",
+        "**/secrets.json",
     ]
     .map(String::from)
     .into();
@@ -203,7 +218,8 @@ pub fn execute(
         if path == base_root || path.components().any(|c| c.as_os_str() == ".git") {
             continue;
         }
-        let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty()) else {
+        let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
+        else {
             continue;
         };
 
@@ -212,7 +228,9 @@ pub fn execute(
             continue;
         }
 
-        let Ok(metadata) = path.metadata() else { continue };
+        let Ok(metadata) = path.metadata() else {
+            continue;
+        };
         let is_dir = metadata.is_dir();
         let matches_include = include_set.is_match(&relative);
         if !is_dir && !matches_include && !matches_tree {
@@ -236,7 +254,11 @@ pub fn execute(
 
     for entry in &entries {
         let indent = "    ".repeat(entry.depth.saturating_sub(1));
-        let name = entry.path.file_name().and_then(|n| n.to_str()).unwrap_or(&entry.display_path);
+        let name = entry
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&entry.display_path);
         let marker = if entry.is_dir {
             "/"
         } else if !entry.include_content {
@@ -254,7 +276,12 @@ pub fn execute(
             let outcome = if entry.exceeds_size {
                 FileOutcome::Error("File exceeds maximum size limit.".into())
             } else {
-                read_to_outcome(&entry.path, entry.display_path.len(), &mut used_bytes, max_output_size)
+                read_to_outcome(
+                    &entry.path,
+                    entry.display_path.len(),
+                    &mut used_bytes,
+                    max_output_size,
+                )
             };
             files.push((entry.display_path.clone(), outcome));
         }
@@ -292,18 +319,28 @@ pub fn execute(
                     if !valid_path.exists() {
                         let _ = writeln!(tree_out, "{display_path} (not found)");
                         if !args.tree_only {
-                            files.push((display_path, FileOutcome::Error("File does not exist.".into())));
+                            files.push((
+                                display_path,
+                                FileOutcome::Error("File does not exist.".into()),
+                            ));
                         }
                     } else if valid_path.is_dir() {
                         let _ = writeln!(tree_out, "{display_path}/");
                     } else {
                         let _ = writeln!(tree_out, "{display_path}");
                         if !args.tree_only {
-                            let exceeds = valid_path.metadata().is_ok_and(|m| m.len() > settings.max_size);
+                            let exceeds = valid_path
+                                .metadata()
+                                .is_ok_and(|m| m.len() > settings.max_size);
                             let outcome = if exceeds {
                                 FileOutcome::Error("File exceeds maximum size limit.".into())
                             } else {
-                                read_to_outcome(&valid_path, display_path.len(), &mut used_bytes, max_output_size)
+                                read_to_outcome(
+                                    &valid_path,
+                                    display_path.len(),
+                                    &mut used_bytes,
+                                    max_output_size,
+                                )
                             };
                             files.push((display_path, outcome));
                         }
@@ -337,7 +374,10 @@ pub fn execute(
                     let _ = writeln!(out, "**Skipped:** {skip}\n");
                 }
                 FileOutcome::Content(content) => {
-                    let lang = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("text");
+                    let lang = Path::new(path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("text");
                     let fence = get_fence(content);
                     let _ = writeln!(out, "{fence}{lang}");
                     out.push_str(content);

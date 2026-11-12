@@ -66,7 +66,10 @@ fn is_forbidden_ip(ip: IpAddr) -> bool {
 
 async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
     if !matches!(url.scheme(), "http" | "https") {
-        bail!("Security violation: unsupported URL scheme '{}'. Only 'http' and 'https' are allowed.", url.scheme());
+        bail!(
+            "Security violation: unsupported URL scheme '{}'. Only 'http' and 'https' are allowed.",
+            url.scheme()
+        );
     }
     let Some(host_str) = url.host_str() else {
         bail!("Invalid URL: missing host");
@@ -74,7 +77,9 @@ async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
 
     let lower = host_str.trim_end_matches('.').to_ascii_lowercase();
     if lower == "localhost"
-        || [".localhost", ".local", ".internal", ".home.arpa"].iter().any(|s| lower.ends_with(s))
+        || [".localhost", ".local", ".internal", ".home.arpa"]
+            .iter()
+            .any(|s| lower.ends_with(s))
     {
         bail!("Security violation: access to local/internal host '{host_str}' is blocked");
     }
@@ -96,7 +101,10 @@ async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
         bail!("DNS resolution returned no addresses for '{host_str}'");
     }
     if let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip())) {
-        bail!("Security violation: host '{host_str}' resolved to private/reserved IP '{}'", addr.ip());
+        bail!(
+            "Security violation: host '{host_str}' resolved to private/reserved IP '{}'",
+            addr.ip()
+        );
     }
 
     Ok(resolved)
@@ -108,7 +116,10 @@ fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<Client> {
         .redirect(Policy::none())
         .user_agent("archon/0.3 (+https://github.com/archon)");
 
-    if let Some(host) = url.host_str().filter(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().is_err()) {
+    if let Some(host) = url
+        .host_str()
+        .filter(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().is_err())
+    {
         builder = builder.resolve_to_addrs(host, addrs);
     }
     Ok(builder.build()?)
@@ -120,7 +131,9 @@ fn remove_tag_blocks(mut html: String, tag: &str) -> String {
 
     loop {
         let lower = html.to_ascii_lowercase();
-        let Some(start) = lower.find(&open_pat) else { break };
+        let Some(start) = lower.find(&open_pat) else {
+            break;
+        };
         let after_open = html[start + open_pat.len()..].chars().next();
         if !matches!(after_open, Some(c) if c.is_ascii_whitespace() || c == '>' || c == '/') {
             break;
@@ -163,13 +176,18 @@ fn decode_entities(s: &str) -> String {
         ("\x26rarr;", "->"),
         ("\x26larr;", "<-"),
     ];
-    ENTITIES.iter().fold(s.to_string(), |acc, (k, v)| acc.replace(k, v))
+    ENTITIES
+        .iter()
+        .fold(s.to_string(), |acc, (k, v)| acc.replace(k, v))
 }
 
 fn html_to_text(raw_html: &str) -> String {
     let cleaned = ["script", "style", "svg", "noscript", "head"]
         .into_iter()
-        .fold(remove_html_comments(raw_html.to_string()), remove_tag_blocks);
+        .fold(
+            remove_html_comments(raw_html.to_string()),
+            remove_tag_blocks,
+        );
 
     let mut out = String::with_capacity(cleaned.len() / 2);
     let mut in_tag = false;
@@ -183,9 +201,27 @@ fn html_to_text(raw_html: &str) -> String {
                 let t = tag_name.trim_start_matches('/').to_ascii_lowercase();
                 if matches!(
                     t.as_str(),
-                    "p" | "div" | "br" | "hr" | "tr" | "li" | "ul" | "ol" | "h1" | "h2" | "h3"
-                        | "h4" | "h5" | "h6" | "pre" | "blockquote" | "section" | "article"
-                        | "header" | "footer" | "main" | "table"
+                    "p" | "div"
+                        | "br"
+                        | "hr"
+                        | "tr"
+                        | "li"
+                        | "ul"
+                        | "ol"
+                        | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "pre"
+                        | "blockquote"
+                        | "section"
+                        | "article"
+                        | "header"
+                        | "footer"
+                        | "main"
+                        | "table"
                 ) {
                     out.push('\n');
                     if t == "li" && !tag_name.starts_with('/') {
@@ -243,7 +279,10 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
 
         let r = client
             .get(target_url.clone())
-            .header("Accept", "text/markdown, text/plain, application/json, text/html;q=0.9, */*;q=0.5")
+            .header(
+                "Accept",
+                "text/markdown, text/plain, application/json, text/html;q=0.9, */*;q=0.5",
+            )
             .send()
             .await
             .with_context(|| format!("HTTP request failed for '{target_url}'"))?;
@@ -255,10 +294,17 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             let loc = r
                 .headers()
                 .get(reqwest::header::LOCATION)
-                .with_context(|| format!("Redirect response (HTTP {}) missing Location header", r.status()))?
+                .with_context(|| {
+                    format!(
+                        "Redirect response (HTTP {}) missing Location header",
+                        r.status()
+                    )
+                })?
                 .to_str()
                 .context("Invalid non-ASCII Location redirect header")?;
-            target_url = target_url.join(loc).with_context(|| format!("Failed to resolve redirect URL '{loc}'"))?;
+            target_url = target_url
+                .join(loc)
+                .with_context(|| format!("Failed to resolve redirect URL '{loc}'"))?;
             continue;
         }
 
@@ -275,8 +321,13 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
         .unwrap_or("unknown")
         .to_ascii_lowercase();
 
-    if ["image/", "audio/", "video/"].iter().any(|p| content_type.starts_with(p))
-        || matches!(content_type.as_str(), "application/octet-stream" | "application/pdf" | "application/zip")
+    if ["image/", "audio/", "video/"]
+        .iter()
+        .any(|p| content_type.starts_with(p))
+        || matches!(
+            content_type.as_str(),
+            "application/octet-stream" | "application/pdf" | "application/zip"
+        )
     {
         bail!("Refusing to fetch binary content-type '{content_type}' from {target_url}");
     }
@@ -314,7 +365,10 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
     };
 
     if !status.is_success() {
-        bail!("HTTP {status} from {target_url}:\n{}", formatted_body.trim());
+        bail!(
+            "HTTP {status} from {target_url}:\n{}",
+            formatted_body.trim()
+        );
     }
 
     Ok(format!(

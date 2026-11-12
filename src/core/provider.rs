@@ -39,7 +39,10 @@ pub async fn open_line_stream(
 
     info!("Stream connection established successfully.");
     let byte_stream = resp.bytes_stream().map_err(io::Error::other);
-    Some(FramedRead::new(StreamReader::new(byte_stream), LinesCodec::new()))
+    Some(FramedRead::new(
+        StreamReader::new(byte_stream),
+        LinesCodec::new(),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +126,8 @@ impl Provider {
                     return;
                 };
                 let payload = gemini::build_payload(&messages, &turn.system_prompt, tools_schema);
-                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx).await;
+                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
+                    .await;
             }
         }
     }

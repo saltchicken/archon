@@ -64,7 +64,11 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
     Ok(Some(trimmed))
 }
 
-fn push_target_filters(cmd_args: &mut Vec<String>, args: &CargoArgs, allow_bin: bool) -> Result<()> {
+fn push_target_filters(
+    cmd_args: &mut Vec<String>,
+    args: &CargoArgs,
+    allow_bin: bool,
+) -> Result<()> {
     if let Some(pkg) = validate_identifier(&args.package, "package")? {
         cmd_args.extend(["--package".into(), pkg.into()]);
     }
@@ -76,30 +80,51 @@ fn push_target_filters(cmd_args: &mut Vec<String>, args: &CargoArgs, allow_bin: 
 
 pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     let args: CargoArgs = parse_args(json_args, "cargo")?;
-    let (base_flags, allow_targets, allow_bin, empty_msg): (&[&str], bool, bool, &str) = match args.action {
-        CargoAction::Check => (
-            &["check", "--locked", "--all-targets", "--color", "never"],
-            true, true, "cargo check passed with no warnings or errors.",
-        ),
-        CargoAction::Clippy => (
-            &["clippy", "--locked", "--all-targets", "--color", "never"],
-            true, true, "cargo clippy passed with no warnings or errors.",
-        ),
-        CargoAction::Test => (
-            &["test", "--locked", "--color", "never"],
-            true, true, "cargo test completed successfully.",
-        ),
-        CargoAction::FmtCheck => (&["fmt", "--all", "--check"], false, false, "All files are properly formatted."),
-        CargoAction::Fmt => (&["fmt", "--all"], false, false, "Formatted all workspace packages."),
-        CargoAction::Doc => (
-            &["doc", "--locked", "--no-deps", "--color", "never"],
-            true, false, "Documentation built successfully with no warnings or errors.",
-        ),
-        CargoAction::Metadata => (
-            &["metadata", "--locked", "--no-deps", "--format-version", "1"],
-            false, false, "No metadata output.",
-        ),
-    };
+    let (base_flags, allow_targets, allow_bin, empty_msg): (&[&str], bool, bool, &str) =
+        match args.action {
+            CargoAction::Check => (
+                &["check", "--locked", "--all-targets", "--color", "never"],
+                true,
+                true,
+                "cargo check passed with no warnings or errors.",
+            ),
+            CargoAction::Clippy => (
+                &["clippy", "--locked", "--all-targets", "--color", "never"],
+                true,
+                true,
+                "cargo clippy passed with no warnings or errors.",
+            ),
+            CargoAction::Test => (
+                &["test", "--locked", "--color", "never"],
+                true,
+                true,
+                "cargo test completed successfully.",
+            ),
+            CargoAction::FmtCheck => (
+                &["fmt", "--all", "--check"],
+                false,
+                false,
+                "All files are properly formatted.",
+            ),
+            CargoAction::Fmt => (
+                &["fmt", "--all"],
+                false,
+                false,
+                "Formatted all workspace packages.",
+            ),
+            CargoAction::Doc => (
+                &["doc", "--locked", "--no-deps", "--color", "never"],
+                true,
+                false,
+                "Documentation built successfully with no warnings or errors.",
+            ),
+            CargoAction::Metadata => (
+                &["metadata", "--locked", "--no-deps", "--format-version", "1"],
+                false,
+                false,
+                "No metadata output.",
+            ),
+        };
 
     let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
     if allow_targets {
@@ -118,5 +143,12 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
         }
     }
 
-    run_workspace_command_with_timeout("cargo", &cmd_args, empty_msg, max_output_size, CARGO_TIMEOUT_SECS).await
+    run_workspace_command_with_timeout(
+        "cargo",
+        &cmd_args,
+        empty_msg,
+        max_output_size,
+        CARGO_TIMEOUT_SECS,
+    )
+    .await
 }

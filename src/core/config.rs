@@ -19,19 +19,24 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 /// Loads `.env` from the current directory into process environment variables
 /// without overwriting variables already set in the shell environment.
 pub fn load_dotenv(path: impl AsRef<Path>) {
-    let Ok(content) = fs::read_to_string(path) else { return };
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
     for line in content.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let line = line.strip_prefix("export ").unwrap_or(line).trim();
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         if k.is_empty() || std::env::var_os(k).is_some() {
             continue;
         }
         let unquoted = v
-            .strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
             .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
             .unwrap_or(v);
         unsafe { std::env::set_var(k, unquoted) };
@@ -120,9 +125,20 @@ impl Default for AppSettings {
                 .map(String::from)
                 .into(),
             auto_approve: [
-                "read_file", "search", "repo_map", "workspace_snapshot", "fs:list",
-                "git:status", "git:diff", "git:log", "git:show", "git:blame",
-                "cargo:check", "cargo:clippy", "cargo:fmt_check", "cargo:metadata",
+                "read_file",
+                "search",
+                "repo_map",
+                "workspace_snapshot",
+                "fs:list",
+                "git:status",
+                "git:diff",
+                "git:log",
+                "git:show",
+                "git:blame",
+                "cargo:check",
+                "cargo:clippy",
+                "cargo:fmt_check",
+                "cargo:metadata",
             ]
             .map(String::from)
             .into(),
@@ -135,7 +151,9 @@ impl Default for WorkspaceSnapshotSettings {
         Self {
             git_root: true,
             include: vec!["**/*".into()],
-            exclude: ["target/**", "node_modules/**", "Cargo.lock"].map(String::from).into(),
+            exclude: ["target/**", "node_modules/**", "Cargo.lock"]
+                .map(String::from)
+                .into(),
             include_in_tree: vec!["Cargo.lock".into()],
             file: Vec::new(),
             global_files: Vec::new(),
@@ -147,7 +165,10 @@ impl Default for WorkspaceSnapshotSettings {
 
 impl Default for Config {
     fn default() -> Self {
-        let preset = |name: &str, prompt: &str| Preset { name: name.into(), prompt: prompt.into() };
+        let preset = |name: &str, prompt: &str| Preset {
+            name: name.into(),
+            prompt: prompt.into(),
+        };
         Self {
             app: AppSettings::default(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
@@ -164,8 +185,16 @@ impl Default for Config {
                 status_timeout: 5,
             },
             models: vec![
-                ModelPreset { name: "qwen3.8:27b".into(), context: 32768, max_tool_output_size: 131_072 },
-                ModelPreset { name: "gemini-3.8-flash".into(), context: 1_048_576, max_tool_output_size: 524_288 },
+                ModelPreset {
+                    name: "qwen3.8:27b".into(),
+                    context: 32768,
+                    max_tool_output_size: 131_072,
+                },
+                ModelPreset {
+                    name: "gemini-3.8-flash".into(),
+                    context: 1_048_576,
+                    max_tool_output_size: 524_288,
+                },
             ],
             presets: vec![
                 preset("Custom", ""),
@@ -201,7 +230,9 @@ impl Config {
         if !def.is_empty() {
             return def.to_string();
         }
-        self.models.first().map_or_else(|| "qwen3.8:27b".into(), |m| m.name.clone())
+        self.models
+            .first()
+            .map_or_else(|| "qwen3.8:27b".into(), |m| m.name.clone())
     }
 
     pub fn context_for_model(&self, model: &str) -> u32 {
@@ -223,7 +254,10 @@ impl Config {
             .max(1024)
     }
 
-    pub fn load(base_path: impl AsRef<Path>, local_path: impl AsRef<Path>) -> (Self, Option<String>) {
+    pub fn load(
+        base_path: impl AsRef<Path>,
+        local_path: impl AsRef<Path>,
+    ) -> (Self, Option<String>) {
         let base_path = base_path.as_ref();
         if !base_path.exists() {
             if let Some(parent) = base_path.parent() {
@@ -234,7 +268,8 @@ impl Config {
             }
         }
 
-        let base_figment = Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
+        let base_figment =
+            Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
         let global_files = base_figment
             .clone()
             .extract::<Self>()
@@ -250,7 +285,10 @@ impl Config {
                 cfg.workspace_snapshot.global_files = global_files;
                 (cfg, None)
             }
-            Err(e) => (Self::default(), Some(format!("Config error (using defaults): {e}"))),
+            Err(e) => (
+                Self::default(),
+                Some(format!("Config error (using defaults): {e}")),
+            ),
         }
     }
 }

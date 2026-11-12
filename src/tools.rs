@@ -59,9 +59,11 @@ pub fn call_signature(call: &ToolCall) -> String {
             .unwrap_or("")
             .trim()
             .to_string(),
-        "execute_command" => shlex::split(args.get("command").and_then(Value::as_str).unwrap_or(""))
-            .and_then(|parts| parts.into_iter().next())
-            .unwrap_or_default(),
+        "execute_command" => {
+            shlex::split(args.get("command").and_then(Value::as_str).unwrap_or(""))
+                .and_then(|parts| parts.into_iter().next())
+                .unwrap_or_default()
+        }
         _ => String::new(),
     };
 
@@ -509,8 +511,14 @@ where
         .with_context(|| format!("Error executing {program}"))?;
 
     let cap = (max_output_size as u64).saturating_add(1);
-    let stdout = child.stdout.take().context("Failed to capture child stdout")?;
-    let stderr = child.stderr.take().context("Failed to capture child stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture child stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture child stderr")?;
 
     let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(timeout_secs), async {
         let (r1, r2, status) = tokio::join!(
@@ -525,10 +533,7 @@ where
     .with_context(|| format!("Error reading output from {program}"))?;
 
     Ok(format_process_bytes(
-        &out_bytes,
-        &err_bytes,
-        status,
-        empty_msg,
+        &out_bytes, &err_bytes, status, empty_msg,
     ))
 }
 

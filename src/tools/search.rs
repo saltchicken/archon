@@ -74,8 +74,14 @@ pub fn execute(
         bail!("'pattern' cannot be empty");
     }
 
-    let case_sensitive = args.case_sensitive.unwrap_or_else(|| args.pattern.chars().any(char::is_uppercase));
-    let base_pattern = if args.fixed_strings { regex::escape(&args.pattern) } else { args.pattern.clone() };
+    let case_sensitive = args
+        .case_sensitive
+        .unwrap_or_else(|| args.pattern.chars().any(char::is_uppercase));
+    let base_pattern = if args.fixed_strings {
+        regex::escape(&args.pattern)
+    } else {
+        args.pattern.clone()
+    };
     let effective_pattern = if args.definitions_only {
         build_definition_regex(&base_pattern)
     } else {
@@ -89,11 +95,20 @@ pub fn execute(
 
     let context_radius = args.context_lines.unwrap_or(0).min(5);
     let max_results = args.max_results.unwrap_or(100).clamp(1, 500);
-    let (base_root, scan_root) = resolve_scan_roots(settings.git_root, &args.path, "path escapes workspace root")?;
+    let (base_root, scan_root) =
+        resolve_scan_roots(settings.git_root, &args.path, "path escapes workspace root")?;
 
-    let include_set = (!args.include.is_empty()).then(|| build_globset(&args.include, true)).transpose()?;
+    let include_set = (!args.include.is_empty())
+        .then(|| build_globset(&args.include, true))
+        .transpose()?;
     let mut exclude_patterns: Vec<String> = [
-        "**/.git/**", "**/*.venv/**", "**/.env*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/secrets.json",
+        "**/.git/**",
+        "**/*.venv/**",
+        "**/.env*",
+        "**/*.pem",
+        "**/*.key",
+        "**/id_rsa*",
+        "**/secrets.json",
     ]
     .map(String::from)
     .into();
@@ -105,7 +120,10 @@ pub fn execute(
     if scan_root.is_file() {
         let rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
         if exclude_set.is_match(&rel) {
-            bail!("Security violation: '{}' matches an excluded pattern", rel.display());
+            bail!(
+                "Security violation: '{}' matches an excluded pattern",
+                rel.display()
+            );
         }
         candidate_files.push((scan_root, rel.to_string_lossy().into_owned()));
     } else {
@@ -124,8 +142,14 @@ pub fn execute(
             if !path.is_file() || path.components().any(|c| c.as_os_str() == ".git") {
                 continue;
             }
-            let Some(relative) = diff_paths(path, &base_root) else { continue };
-            if exclude_set.is_match(&relative) || include_set.as_ref().is_some_and(|inc| !inc.is_match(&relative)) {
+            let Some(relative) = diff_paths(path, &base_root) else {
+                continue;
+            };
+            if exclude_set.is_match(&relative)
+                || include_set
+                    .as_ref()
+                    .is_some_and(|inc| !inc.is_match(&relative))
+            {
                 continue;
             }
             candidate_files.push((path.to_path_buf(), relative.to_string_lossy().into_owned()));
@@ -133,14 +157,20 @@ pub fn execute(
         candidate_files.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
-    let mode_note = if args.definitions_only { " (definitions_only: true)" } else { "" };
+    let mode_note = if args.definitions_only {
+        " (definitions_only: true)"
+    } else {
+        ""
+    };
 
     if args.files_with_matches {
         let mut file_hits: Vec<(String, usize, usize)> = Vec::new();
         let mut total_matches = 0usize;
 
         for (abs_path, display_path) in candidate_files {
-            let Some(content) = read_utf8_capped(&abs_path, settings.max_size) else { continue };
+            let Some(content) = read_utf8_capped(&abs_path, settings.max_size) else {
+                continue;
+            };
             let mut count = 0usize;
             let mut first_line = 0usize;
             for (idx, line) in content.lines().enumerate() {
@@ -158,7 +188,10 @@ pub fn execute(
         }
 
         if file_hits.is_empty() {
-            return Ok(format!("No matches found for pattern '{}'{mode_note}.", args.pattern));
+            return Ok(format!(
+                "No matches found for pattern '{}'{mode_note}.",
+                args.pattern
+            ));
         }
 
         file_hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -168,14 +201,24 @@ pub fn execute(
 
         for (display_path, count, first_line) in file_hits.into_iter().take(max_results) {
             let plural = if count == 1 { "match" } else { "matches" };
-            let _ = writeln!(out, "{display_path} ({count} {plural}, first at L{first_line})");
+            let _ = writeln!(
+                out,
+                "{display_path} ({count} {plural}, first at L{first_line})"
+            );
             if out.len() > max_output_size {
                 break;
             }
         }
 
-        let suffix = if hit_limit { format!(" — showing top {max_results} files") } else { String::new() };
-        let _ = write!(out, "\n[Found {total_matches} match(es) across {total_matched_files} file(s){suffix}]");
+        let suffix = if hit_limit {
+            format!(" — showing top {max_results} files")
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            out,
+            "\n[Found {total_matches} match(es) across {total_matched_files} file(s){suffix}]"
+        );
         return Ok(out);
     }
 
@@ -188,7 +231,9 @@ pub fn execute(
         if hit_limit {
             break;
         }
-        let Some(content) = read_utf8_capped(&abs_path, settings.max_size) else { continue };
+        let Some(content) = read_utf8_capped(&abs_path, settings.max_size) else {
+            continue;
+        };
         let lines: Vec<&str> = content.lines().collect();
         let mut match_indices = Vec::new();
 
@@ -215,7 +260,12 @@ pub fn execute(
 
         if context_radius == 0 {
             for &idx in &match_indices {
-                let _ = writeln!(out, "{:>4}: {}", idx + 1, truncate_long_line(lines[idx], 300));
+                let _ = writeln!(
+                    out,
+                    "{:>4}: {}",
+                    idx + 1,
+                    truncate_long_line(lines[idx], 300)
+                );
                 if out.len() > max_output_size {
                     hit_limit = true;
                     break;
@@ -238,8 +288,17 @@ pub fn execute(
                     let _ = writeln!(out, "  --");
                 }
                 for idx in start..=end {
-                    let sep = if match_indices.binary_search(&idx).is_ok() { ':' } else { '-' };
-                    let _ = writeln!(out, "{:>4}{sep} {}", idx + 1, truncate_long_line(lines[idx], 300));
+                    let sep = if match_indices.binary_search(&idx).is_ok() {
+                        ':'
+                    } else {
+                        '-'
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{:>4}{sep} {}",
+                        idx + 1,
+                        truncate_long_line(lines[idx], 300)
+                    );
                 }
                 if out.len() > max_output_size {
                     hit_limit = true;
@@ -250,10 +309,20 @@ pub fn execute(
     }
 
     if total_matches == 0 {
-        return Ok(format!("No matches found for pattern '{}'{mode_note}.", args.pattern));
+        return Ok(format!(
+            "No matches found for pattern '{}'{mode_note}.",
+            args.pattern
+        ));
     }
 
-    let suffix = if hit_limit { format!(" — stopped at limit ({max_results})") } else { String::new() };
-    let _ = write!(out, "\n[Found {total_matches} match(es) across {matched_files} file(s){suffix}]");
+    let suffix = if hit_limit {
+        format!(" — stopped at limit ({max_results})")
+    } else {
+        String::new()
+    };
+    let _ = write!(
+        out,
+        "\n[Found {total_matches} match(es) across {matched_files} file(s){suffix}]"
+    );
     Ok(out)
 }
