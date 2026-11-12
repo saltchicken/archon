@@ -1,9 +1,46 @@
-use crate::core::{EngineEvent, TurnConfig, config::Config, gemini, ollama, session::ChatMessage};
+use crate::core::{
+    EngineEvent, TurnConfig,
+    config::{Config, EndpointSettings},
+    gemini, ollama,
+    session::ChatMessage,
+};
 use anyhow::Result;
-use reqwest::Client;
+use futures_util::{Stream, TryStreamExt};
+use reqwest::{Client, RequestBuilder};
 use serde_json::Value;
-use std::time::Duration;
+use std::{io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::{
+    codec::{FramedRead, LinesCodec, LinesCodecError},
+    io::StreamReader,
+};
+use tracing::{error, info};
+
+pub async fn open_line_stream(
+    req: RequestBuilder,
+    tx: &UnboundedSender<EngineEvent>,
+) -> Option<impl Stream<Item = std::result::Result<String, LinesCodecError>> + Unpin> {
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!("HTTP Request failed: {e}");
+            let _ = tx.send(EngineEvent::StreamError(format!("Request failed: {e}")));
+            return None;
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        error!("API returned error status {status}: {text}");
+        let _ = tx.send(EngineEvent::StreamError(format!("HTTP {status}: {text}")));
+        return None;
+    }
+
+    info!("Stream connection established successfully.");
+    let byte_stream = resp.bytes_stream().map_err(io::Error::other);
+    Some(FramedRead::new(StreamReader::new(byte_stream), LinesCodec::new()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -21,28 +58,21 @@ impl Provider {
         }
     }
 
-    pub fn timeouts(&self, config: &Config) -> (Duration, Duration) {
+    pub fn endpoint<'a>(&self, config: &'a Config) -> &'a EndpointSettings {
         match self {
-            Self::Ollama => (
-                Duration::from_secs(config.ollama.status_timeout.max(5)),
-                Duration::from_secs(config.ollama.chat_timeout),
-            ),
-            Self::Gemini => (
-                Duration::from_secs(config.gemini.status_timeout.max(5)),
-                Duration::from_secs(config.gemini.chat_timeout),
-            ),
+            Self::Ollama => &config.ollama,
+            Self::Gemini => &config.gemini,
         }
     }
 
     pub fn build_client(&self, config: &Config) -> Result<Client> {
-        let (connect_timeout, read_timeout) = self.timeouts(config);
+        let ep = self.endpoint(config);
         Ok(Client::builder()
-            .connect_timeout(connect_timeout)
-            .read_timeout(read_timeout)
+            .connect_timeout(Duration::from_secs(ep.status_timeout.max(5)))
+            .read_timeout(Duration::from_secs(ep.chat_timeout))
             .build()?)
     }
 
-    /// Fallback context window if a model passed via CLI is not listed in `[[models]]`.
     pub fn fallback_ctx(&self) -> u32 {
         match self {
             Self::Ollama => 32_768,
@@ -50,7 +80,6 @@ impl Provider {
         }
     }
 
-    /// Fallback max tool output size if a model passed via CLI is not listed in `[[models]]`.
     pub fn fallback_max_tool_output(&self) -> usize {
         match self {
             Self::Ollama => 131_072,
@@ -94,8 +123,7 @@ impl Provider {
                     return;
                 };
                 let payload = gemini::build_payload(&messages, &turn.system_prompt, tools_schema);
-                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
-                    .await;
+                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx).await;
             }
         }
     }

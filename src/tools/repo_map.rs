@@ -1,9 +1,8 @@
 use crate::{
-    core::config::WorkspaceSnapshotSettings,
-    tools::{auto_schema, parse_args, validate_relative_path, workspace_root},
+    core::{config::WorkspaceSnapshotSettings, session::truncate_str},
+    tools::{auto_schema, build_globset, parse_args, resolve_scan_roots},
 };
-use anyhow::{Context, Result, bail};
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use anyhow::Result;
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
@@ -13,7 +12,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
 };
 use tree_sitter::{Language, Node, Parser};
 
@@ -64,8 +63,7 @@ enum SupportedLang {
 
 impl SupportedLang {
     fn from_path(path: &Path) -> Option<Self> {
-        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-        match ext.as_str() {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "rs" => Some(Self::Rust),
             "ts" | "js" | "mjs" | "cjs" => Some(Self::TypeScript),
             "tsx" | "jsx" => Some(Self::Tsx),
@@ -118,74 +116,16 @@ struct ParsedFile {
     pagerank: f64,
 }
 
-fn find_git_root(start_path: &Path) -> Option<PathBuf> {
-    start_path
-        .ancestors()
-        .find(|a| a.join(".git").exists())
-        .map(Path::to_path_buf)
-}
-
-fn build_globset(patterns: &[String]) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pat in patterns {
-        if pat.contains('/') || pat.contains('\\') {
-            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
-        } else {
-            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
-            let recursive = format!("**/{pat}");
-            builder.add(
-                Glob::new(&recursive)
-                    .with_context(|| format!("Invalid glob pattern: {recursive}"))?,
-            );
-        }
-    }
-    Ok(builder.build()?)
-}
-
 fn is_noise_identifier(name: &str) -> bool {
-    if name.len() < 2 {
-        return true;
-    }
-    matches!(
-        name,
-        "self"
-            | "Self"
-            | "super"
-            | "crate"
-            | "new"
-            | "default"
-            | "from"
-            | "into"
-            | "clone"
-            | "iter"
-            | "next"
-            | "len"
-            | "is_empty"
-            | "push"
-            | "get"
-            | "set"
-            | "fmt"
-            | "Result"
-            | "Option"
-            | "Some"
-            | "None"
-            | "Ok"
-            | "Err"
-            | "String"
-            | "Vec"
-            | "Box"
-            | "Arc"
-            | "Path"
-            | "PathBuf"
-            | "Value"
-            | "Error"
-            | "Context"
-            | "true"
-            | "false"
-            | "main"
-            | "init"
-            | "test"
-    )
+    name.len() < 2
+        || matches!(
+            name,
+            "self" | "Self" | "super" | "crate" | "new" | "default" | "from" | "into" | "clone"
+                | "iter" | "next" | "len" | "is_empty" | "push" | "get" | "set" | "fmt" | "Result"
+                | "Option" | "Some" | "None" | "Ok" | "Err" | "String" | "Vec" | "Box" | "Arc"
+                | "Path" | "PathBuf" | "Value" | "Error" | "Context" | "true" | "false" | "main"
+                | "init" | "test"
+        )
 }
 
 fn collapse_whitespace(s: &str) -> String {
@@ -199,62 +139,33 @@ fn extract_leading_docs(node: Node<'_>, source: &str) -> Option<String> {
 
     while let Some(sib) = cur {
         let kind = sib.kind();
-        let sib_end_row = sib.end_position().row;
-        let sib_start_row = sib.start_position().row;
-
-        if expected_end_row.saturating_sub(sib_end_row) > 1 {
+        if expected_end_row.saturating_sub(sib.end_position().row) > 1 {
             break;
         }
-
-        if matches!(
-            kind,
-            "attribute_item" | "inner_attribute_item" | "decorator"
-        ) {
-            expected_end_row = sib_start_row;
+        if matches!(kind, "attribute_item" | "inner_attribute_item" | "decorator") {
+            expected_end_row = sib.start_position().row;
             cur = sib.prev_sibling();
             continue;
         }
-
-        if kind.contains("comment") {
-            let raw = &source[sib.byte_range()];
-            for line in raw.lines().rev() {
-                let t = line.trim();
-                let cleaned = t
-                    .strip_prefix("///")
-                    .or_else(|| t.strip_prefix("//!"))
-                    .or_else(|| t.strip_prefix("//"))
-                    .or_else(|| t.strip_prefix('#'))
-                    .or_else(|| t.strip_prefix("/**"))
-                    .or_else(|| t.strip_prefix("/*"))
-                    .or_else(|| t.strip_prefix('*'))
-                    .map(|s| s.trim_end_matches("*/").trim());
-
-                if let Some(c) = cleaned
-                    && !c.is_empty()
-                {
-                    docs.push(c.to_string());
-                }
-            }
-            expected_end_row = sib_start_row;
-            cur = sib.prev_sibling();
-        } else {
+        if !kind.contains("comment") {
             break;
         }
+
+        for line in source[sib.byte_range()].lines().rev().map(str::trim) {
+            let cleaned = ["///", "//!", "//", "#", "/**", "/*", "*"]
+                .iter()
+                .find_map(|p| line.strip_prefix(p))
+                .map(|s| s.trim_end_matches("*/").trim())
+                .filter(|c| !c.is_empty());
+            if let Some(c) = cleaned {
+                docs.push(c.to_string());
+            }
+        }
+        expected_end_row = sib.start_position().row;
+        cur = sib.prev_sibling();
     }
 
-    if docs.is_empty() {
-        return None;
-    }
-    docs.reverse();
-    let summary = docs.first()?.clone();
-    Some(if summary.len() > 140 {
-        match summary.char_indices().nth(140) {
-            Some((idx, _)) => format!("{}...", &summary[..idx]),
-            None => summary,
-        }
-    } else {
-        summary
-    })
+    docs.last().map(|s| truncate_str(s, 140))
 }
 
 fn extract_python_docstring(node: Node<'_>, source: &str) -> Option<String> {
@@ -262,16 +173,14 @@ fn extract_python_docstring(node: Node<'_>, source: &str) -> Option<String> {
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
         if child.kind() == "expression_statement"
-            && let Some(first) = child.named_child(0)
-            && first.kind() == "string"
+            && let Some(first) = child.named_child(0).filter(|n| n.kind() == "string")
         {
-            let raw = &source[first.byte_range()];
-            let trimmed = raw
-                .trim_matches(|c| c == '"' || c == '\'')
+            let line = source[first.byte_range()]
+                .trim_matches(['"', '\''])
                 .lines()
                 .map(str::trim)
                 .find(|l| !l.is_empty())?;
-            return Some(trimmed.chars().take(140).collect());
+            return Some(line.chars().take(140).collect());
         }
         if !child.kind().contains("comment") {
             break;
@@ -281,41 +190,22 @@ fn extract_python_docstring(node: Node<'_>, source: &str) -> Option<String> {
 }
 
 fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
+    let is_short_rust_adt = lang == SupportedLang::Rust
+        && matches!(node.kind(), "struct_item" | "enum_item")
+        && node.end_position().row.saturating_sub(node.start_position().row) <= 10;
+
     if let Some(body) = node.child_by_field_name("body") {
-        // For Rust structs/enums/type aliases that are short, keep compact signatures
-        if lang == SupportedLang::Rust
-            && matches!(node.kind(), "struct_item" | "enum_item")
-            && node
-                .end_position()
-                .row
-                .saturating_sub(node.start_position().row)
-                <= 10
-        {
-            return None;
-        }
-        return Some(body.start_byte());
+        return (!is_short_rust_adt).then(|| body.start_byte());
     }
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if matches!(
             child.kind(),
-            "block"
-                | "statement_block"
-                | "class_body"
-                | "interface_body"
-                | "declaration_list"
-                | "field_declaration_list"
-                | "enum_variant_list"
+            "block" | "statement_block" | "class_body" | "interface_body"
+                | "declaration_list" | "field_declaration_list" | "enum_variant_list"
         ) {
-            if lang == SupportedLang::Rust
-                && matches!(child.kind(), "field_declaration_list" | "enum_variant_list")
-                && node
-                    .end_position()
-                    .row
-                    .saturating_sub(node.start_position().row)
-                    <= 10
-            {
+            if is_short_rust_adt && matches!(child.kind(), "field_declaration_list" | "enum_variant_list") {
                 return None;
             }
             return Some(child.start_byte());
@@ -333,75 +223,58 @@ fn format_node_signature(node: Node<'_>, source: &str, lang: SupportedLang) -> S
         && matches!(node.kind(), "struct_item" | "enum_item")
         && end == node.end_byte()
     {
-        let lines: Vec<String> = slice
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.starts_with("//") && !l.starts_with('#'))
-            .map(String::from)
-            .collect();
-        let joined = collapse_whitespace(&lines.join(" "));
+        let joined = collapse_whitespace(
+            &slice
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         if joined.len() <= 140 {
             return joined;
         }
     }
 
-    let header = collapse_whitespace(slice.trim().trim_end_matches(['{', ':', ';']));
-    if header.len() > 160 {
-        match header.char_indices().nth(160) {
-            Some((idx, _)) => format!("{}...", &header[..idx]),
-            None => header,
-        }
-    } else {
-        header
-    }
+    truncate_str(&collapse_whitespace(slice.trim().trim_end_matches(['{', ':', ';'])), 160)
 }
 
 fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Option<String> {
-    if let Some(name_node) = node.child_by_field_name("name") {
-        let name = source[name_node.byte_range()].trim();
+    if let Some(n) = node.child_by_field_name("name") {
+        let name = source[n.byte_range()].trim();
         if !name.is_empty() {
             return Some(name.to_string());
         }
     }
 
-    if lang == SupportedLang::Rust && node.kind() == "impl_item" {
-        if let Some(ty) = node.child_by_field_name("type") {
-            let ty_name = collapse_whitespace(&source[ty.byte_range()]);
-            if let Some(tr) = node.child_by_field_name("trait") {
-                let tr_name = collapse_whitespace(&source[tr.byte_range()]);
-                return Some(format!("{tr_name} for {ty_name}"));
-            }
-            return Some(ty_name);
-        }
+    if lang == SupportedLang::Rust
+        && node.kind() == "impl_item"
+        && let Some(ty) = node.child_by_field_name("type")
+    {
+        let ty_name = collapse_whitespace(&source[ty.byte_range()]);
+        return Some(match node.child_by_field_name("trait") {
+            Some(tr) => format!("{} for {ty_name}", collapse_whitespace(&source[tr.byte_range()])),
+            None => ty_name,
+        });
     }
 
+    let mut cursor = node.walk();
     if lang == SupportedLang::Go
-        && matches!(
-            node.kind(),
-            "type_declaration" | "const_declaration" | "var_declaration"
-        )
+        && matches!(node.kind(), "type_declaration" | "const_declaration" | "var_declaration")
     {
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind().ends_with("_spec")
-                && let Some(n) = child.child_by_field_name("name")
-            {
-                return Some(source[n.byte_range()].trim().to_string());
-            }
-        }
+        return node
+            .named_children(&mut cursor)
+            .find(|c| c.kind().ends_with("_spec"))
+            .and_then(|c| c.child_by_field_name("name"))
+            .map(|n| source[n.byte_range()].trim().to_string());
     }
 
-    if matches!(lang, SupportedLang::TypeScript | SupportedLang::Tsx)
-        && node.kind() == "lexical_declaration"
-    {
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            if child.kind() == "variable_declarator"
-                && let Some(n) = child.child_by_field_name("name")
-            {
-                return Some(source[n.byte_range()].trim().to_string());
-            }
-        }
+    if matches!(lang, SupportedLang::TypeScript | SupportedLang::Tsx) && node.kind() == "lexical_declaration" {
+        return node
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "variable_declarator")
+            .and_then(|c| c.child_by_field_name("name"))
+            .map(|n| source[n.byte_range()].trim().to_string());
     }
 
     None
@@ -429,26 +302,17 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
             "interface_declaration" => Some(("interface", true)),
             "type_alias_declaration" => Some(("type", false)),
             "enum_declaration" => Some(("enum", false)),
-            "lexical_declaration" => {
-                // Only include top-level const/let declarations or exported arrow functions
-                if node
-                    .parent()
-                    .is_some_and(|p| matches!(p.kind(), "program" | "export_statement"))
-                {
-                    Some(("const", false))
-                } else {
-                    None
-                }
+            "lexical_declaration"
+                if node.parent().is_some_and(|p| matches!(p.kind(), "program" | "export_statement")) =>
+            {
+                Some(("const", false))
             }
             _ => None,
         },
         SupportedLang::Python => match k {
             "class_definition" => Some(("class", true)),
             "function_definition" => {
-                let is_method = node
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .is_some_and(|gp| gp.kind() == "class_definition");
+                let is_method = node.parent().and_then(|p| p.parent()).is_some_and(|gp| gp.kind() == "class_definition");
                 Some((if is_method { "method" } else { "def" }, false))
             }
             _ => None,
@@ -473,8 +337,6 @@ fn collect_ast_symbols(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
-
-        // Unwrap export statements or Python decorated definitions transparently
         if matches!(kind, "export_statement" | "decorated_definition") {
             collect_ast_symbols(child, source, lang, depth, defs);
             continue;
@@ -482,78 +344,52 @@ fn collect_ast_symbols(
 
         if let Some((sym_kind, recurse_into_body)) = classify_symbol_node(child, lang) {
             if let Some(name) = extract_node_name(child, source, lang) {
-                let doc = extract_leading_docs(child, source).or_else(|| {
-                    if lang == SupportedLang::Python {
-                        extract_python_docstring(child, source)
-                    } else {
-                        None
-                    }
-                });
-                let signature = format_node_signature(child, source, lang);
-                let start_line = child.start_position().row + 1;
-                let end_line = child.end_position().row + 1;
+                let doc = extract_leading_docs(child, source)
+                    .or_else(|| (lang == SupportedLang::Python).then(|| extract_python_docstring(child, source)).flatten());
 
                 defs.push(SymbolDef {
                     name,
                     kind: sym_kind,
-                    signature,
+                    signature: format_node_signature(child, source, lang),
                     doc,
-                    start_line,
-                    end_line,
+                    start_line: child.start_position().row + 1,
+                    end_line: child.end_position().row + 1,
                     depth,
                     cross_file_refs: 0,
                     score: 0.0,
                 });
 
                 if recurse_into_body && depth < 2 {
-                    if let Some(body) = child.child_by_field_name("body") {
-                        collect_ast_symbols(body, source, lang, depth + 1, defs);
-                    } else {
-                        collect_ast_symbols(child, source, lang, depth + 1, defs);
-                    }
+                    let target = child.child_by_field_name("body").unwrap_or(child);
+                    collect_ast_symbols(target, source, lang, depth + 1, defs);
                 }
             }
-        } else if depth > 0
-            && matches!(
-                kind,
-                "declaration_list" | "class_body" | "interface_body" | "block"
-            )
-        {
+        } else if depth > 0 && matches!(kind, "declaration_list" | "class_body" | "interface_body" | "block") {
             collect_ast_symbols(child, source, lang, depth, defs);
         }
     }
 }
 
 fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String, usize>) {
-    let kind = node.kind();
     if matches!(
-        kind,
-        "identifier"
-            | "type_identifier"
-            | "field_identifier"
-            | "property_identifier"
-            | "shorthand_property_identifier"
+        node.kind(),
+        "identifier" | "type_identifier" | "field_identifier" | "property_identifier" | "shorthand_property_identifier"
     ) {
         let ident = source[node.byte_range()].trim();
         if !is_noise_identifier(ident) {
             *counts.entry(ident.to_string()).or_insert(0) += 1;
         }
     }
-
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         collect_identifiers(child, source, counts);
     }
 }
 
-fn parse_source_file(
-    abs_path: &Path,
-    display_path: String,
-    max_file_size: u64,
-) -> Option<ParsedFile> {
+fn parse_source_file(abs_path: &Path, display_path: String, max_file_size: u64) -> Option<ParsedFile> {
     let lang = SupportedLang::from_path(abs_path)?;
-    let meta = fs::metadata(abs_path).ok()?;
-    if meta.len() == 0 || meta.len() > max_file_size {
+    let len = fs::metadata(abs_path).ok()?.len();
+    if len == 0 || len > max_file_size {
         return None;
     }
 
@@ -580,12 +416,8 @@ fn parse_source_file(
 }
 
 fn clean_def_symbol_key(raw_name: &str) -> &str {
-    // For Rust `impl Trait for Type`, index by the target type name
-    if let Some((_, rhs)) = raw_name.rsplit_once(" for ") {
-        rhs.split('<').next().unwrap_or(rhs).trim()
-    } else {
-        raw_name.split('<').next().unwrap_or(raw_name).trim()
-    }
+    let base = raw_name.rsplit_once(" for ").map_or(raw_name, |(_, rhs)| rhs);
+    base.split('<').next().unwrap_or(base).trim()
 }
 
 fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String]) {
@@ -594,57 +426,37 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
         return;
     }
 
-    // Map symbol name -> list of file indices that define it
     let mut symbol_definers: HashMap<String, Vec<usize>> = HashMap::new();
     for (file_idx, file) in files.iter().enumerate() {
-        let mut seen_in_file = HashSet::new();
+        let mut seen = HashSet::new();
         for def in &file.defs {
             let key = clean_def_symbol_key(&def.name);
-            if !is_noise_identifier(key) && seen_in_file.insert(key.to_string()) {
-                symbol_definers
-                    .entry(key.to_string())
-                    .or_default()
-                    .push(file_idx);
+            if !is_noise_identifier(key) && seen.insert(key.to_string()) {
+                symbol_definers.entry(key.to_string()).or_default().push(file_idx);
             }
         }
     }
 
-    // Build weighted directed graph: edges[src][dst] = weight of src referencing symbols defined in dst
     let mut adj: Vec<HashMap<usize, f64>> = vec![HashMap::new(); n];
     let mut cross_file_symbol_hits: HashMap<(usize, String), usize> = HashMap::new();
 
     for src_idx in 0..n {
         for (ident, &count) in &files[src_idx].ident_counts {
-            let Some(definers) = symbol_definers.get(ident) else {
-                continue;
-            };
-            // Downweight overly generic symbols defined in many files
-            let idf_weight = 1.0 / (definers.len() as f64).sqrt();
-            let edge_delta = (count as f64).ln_1p() * idf_weight;
-
-            for &dst_idx in definers {
-                if dst_idx != src_idx {
-                    *adj[src_idx].entry(dst_idx).or_insert(0.0) += edge_delta;
-                    *cross_file_symbol_hits
-                        .entry((dst_idx, ident.clone()))
-                        .or_insert(0) += count;
-                }
+            let Some(definers) = symbol_definers.get(ident) else { continue };
+            let edge_delta = (count as f64).ln_1p() / (definers.len() as f64).sqrt();
+            for &dst_idx in definers.iter().filter(|&&d| d != src_idx) {
+                *adj[src_idx].entry(dst_idx).or_insert(0.0) += edge_delta;
+                *cross_file_symbol_hits.entry((dst_idx, ident.clone())).or_insert(0) += count;
             }
         }
     }
 
-    // Personalization vector (boosts entrypoints, core modules, or user-specified `focus_symbols`)
     let mut personalization = vec![1.0f64; n];
     let lower_focus: Vec<String> = focus_terms.iter().map(|s| s.to_ascii_lowercase()).collect();
 
     for (i, file) in files.iter().enumerate() {
         let p = file.display_path.as_str();
-        if p.ends_with("main.rs")
-            || p.ends_with("lib.rs")
-            || p.ends_with("mod.rs")
-            || p.ends_with("index.ts")
-            || p.ends_with("__init__.py")
-        {
+        if ["main.rs", "lib.rs", "mod.rs", "index.ts", "__init__.py"].iter().any(|s| p.ends_with(s)) {
             personalization[i] += 0.5;
         }
         if !lower_focus.is_empty() {
@@ -661,9 +473,9 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
         }
     }
 
-    let pers_sum: f64 = personalization.iter().sum();
+    let pers_sum: f64 = personalization.iter().sum::<f64>().max(1e-9);
     for v in &mut personalization {
-        *v /= pers_sum.max(1e-9);
+        *v /= pers_sum;
     }
 
     let mut ranks = personalization.clone();
@@ -693,10 +505,7 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
         file.pagerank = ranks[i];
         for def in &mut file.defs {
             let key = clean_def_symbol_key(&def.name);
-            let refs = cross_file_symbol_hits
-                .get(&(i, key.to_string()))
-                .copied()
-                .unwrap_or(0);
+            let refs = cross_file_symbol_hits.get(&(i, key.to_string())).copied().unwrap_or(0);
             def.cross_file_refs = refs;
 
             let kind_boost = match def.kind {
@@ -704,11 +513,7 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
                 "impl" | "mod" => 1.2,
                 _ => 1.0,
             };
-            let focus_boost = if !lower_focus.is_empty()
-                && lower_focus
-                    .iter()
-                    .any(|q| def.name.to_ascii_lowercase().contains(q))
-            {
+            let focus_boost = if lower_focus.iter().any(|q| def.name.to_ascii_lowercase().contains(q)) {
                 4.0
             } else {
                 1.0
@@ -729,54 +534,26 @@ pub fn execute(
     max_output_size: usize,
 ) -> Result<String> {
     let args: RepoMapArgs = parse_args(json_args, "repo_map")?;
-    let cwd = workspace_root()?;
-    let base_root = if settings.git_root {
-        find_git_root(&cwd).unwrap_or_else(|| cwd.clone())
-    } else {
-        cwd.clone()
-    };
-    let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
+    let (base_root, scan_root) = resolve_scan_roots(
+        settings.git_root,
+        &args.target_path,
+        "target_path escapes workspace root",
+    )?;
 
-    let scan_root = if args.target_path.trim().is_empty() || args.target_path.trim() == "." {
-        base_root.clone()
-    } else {
-        let rel = validate_relative_path(&args.target_path)?;
-        let candidate = base_root.join(rel);
-        if !candidate.exists() {
-            bail!("Target path does not exist: '{}'", args.target_path.trim());
-        }
-        let canon = dunce::canonicalize(&candidate)?;
-        if !canon.starts_with(&base_root) {
-            bail!("Security violation: target_path escapes workspace root");
-        }
-        canon
-    };
-
-    let include_set = if args.include.is_empty() {
-        None
-    } else {
-        Some(build_globset(&args.include)?)
-    };
-
-    let mut exclude_patterns = vec![
-        "**/.git/**".to_string(),
-        "**/*.venv/**".to_string(),
-        "**/node_modules/**".to_string(),
-        "**/target/**".to_string(),
-        "**/.env*".to_string(),
-    ];
+    let include_set = (!args.include.is_empty()).then(|| build_globset(&args.include, true)).transpose()?;
+    let mut exclude_patterns: Vec<String> = [
+        "**/.git/**", "**/*.venv/**", "**/node_modules/**", "**/target/**", "**/.env*",
+    ]
+    .map(String::from)
+    .into();
     exclude_patterns.extend(settings.exclude.iter().cloned());
     exclude_patterns.extend(args.exclude);
-    let exclude_set = build_globset(&exclude_patterns)?;
+    let exclude_set = build_globset(&exclude_patterns, true)?;
 
     let mut parsed_files = Vec::new();
     if scan_root.is_file() {
         let rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
-        if let Some(pf) = parse_source_file(
-            &scan_root,
-            rel.to_string_lossy().into_owned(),
-            settings.max_size,
-        ) {
+        if let Some(pf) = parse_source_file(&scan_root, rel.to_string_lossy().into_owned(), settings.max_size) {
             parsed_files.push(pf);
         }
     } else {
@@ -795,37 +572,21 @@ pub fn execute(
             if !path.is_file() || SupportedLang::from_path(path).is_none() {
                 continue;
             }
-            let Some(relative) = diff_paths(path, &base_root) else {
-                continue;
-            };
-            if exclude_set.is_match(&relative) {
+            let Some(relative) = diff_paths(path, &base_root) else { continue };
+            if exclude_set.is_match(&relative) || include_set.as_ref().is_some_and(|inc| !inc.is_match(&relative)) {
                 continue;
             }
-            if let Some(inc) = &include_set
-                && !inc.is_match(&relative)
-            {
-                continue;
-            }
-            if let Some(pf) = parse_source_file(
-                path,
-                relative.to_string_lossy().into_owned(),
-                settings.max_size,
-            ) {
+            if let Some(pf) = parse_source_file(path, relative.to_string_lossy().into_owned(), settings.max_size) {
                 parsed_files.push(pf);
             }
         }
     }
 
     if parsed_files.is_empty() {
-        return Ok(
-            "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
-                .into(),
-        );
+        return Ok("No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope.".into());
     }
 
     compute_pagerank_and_scores(&mut parsed_files, &args.focus_symbols);
-
-    // Sort files by descending PageRank score (tie-breaking by path)
     parsed_files.sort_by(|a, b| {
         b.pagerank
             .partial_cmp(&a.pagerank)
@@ -834,19 +595,14 @@ pub fn execute(
     });
 
     let token_budget = args.max_tokens.unwrap_or(8_000).clamp(500, 64_000);
-    // ~4 bytes per token, capped by the model's `max_output_size`
     let byte_budget = (token_budget.saturating_mul(4)).min(max_output_size.saturating_sub(256));
-
     let total_symbols: usize = parsed_files.iter().map(|f| f.defs.len()).sum();
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "# AST Repository Map ({} files parsed, {} symbols extracted — ranked by PageRank)\n",
-        parsed_files.len(),
-        total_symbols
+
+    let mut out = format!(
+        "# AST Repository Map ({} files parsed, {total_symbols} symbols extracted — ranked by PageRank)\n\n",
+        parsed_files.len()
     );
 
-    // Collect top central symbols across the entire repo for a quick architectural index
     let mut top_symbols: Vec<(&str, &SymbolDef)> = parsed_files
         .iter()
         .flat_map(|f| {
@@ -856,33 +612,26 @@ pub fn execute(
                 .map(move |d| (f.display_path.as_str(), d))
         })
         .collect();
-
-    top_symbols.sort_by(|a, b| {
-        b.1.score
-            .partial_cmp(&a.1.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    top_symbols.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(std::cmp::Ordering::Equal));
 
     if !top_symbols.is_empty() {
         out.push_str("## Top Central Symbols (Cross-File Hotspots)\n\n");
         for (file_path, def) in top_symbols.into_iter().take(15) {
             let _ = writeln!(
                 out,
-                "- `{}` ({}) — `{}:{}-{}` ({} cross-file refs)",
-                def.name, def.kind, file_path, def.start_line, def.end_line, def.cross_file_refs
+                "- `{}` ({}) — `{file_path}:{}-{}` ({} cross-file refs)",
+                def.name, def.kind, def.start_line, def.end_line, def.cross_file_refs
             );
         }
         out.push('\n');
     }
 
     out.push_str("## Ranked File Skeletons\n\n");
-
     let mut omitted_files = 0usize;
+
     for (rank_idx, file) in parsed_files.iter().enumerate() {
-        let mut block = String::new();
-        let _ = writeln!(
-            block,
-            "### {}. `{}` (rank: {:.3}, {} lines, {} symbols)\n",
+        let mut block = format!(
+            "### {}. `{}` (rank: {:.3}, {} lines, {} symbols)\n\n",
             rank_idx + 1,
             file.display_path,
             file.pagerank,
@@ -896,16 +645,11 @@ pub fn execute(
             let _ = writeln!(block, "```{}", file.lang.code_fence_tag());
             for def in &file.defs {
                 let indent = "    ".repeat(def.depth);
-                if args.include_docs
-                    && let Some(doc) = &def.doc
-                {
+                if args.include_docs && let Some(doc) = &def.doc {
                     let _ = writeln!(block, "{indent}/// {doc}");
                 }
                 let ref_tag = if def.cross_file_refs > 0 {
-                    format!(
-                        " // [L{}-L{} | {} refs]",
-                        def.start_line, def.end_line, def.cross_file_refs
-                    )
+                    format!(" // [L{}-L{} | {} refs]", def.start_line, def.end_line, def.cross_file_refs)
                 } else {
                     format!(" // [L{}-L{}]", def.start_line, def.end_line)
                 };

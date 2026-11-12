@@ -28,21 +28,9 @@ pub fn schema() -> Value {
     )
 }
 
-fn to_crlf(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + s.matches('\n').count());
-    let mut prev_cr = false;
-    for ch in s.chars() {
-        if ch == '\n' && !prev_cr {
-            out.push('\r');
-        }
-        out.push(ch);
-        prev_cr = ch == '\r';
-    }
-    out
-}
-
-fn to_lf(s: &str) -> String {
-    s.replace("\r\n", "\n")
+fn normalize_eol(s: &str, use_crlf: bool) -> String {
+    let lf = s.replace("\r\n", "\n");
+    if use_crlf { lf.replace('\n', "\r\n") } else { lf }
 }
 
 fn apply_single_hunk(
@@ -57,44 +45,27 @@ fn apply_single_hunk(
     }
 
     let mut match_count = content.matches(search).count();
-    let mut effective_search: Cow<'_, str> = Cow::Borrowed(search);
-    let mut effective_replace: Cow<'_, str> = Cow::Borrowed(replace);
+    let mut effective_search = Cow::Borrowed(search);
+    let mut effective_replace = Cow::Borrowed(replace);
 
-    // Fallback: normalize line endings if exact match failed due to CRLF vs LF mismatch
-    if match_count == 0 {
-        if content.contains("\r\n") && !search.contains("\r\n") && search.contains('\n') {
-            let crlf_search = to_crlf(search);
-            let crlf_matches = content.matches(&crlf_search).count();
-            if crlf_matches > 0 {
-                match_count = crlf_matches;
-                effective_search = Cow::Owned(crlf_search);
-                effective_replace = Cow::Owned(to_crlf(replace));
-            }
-        } else if !content.contains("\r\n") && search.contains("\r\n") {
-            let lf_search = to_lf(search);
-            let lf_matches = content.matches(&lf_search).count();
-            if lf_matches > 0 {
-                match_count = lf_matches;
-                effective_search = Cow::Owned(lf_search);
-                effective_replace = Cow::Owned(to_lf(replace));
-            }
+    if match_count == 0 && search.contains('\n') {
+        let target_crlf = content.contains("\r\n");
+        let alt_search = normalize_eol(search, target_crlf);
+        let alt_matches = content.matches(&alt_search).count();
+        if alt_matches > 0 {
+            match_count = alt_matches;
+            effective_search = Cow::Owned(alt_search);
+            effective_replace = Cow::Owned(normalize_eol(replace, target_crlf));
         }
     }
 
-    if match_count == 0 {
-        bail!("{hunk_label}: exact search_string not found in {file_path}");
+    match match_count {
+        0 => bail!("{hunk_label}: exact search_string not found in {file_path}"),
+        1 => Ok(content.replacen(effective_search.as_ref(), effective_replace.as_ref(), 1)),
+        n => bail!("{hunk_label}: search_string matched {n} times in {file_path}. Provide more surrounding context to make it unique."),
     }
-    if match_count > 1 {
-        bail!(
-            "{hunk_label}: search_string matched {match_count} times in {file_path}. Provide more surrounding context to make it unique."
-        );
-    }
-
-    Ok(content.replacen(effective_search.as_ref(), effective_replace.as_ref(), 1))
 }
 
-/// Applies all requested hunks sequentially in memory and returns:
-/// `(resolved_path, original_content, final_updated_content, hunk_count)`
 pub fn apply_edits_from_value(json_args: &Value) -> Result<(PathBuf, String, String, usize)> {
     let args: EditFileArgs = parse_args(json_args, "edit_file")?;
     if args.edits.is_empty() {
@@ -103,58 +74,34 @@ pub fn apply_edits_from_value(json_args: &Value) -> Result<(PathBuf, String, Str
 
     let (_, target_path) = resolve_existing_path(&args.file_path)?;
     let original = fs::read_to_string(&target_path).context("Error reading file")?;
-    let mut current = original.clone();
+    let mut buf = original.clone();
     let total = args.edits.len();
 
     for (idx, hunk) in args.edits.iter().enumerate() {
-        let label = if total == 1 {
-            "Edit".to_string()
-        } else {
-            format!("Hunk {}/{total}", idx + 1)
-        };
-        current = apply_single_hunk(
-            &current,
-            args.file_path.trim(),
-            &hunk.search_string,
-            &hunk.replace_string,
-            &label,
-        )?;
+        let label = if total == 1 { "Edit".into() } else { format!("Hunk {}/{total}", idx + 1) };
+        buf = apply_single_hunk(&buf, args.file_path.trim(), &hunk.search_string, &hunk.replace_string, &label)?;
     }
 
-    Ok((target_path, original, current, total))
+    Ok((target_path, original, buf, total))
 }
 
-/// Builds a fallback before/after string pair from raw arguments when `apply_edits_from_value`
-/// fails (e.g. search string not found), so the approval modal can still show what the model attempted.
 pub fn fallback_hunk_preview(json_args: &Value) -> (String, String) {
     let Ok(args) = parse_args::<EditFileArgs>(json_args, "edit_file") else {
         return (String::new(), String::new());
     };
-
-    let mut all_search = String::new();
-    let mut all_replace = String::new();
-    for (idx, h) in args.edits.iter().enumerate() {
-        if idx > 0 {
-            all_search.push_str("\n// ---\n");
-            all_replace.push_str("\n// ---\n");
-        }
-        all_search.push_str(&h.search_string);
-        all_replace.push_str(&h.replace_string);
-    }
-    (all_search, all_replace)
+    let join_field = |f: fn(&EditHunk) -> &str| args.edits.iter().map(f).collect::<Vec<_>>().join("\n// ---\n");
+    (join_field(|h| &h.search_string), join_field(|h| &h.replace_string))
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {
     let args: EditFileArgs = parse_args(json_args, "edit_file")?;
     let (target_path, _, updated, hunk_count) = apply_edits_from_value(json_args)?;
-
     fs::write(&target_path, updated).context("Error writing file")?;
+
+    let path = args.file_path.trim();
     if hunk_count == 1 {
-        Ok(format!("Successfully edited {}", args.file_path.trim()))
+        Ok(format!("Successfully edited {path}"))
     } else {
-        Ok(format!(
-            "Successfully applied {hunk_count} edits to {}",
-            args.file_path.trim()
-        ))
+        Ok(format!("Successfully applied {hunk_count} edits to {path}"))
     }
 }

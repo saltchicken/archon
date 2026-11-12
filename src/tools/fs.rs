@@ -7,7 +7,11 @@ use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::{fmt::Write as _, fs, path::Path};
+use std::{
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -65,9 +69,31 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn validate_transfer_paths(args: &FsArgs, verb: &str) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let (cwd, src) = resolve_existing_path(&args.path)?;
+    if src == cwd {
+        bail!("Cannot {verb} workspace root");
+    }
+    ensure_not_git_metadata(&src, &cwd)?;
+
+    let (_, dst) = resolve_new_path(&args.destination)?;
+    ensure_not_git_metadata(&dst, &cwd)?;
+    if dst.starts_with(&src) {
+        bail!("Cannot {verb} a directory into a subdirectory of itself");
+    }
+    Ok((cwd, src, dst))
+}
+
+fn ensure_dst_parent(dst: &Path, cwd: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).context("Error creating destination parent directories")?;
+        ensure_within_workspace(parent, cwd, "destination parent")?;
+    }
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path, cwd: &Path) -> Result<usize> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("Failed to create directory {}", dst.display()))?;
+    fs::create_dir_all(dst).with_context(|| format!("Failed to create directory {}", dst.display()))?;
     ensure_within_workspace(dst, cwd, "copied directory")?;
 
     let mut copied_files = 0usize;
@@ -75,10 +101,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path, cwd: &Path) -> Result<usize> {
         let entry = entry?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            bail!(
-                "Security violation: copying symlinks is not supported ({})",
-                entry.path().display()
-            );
+            bail!("Security violation: copying symlinks is not supported ({})", entry.path().display());
         }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -93,89 +116,37 @@ fn copy_dir_recursive(src: &Path, dst: &Path, cwd: &Path) -> Result<usize> {
 }
 
 fn count_dir_items(dir: &Path) -> (usize, usize, u64) {
-    let mut files = 0usize;
-    let mut dirs = 0usize;
-    let mut total_bytes = 0u64;
-
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_symlink() {
-                continue;
-            }
-            if ft.is_dir() {
-                dirs += 1;
-                let (f, d, b) = count_dir_items(&entry.path());
-                files += f;
-                dirs += d;
-                total_bytes = total_bytes.saturating_add(b);
-            } else if ft.is_file() {
-                files += 1;
-                if let Ok(meta) = entry.metadata() {
-                    total_bytes = total_bytes.saturating_add(meta.len());
-                }
-            }
+    let mut stats = (0usize, 0usize, 0u64);
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            let (f, d, b) = count_dir_items(&entry.path());
+            stats = (stats.0 + f, stats.1 + 1 + d, stats.2.saturating_add(b));
+        } else if ft.is_file() {
+            let len = entry.metadata().map_or(0, |m| m.len());
+            stats = (stats.0 + 1, stats.1, stats.2.saturating_add(len));
         }
     }
-    (files, dirs, total_bytes)
+    stats
 }
 
-/// Validates the requested `fs` operation without mutating disk so the approval modal
-/// can display an accurate summary or warning if the call will fail.
 pub fn preview_action(json_args: &Value) -> Result<(String, Option<(String, String)>)> {
     let args: FsArgs = parse_args(json_args, "fs")?;
-
     match args.action {
         FsAction::List => {
-            let raw = if args.path.trim().is_empty() {
-                "."
-            } else {
-                args.path.trim()
-            };
+            let raw = if args.path.trim().is_empty() { "." } else { args.path.trim() };
             let (_, target) = resolve_existing_path(raw)?;
             Ok((format!("List directory: {}", target.display()), None))
         }
-        FsAction::Rename => {
-            let (cwd, src) = resolve_existing_path(&args.path)?;
-            if src == cwd {
-                bail!("Cannot rename workspace root");
-            }
-            ensure_not_git_metadata(&src, &cwd)?;
-            let (_, dst) = resolve_new_path(&args.destination)?;
-            ensure_not_git_metadata(&dst, &cwd)?;
-            if dst.starts_with(&src) {
-                bail!("Cannot move a directory into a subdirectory of itself");
-            }
+        FsAction::Rename | FsAction::Copy => {
+            let is_rename = matches!(args.action, FsAction::Rename);
+            let (_, src, _) = validate_transfer_paths(&args, if is_rename { "move" } else { "copy" })?;
             let kind = if src.is_dir() { "directory" } else { "file" };
-            Ok((
-                format!(
-                    "Move {kind} '{}' -> '{}'",
-                    args.path.trim(),
-                    args.destination.trim()
-                ),
-                None,
-            ))
-        }
-        FsAction::Copy => {
-            let (cwd, src) = resolve_existing_path(&args.path)?;
-            if src == cwd {
-                bail!("Cannot copy workspace root");
-            }
-            ensure_not_git_metadata(&src, &cwd)?;
-            let (_, dst) = resolve_new_path(&args.destination)?;
-            ensure_not_git_metadata(&dst, &cwd)?;
-            if dst.starts_with(&src) {
-                bail!("Cannot copy a directory into a subdirectory of itself");
-            }
-            let kind = if src.is_dir() { "directory" } else { "file" };
-            Ok((
-                format!(
-                    "Copy {kind} '{}' -> '{}'",
-                    args.path.trim(),
-                    args.destination.trim()
-                ),
-                None,
-            ))
+            let title = if is_rename { "Move" } else { "Copy" };
+            Ok((format!("{title} {kind} '{}' -> '{}'", args.path.trim(), args.destination.trim()), None))
         }
         FsAction::Remove => {
             let (cwd, target) = resolve_existing_path(&args.path)?;
@@ -183,36 +154,20 @@ pub fn preview_action(json_args: &Value) -> Result<(String, Option<(String, Stri
                 bail!("Cannot remove workspace root");
             }
             ensure_not_git_metadata(&target, &cwd)?;
+            let path_str = args.path.trim();
 
             if target.is_dir() {
                 let (files, dirs, bytes) = count_dir_items(&target);
                 if (files > 0 || dirs > 0) && !args.recursive {
-                    bail!(
-                        "Directory '{}' is not empty ({files} files, {dirs} subdirs). Set `recursive: true` to remove it",
-                        args.path.trim()
-                    );
+                    bail!("Directory '{path_str}' is not empty ({files} files, {dirs} subdirs). Set `recursive: true` to remove it");
                 }
-                Ok((
-                    format!(
-                        "Remove directory '{}' ({files} file(s), {dirs} subdir(s), {})",
-                        args.path.trim(),
-                        format_size(bytes)
-                    ),
-                    None,
-                ))
+                Ok((format!("Remove directory '{path_str}' ({files} file(s), {dirs} subdir(s), {})", format_size(bytes)), None))
             } else {
-                let size = target.metadata().map(|m| m.len()).unwrap_or(0);
-                let diff_preview = if size <= 64 * 1024 {
-                    fs::read_to_string(&target)
-                        .ok()
-                        .map(|content| (args.path.trim().to_string(), content))
-                } else {
-                    None
-                };
-                Ok((
-                    format!("Remove file '{}' ({})", args.path.trim(), format_size(size)),
-                    diff_preview,
-                ))
+                let size = target.metadata().map_or(0, |m| m.len());
+                let diff_preview = (size <= 64 * 1024)
+                    .then(|| fs::read_to_string(&target).ok().map(|c| (path_str.to_string(), c)))
+                    .flatten();
+                Ok((format!("Remove file '{path_str}' ({})", format_size(size)), diff_preview))
             }
         }
     }
@@ -233,11 +188,9 @@ fn list_dir_recursive(
         .collect();
 
     entries.sort_by(|a, b| {
-        let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        b_dir
-            .cmp(&a_dir)
-            .then_with(|| a.file_name().cmp(&b.file_name()))
+        let a_dir = a.file_type().is_ok_and(|t| t.is_dir());
+        let b_dir = b.file_type().is_ok_and(|t| t.is_dir());
+        b_dir.cmp(&a_dir).then_with(|| a.file_name().cmp(&b.file_name()))
     });
 
     let indent = "  ".repeat(current_depth);
@@ -250,25 +203,14 @@ fn list_dir_recursive(
         if name == ".git" {
             continue;
         }
-
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
+        let Ok(meta) = entry.metadata() else { continue };
         *count += 1;
 
         if meta.is_dir() {
-            let child_count = fs::read_dir(&path).map(|rd| rd.count()).unwrap_or(0);
+            let child_count = fs::read_dir(&path).map_or(0, Iterator::count);
             let _ = writeln!(out, "{indent}{name}/ ({child_count} items)");
             if current_depth < max_depth && path.starts_with(base_root) {
-                list_dir_recursive(
-                    &path,
-                    base_root,
-                    current_depth + 1,
-                    max_depth,
-                    out,
-                    max_output_size,
-                    count,
-                )?;
+                list_dir_recursive(&path, base_root, current_depth + 1, max_depth, out, max_output_size, count)?;
             }
         } else {
             let _ = writeln!(out, "{indent}{name} ({})", format_size(meta.len()));
@@ -279,160 +221,75 @@ fn list_dir_recursive(
 
 pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     let args: FsArgs = parse_args(json_args, "fs")?;
+    let src_str = args.path.trim();
+    let dst_str = args.destination.trim();
 
     match args.action {
         FsAction::List => {
             let cwd = workspace_root()?;
-            let target = if args.path.trim().is_empty() || args.path.trim() == "." {
+            let target = if src_str.is_empty() || src_str == "." {
                 cwd.clone()
             } else {
-                let rel = validate_relative_path(&args.path)?;
-                let candidate = cwd.join(rel);
+                let candidate = cwd.join(validate_relative_path(src_str)?);
                 if !candidate.exists() {
-                    bail!("Target path does not exist: '{}'", args.path.trim());
+                    bail!("Target path does not exist: '{src_str}'");
                 }
-                ensure_within_workspace(&candidate, &cwd, &args.path)?
+                ensure_within_workspace(&candidate, &cwd, src_str)?
             };
 
             let rel_display = diff_paths(&target, &cwd)
                 .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| ".".to_string());
+                .map_or_else(|| ".".into(), |p| p.to_string_lossy().into_owned());
 
             if target.is_file() {
-                let len = target.metadata()?.len();
-                return Ok(format!("{rel_display} (file, {})", format_size(len)));
+                return Ok(format!("{rel_display} (file, {})", format_size(target.metadata()?.len())));
             }
 
             let max_depth = args.max_depth.unwrap_or(1).clamp(1, 5);
-            let mut out =
-                format!("Directory listing for '{rel_display}' (max_depth: {max_depth}):\n");
+            let mut out = format!("Directory listing for '{rel_display}' (max_depth: {max_depth}):\n");
             let mut count = 0usize;
-            list_dir_recursive(
-                &target,
-                &cwd,
-                1,
-                max_depth,
-                &mut out,
-                max_output_size,
-                &mut count,
-            )?;
+            list_dir_recursive(&target, &cwd, 1, max_depth, &mut out, max_output_size, &mut count)?;
 
             if count == 0 {
-                return Ok(format!("Directory '{rel_display}' is empty."));
+                Ok(format!("Directory '{rel_display}' is empty."))
+            } else {
+                Ok(out.trim_end().to_string())
             }
-            Ok(out.trim_end().to_string())
         }
         FsAction::Rename => {
-            let (cwd, src) = resolve_existing_path(&args.path)?;
-            if src == cwd {
-                bail!("Cannot rename workspace root");
-            }
-            ensure_not_git_metadata(&src, &cwd)?;
-
-            let (_, dst) = resolve_new_path(&args.destination)?;
-            ensure_not_git_metadata(&dst, &cwd)?;
-            if dst.starts_with(&src) {
-                bail!("Cannot move a directory into a subdirectory of itself");
-            }
-
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .context("Error creating destination parent directories")?;
-                ensure_within_workspace(parent, &cwd, "destination parent")?;
-            }
-
-            fs::rename(&src, &dst).with_context(|| {
-                format!(
-                    "Failed to rename '{}' to '{}'",
-                    args.path.trim(),
-                    args.destination.trim()
-                )
-            })?;
-
-            Ok(format!(
-                "Successfully moved '{}' to '{}'",
-                args.path.trim(),
-                args.destination.trim()
-            ))
+            let (cwd, src, dst) = validate_transfer_paths(&args, "move")?;
+            ensure_dst_parent(&dst, &cwd)?;
+            fs::rename(&src, &dst).with_context(|| format!("Failed to rename '{src_str}' to '{dst_str}'"))?;
+            Ok(format!("Successfully moved '{src_str}' to '{dst_str}'"))
         }
         FsAction::Copy => {
-            let (cwd, src) = resolve_existing_path(&args.path)?;
-            if src == cwd {
-                bail!("Cannot copy workspace root");
-            }
-            ensure_not_git_metadata(&src, &cwd)?;
-
-            let (_, dst) = resolve_new_path(&args.destination)?;
-            ensure_not_git_metadata(&dst, &cwd)?;
-            if dst.starts_with(&src) {
-                bail!("Cannot copy a directory into a subdirectory of itself");
-            }
-
-            if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent)
-                    .context("Error creating destination parent directories")?;
-                ensure_within_workspace(parent, &cwd, "destination parent")?;
-            }
-
+            let (cwd, src, dst) = validate_transfer_paths(&args, "copy")?;
+            ensure_dst_parent(&dst, &cwd)?;
             if src.is_dir() {
                 let count = copy_dir_recursive(&src, &dst, &cwd)?;
-                Ok(format!(
-                    "Successfully copied directory '{}' to '{}' ({count} file(s))",
-                    args.path.trim(),
-                    args.destination.trim()
-                ))
+                Ok(format!("Successfully copied directory '{src_str}' to '{dst_str}' ({count} file(s))"))
             } else {
-                let bytes = fs::copy(&src, &dst).with_context(|| {
-                    format!(
-                        "Failed to copy '{}' to '{}'",
-                        args.path.trim(),
-                        args.destination.trim()
-                    )
-                })?;
-                Ok(format!(
-                    "Successfully copied '{}' to '{}' ({})",
-                    args.path.trim(),
-                    args.destination.trim(),
-                    format_size(bytes)
-                ))
+                let bytes = fs::copy(&src, &dst).with_context(|| format!("Failed to copy '{src_str}' to '{dst_str}'"))?;
+                Ok(format!("Successfully copied '{src_str}' to '{dst_str}' ({})", format_size(bytes)))
             }
         }
         FsAction::Remove => {
-            let (cwd, target) = resolve_existing_path(&args.path)?;
+            let (cwd, target) = resolve_existing_path(src_str)?;
             if target == cwd {
                 bail!("Cannot remove workspace root");
             }
             ensure_not_git_metadata(&target, &cwd)?;
 
             if target.is_dir() {
-                let is_non_empty = fs::read_dir(&target)?.next().is_some();
-                if is_non_empty && !args.recursive {
-                    bail!(
-                        "Directory '{}' is not empty. Pass `recursive: true` to delete non-empty directories.",
-                        args.path.trim()
-                    );
+                if fs::read_dir(&target)?.next().is_some() && !args.recursive {
+                    bail!("Directory '{src_str}' is not empty. Pass `recursive: true` to delete non-empty directories.");
                 }
-                if args.recursive {
-                    fs::remove_dir_all(&target).with_context(|| {
-                        format!(
-                            "Failed to recursively remove directory '{}'",
-                            args.path.trim()
-                        )
-                    })?;
-                } else {
-                    fs::remove_dir(&target).with_context(|| {
-                        format!("Failed to remove empty directory '{}'", args.path.trim())
-                    })?;
-                }
-                Ok(format!(
-                    "Successfully removed directory '{}'",
-                    args.path.trim()
-                ))
+                let res = if args.recursive { fs::remove_dir_all(&target) } else { fs::remove_dir(&target) };
+                res.with_context(|| format!("Failed to remove directory '{src_str}'"))?;
+                Ok(format!("Successfully removed directory '{src_str}'"))
             } else {
-                fs::remove_file(&target)
-                    .with_context(|| format!("Failed to remove file '{}'", args.path.trim()))?;
-                Ok(format!("Successfully removed file '{}'", args.path.trim()))
+                fs::remove_file(&target).with_context(|| format!("Failed to remove file '{src_str}'"))?;
+                Ok(format!("Successfully removed file '{src_str}'"))
             }
         }
     }

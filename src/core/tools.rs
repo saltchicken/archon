@@ -17,49 +17,21 @@ pub struct ToolFunction {
     pub arguments: Value,
 }
 
-/// Computes a canonical signature for a tool call, such as:
-/// - `"read_file"`
-/// - `"fs:list"`
-/// - `"git:status"`
-/// - `"cargo:check"`
-/// - `"execute_command:ls"`
 pub fn call_signature(call: &ToolCall) -> String {
     let name = call.function.name.as_str();
     let args = &call.function.arguments;
 
-    match name {
-        "git" | "cargo" | "fs" => {
-            let action = args
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if action.is_empty() {
-                name.to_string()
-            } else {
-                format!("{name}:{action}")
-            }
-        }
-        "execute_command" => {
-            let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-            let base = shlex::split(cmd)
-                .and_then(|parts| parts.into_iter().next())
-                .unwrap_or_default();
-            if base.is_empty() {
-                "execute_command".to_string()
-            } else {
-                format!("execute_command:{base}")
-            }
-        }
-        _ => name.to_string(),
-    }
+    let sub = match name {
+        "git" | "cargo" | "fs" => args.get("action").and_then(Value::as_str).unwrap_or("").trim().to_string(),
+        "execute_command" => shlex::split(args.get("command").and_then(Value::as_str).unwrap_or(""))
+            .and_then(|parts| parts.into_iter().next())
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    if sub.is_empty() { name.to_string() } else { format!("{name}:{sub}") }
 }
 
-/// Checks whether a tool call matches any rule in `rules`.
-/// Supported patterns:
-/// - `"*"` (matches all tools)
-/// - `"<tool_name>"` or `"<tool_name>:*"` (matches any invocation of `<tool_name>`)
-/// - `"<tool_name>:<sub_action>"` (e.g. `"git:status"`, `"fs:list"`, `"execute_command:ls"`)
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
@@ -67,18 +39,12 @@ where
     let name = call.function.name.as_str();
     let sig = call_signature(call);
 
-    rules.into_iter().any(|rule| {
-        let r = rule.trim();
-        if r.is_empty() {
-            return false;
-        }
-        if r == "*" || r == name || r == sig {
-            return true;
-        }
-        if let Some(prefix) = r.strip_suffix(":*") {
-            return name == prefix || sig.starts_with(&format!("{prefix}:"));
-        }
-        false
+    rules.into_iter().map(str::trim).filter(|r| !r.is_empty()).any(|r| {
+        r == "*"
+            || r == name
+            || r == sig
+            || r.strip_suffix(":*")
+                .is_some_and(|p| name == p || sig.starts_with(&format!("{p}:")))
     })
 }
 
@@ -97,21 +63,14 @@ fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) 
         .to_string();
 
     out.push_str("\n--- UNIFIED DIFF ---\n");
-    out.push_str(if diff.trim().is_empty() {
-        "(No differences)\n"
-    } else {
-        &diff
-    });
+    out.push_str(if diff.trim().is_empty() { "(No differences)\n" } else { &diff });
 }
 
 fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
     let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
-
     out.push_str(&format!("  file_path: {file_path}\n"));
-    for (k, v) in obj {
-        if !matches!(k.as_str(), "file_path" | "edits") {
-            out.push_str(&format_kv(k, v));
-        }
+    for (k, v) in obj.iter().filter(|(k, _)| !matches!(k.as_str(), "file_path" | "edits")) {
+        out.push_str(&format_kv(k, v));
     }
 
     match tools::edit_file::apply_edits_from_value(args) {
@@ -125,7 +84,6 @@ fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>)
             append_unified_diff(&mut out, file_path, &raw_search, &raw_replace);
         }
     }
-
     out.trim_end().to_string()
 }
 
@@ -133,7 +91,6 @@ fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -
     for (k, v) in obj {
         out.push_str(&format_kv(k, v));
     }
-
     match tools::fs::preview_action(args) {
         Ok((summary, maybe_diff)) => {
             out.push_str(&format!("\n--- OPERATION ---\n{summary}\n"));
@@ -141,11 +98,8 @@ fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -
                 append_unified_diff(&mut out, &file_path, &deleted_content, "");
             }
         }
-        Err(e) => {
-            out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-        }
+        Err(e) => out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n")),
     }
-
     out.trim_end().to_string()
 }
 
@@ -155,10 +109,7 @@ pub fn format_approval(call: &ToolCall) -> String {
     let sig = call_signature(call);
 
     let Some(obj) = args.as_object() else {
-        return format!(
-            "Tool: {name} [{sig}]\n{}",
-            serde_json::to_string_pretty(args).unwrap_or_default()
-        );
+        return format!("Tool: {name} [{sig}]\n{}", serde_json::to_string_pretty(args).unwrap_or_default());
     };
 
     let mut out = format!("Tool: {name} (Rule: {sig})\n");
@@ -190,9 +141,8 @@ pub fn format_approval(call: &ToolCall) -> String {
 pub async fn execute(call: &ToolCall, config: &Config, max_size: usize) -> (String, bool) {
     let name = &call.function.name;
     let args = &call.function.arguments;
-
-    info!("Executing tool: {}", name);
-    debug!("Tool arguments: {}", args);
+    info!("Executing tool: {name}");
+    debug!("Tool arguments: {args}");
 
     match tools::execute(name, args, config, max_size).await {
         Ok(mut out) => {
@@ -205,17 +155,12 @@ pub async fn execute(call: &ToolCall, config: &Config, max_size: usize) -> (Stri
                     "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
                 ));
             }
-
-            info!(
-                "Tool '{}' executed successfully. Truncated: {}",
-                name, truncated
-            );
-            let snippet: String = out.replace('\n', " ").chars().take(200).collect();
-            debug!("Tool output snippet: {}", snippet);
+            info!("Tool '{name}' executed successfully. Truncated: {truncated}");
+            debug!("Tool output snippet: {}", out.replace('\n', " ").chars().take(200).collect::<String>());
             (out, truncated)
         }
         Err(e) => {
-            error!("Tool '{}' failed: {}", name, e);
+            error!("Tool '{name}' failed: {e}");
             (format!("Error: {e}"), false)
         }
     }
