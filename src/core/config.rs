@@ -68,7 +68,6 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub allowed_commands: Vec<String>,
-    pub show_thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +154,6 @@ impl Default for AppSettings {
                 .into_iter()
                 .map(String::from)
                 .collect(),
-            show_thinking: false,
         }
     }
 }

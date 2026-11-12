@@ -99,7 +99,6 @@ impl Provider {
                     &messages,
                     &turn.system_prompt,
                     tools_schema,
-                    config.app.show_thinking,
                 );
                 gemini::stream_chat(
                     client,

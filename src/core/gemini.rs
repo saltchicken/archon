@@ -1,6 +1,5 @@
 use crate::core::{
     config::Config,
-    ollama::{strip_thinking, THINK_CLOSE, THINK_OPEN},
     session::ChatMessage,
     tools::{ToolCall, ToolFunction},
     EngineEvent,
@@ -68,7 +67,7 @@ fn sanitize_schema_for_gemini(val: &mut Value) {
                 .into_iter()
                 .filter(|t| t.as_str() != Some("null"))
                 .collect();
-            let had_null = non_null.len() > 0;
+            let had_null = !non_null.is_empty();
             if let Some(first) = non_null.pop() {
                 obj.insert("type".to_string(), first);
                 if had_null {
@@ -108,7 +107,6 @@ pub fn build_payload(
     messages: &[ChatMessage],
     system_prompt: &str,
     tools: Option<Vec<Value>>,
-    include_thoughts: bool,
 ) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut pending_tool_names: Vec<String> = Vec::new();
@@ -143,9 +141,8 @@ pub fn build_payload(
                 tool_resp_idx = 0;
 
                 let mut parts = Vec::new();
-                let clean_text = strip_thinking(&m.content).0;
-                if !clean_text.trim().is_empty() {
-                    parts.push(json!({ "text": clean_text }));
+                if !m.content.trim().is_empty() {
+                    parts.push(json!({ "text": m.content }));
                 }
                 if let Some(tcs) = m.tool_calls.as_ref() {
                     for tc in tcs {
@@ -219,14 +216,6 @@ pub fn build_payload(
     if !system_prompt.trim().is_empty() {
         payload["systemInstruction"] = json!({
             "parts": [{ "text": system_prompt }]
-        });
-    }
-
-    if include_thoughts {
-        payload["generationConfig"] = json!({
-            "thinkingConfig": {
-                "includeThoughts": true
-            }
         });
     }
 
@@ -350,13 +339,6 @@ pub async fn stream_chat(
     let mut prompt_tokens = 0u64;
     let mut eval_tokens = 0u64;
     let mut done_reason = None;
-    let mut in_thinking = false;
-
-    let close_thinking = |in_thinking: &mut bool| {
-        if std::mem::replace(in_thinking, false) {
-            let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}\n\n")));
-        }
-    };
 
     while let Some(line_res) = lines.next().await {
         let line = match line_res {
@@ -410,22 +392,13 @@ pub async fn stream_chat(
 
                 if let Some(parts) = cand.content.and_then(|c| c.parts) {
                     for part in parts {
-                        if part.thought {
-                            if let Some(t) = part.text.filter(|t| !t.is_empty()) {
-                                if !std::mem::replace(&mut in_thinking, true) {
-                                    let _ = tx.send(EngineEvent::StreamChunk(format!(
-                                        "{THINK_OPEN}\n"
-                                    )));
-                                }
-                                let _ = tx.send(EngineEvent::StreamChunk(t));
-                            }
-                        } else if let Some(text) = part.text.filter(|t| !t.is_empty()) {
-                            close_thinking(&mut in_thinking);
+                        if !part.thought
+                            && let Some(text) = part.text.filter(|t| !t.is_empty())
+                        {
                             let _ = tx.send(EngineEvent::StreamChunk(text));
                         }
 
                         if let Some(fc) = part.function_call {
-                            close_thinking(&mut in_thinking);
                             collected_tools.push(ToolCall {
                                 function: ToolFunction {
                                     name: fc.name,
@@ -438,10 +411,6 @@ pub async fn stream_chat(
                 }
             }
         }
-    }
-
-    if in_thinking {
-        let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}")));
     }
 
     info!(

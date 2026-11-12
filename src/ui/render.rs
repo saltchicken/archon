@@ -1,8 +1,5 @@
 use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
-use crate::core::{
-    ollama::{format_thinking_tags, strip_thinking},
-    session::{truncate_str, ChatMessage},
-};
+use crate::core::session::{truncate_str, ChatMessage};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -27,16 +24,8 @@ fn sanitize_line(s: &str) -> String {
         .replace('\t', "    ")
 }
 
-fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
-    let mut text = if show_thinking {
-        format_thinking_tags(&m.content)
-    } else if m.role == "assistant" {
-        strip_thinking(&m.content).0
-    } else {
-        m.content.clone()
-    };
-
-    text = sanitize_line(&text);
+fn format_message_display(m: &ChatMessage) -> String {
+    let mut text = sanitize_line(&m.content);
 
     if let Some(calls) = m.tool_calls.as_ref().filter(|c| !c.is_empty()) {
         if !text.trim().is_empty() {
@@ -565,7 +554,6 @@ impl TuiApp {
             ("^F", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
-            ("^K", "Think"),
             ("^P", "Preset"),
             ("^Y", "SysPrompt"),
             ("^Q", "Quit"),
@@ -586,7 +574,7 @@ impl TuiApp {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(6)])
+            .constraints([Constraint::Length(9), Constraint::Min(6)])
             .split(area);
 
         let toggle = |on| if on { "ON" } else { "OFF" };
@@ -611,7 +599,6 @@ impl TuiApp {
                 toggle(self.enable_tools),
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!("Think:   {} (^K)", toggle(self.show_thinking))),
             Line::from(format!(
                 "Preset:  {} (^P)",
                 preset_label(&self.config.presets, self.preset_idx)
@@ -665,7 +652,7 @@ impl TuiApp {
 
         self.wrapped_messages.truncate(self.messages.len());
         for m in &self.messages[self.wrapped_messages.len()..] {
-            let formatted = format_message_display(m, self.show_thinking);
+            let formatted = format_message_display(m);
             self.wrapped_messages.push(wrap_text(&formatted, &options));
         }
 
@@ -706,22 +693,12 @@ impl TuiApp {
             let i = self.messages.len();
             self.msg_states[i].unfolded = true;
 
-            let text_to_wrap = if self.show_thinking {
-                format_thinking_tags(&self.streaming_text)
+            let sanitized_stream = sanitize_line(&self.streaming_text);
+            let stream_lines = if sanitized_stream.trim().is_empty() {
+                vec!["...".to_string()]
             } else {
-                let (mut stripped, is_thinking) = strip_thinking(&self.streaming_text);
-                if is_thinking {
-                    if !stripped.is_empty() && !stripped.ends_with('\n') {
-                        stripped.push_str("\n\n");
-                    }
-                    stripped.push_str("[Thinking...]");
-                }
-                stripped
+                wrap_text(&sanitized_stream, &options)
             };
-
-            // Sanitize stream text too to avoid cursor drift during active generation
-            let sanitized_stream = sanitize_line(&text_to_wrap);
-            let stream_lines = wrap_text(&sanitized_stream, &options);
 
             render_message_block(
                 i,

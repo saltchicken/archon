@@ -83,7 +83,6 @@ pub struct TuiApp {
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) enable_tools: bool,
-    pub(super) show_thinking: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
     pub(super) used_tokens: u64,
@@ -129,7 +128,6 @@ impl TuiApp {
     pub fn new(model: String, config: Config, cmd_tx: UnboundedSender<EngineCommand>) -> Self {
         let num_ctx = config.context_for_model(&model);
         let max_tool_output_size = config.max_tool_output_for_model(&model);
-        let show_thinking = config.app.show_thinking;
         let model_idx = config
             .models
             .iter()
@@ -157,7 +155,6 @@ impl TuiApp {
             sys_preset_idx: 0,
             custom_system_prompt: None,
             enable_tools: true,
-            show_thinking,
             num_ctx,
             max_tool_output_size,
             used_tokens: 0,
@@ -287,7 +284,6 @@ impl TuiApp {
                 self.msg_states
                     .resize(self.messages.len() + 1, MsgUiState::default());
 
-                // Keep the latest assistant response unfolded so it doesn't clip at 25 lines
                 if let Some(last_idx) = self.messages.len().checked_sub(1)
                     && self.messages[last_idx].role == "assistant"
                 {

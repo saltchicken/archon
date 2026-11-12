@@ -12,9 +12,6 @@ use tokio_util::{
 };
 use tracing::{debug, error, info};
 
-pub const THINK_OPEN: &str = "\x1e<think>\x1e";
-pub const THINK_CLOSE: &str = "\x1e</think>\x1e";
-
 #[derive(Deserialize)]
 struct StreamResponseChunk {
     error: Option<String>,
@@ -29,46 +26,7 @@ struct StreamResponseChunk {
 #[derive(Deserialize)]
 struct StreamMessageChunk {
     content: Option<String>,
-    thinking: Option<String>,
     tool_calls: Option<Vec<ToolCall>>,
-}
-
-pub fn format_thinking_tags(text: &str) -> String {
-    text.replace(THINK_OPEN, "<think>")
-        .replace(THINK_CLOSE, "</think>")
-}
-
-fn strip_delimited(text: &str, open_tag: &str, close_tag: &str) -> (String, bool) {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut is_thinking = false;
-
-    while let Some(start) = rest.find(open_tag) {
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + open_tag.len()..];
-        if let Some(end) = after_open.find(close_tag) {
-            let after_close = &after_open[end + close_tag.len()..];
-            rest = after_close.trim_start_matches('\n');
-            is_thinking = false;
-        } else {
-            is_thinking = true;
-            rest = "";
-            break;
-        }
-    }
-    out.push_str(rest);
-    (out, is_thinking)
-}
-
-pub fn strip_thinking(text: &str) -> (String, bool) {
-    if text.contains(THINK_OPEN) {
-        strip_delimited(text, THINK_OPEN, THINK_CLOSE)
-    } else if text.trim_start().starts_with("<think>") {
-        // Fallback for legacy saved sessions that stored raw `<think>` at the start of a message
-        strip_delimited(text, "<think>", "</think>")
-    } else {
-        (text.to_string(), false)
-    }
 }
 
 pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
@@ -121,13 +79,7 @@ pub fn build_payload(
     }
 
     for m in messages {
-        let content = if m.role == "assistant" {
-            strip_thinking(&m.content).0
-        } else {
-            m.content.clone()
-        };
-
-        let mut msg_obj = json!({ "role": m.role, "content": content });
+        let mut msg_obj = json!({ "role": m.role, "content": m.content });
         if let Some(imgs) = m.images.as_ref().filter(|i| !i.is_empty()) {
             msg_obj["images"] = json!(imgs);
         }
@@ -193,13 +145,6 @@ pub async fn stream_chat(
     let mut prompt_tokens = 0u64;
     let mut eval_tokens = 0u64;
     let mut done_reason = None;
-    let mut in_thinking = false;
-
-    let close_thinking = |in_thinking: &mut bool| {
-        if std::mem::replace(in_thinking, false) {
-            let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}\n\n")));
-        }
-    };
 
     while let Some(line_res) = lines.next().await {
         let line = match line_res {
@@ -231,35 +176,19 @@ pub async fn stream_chat(
         }
 
         if let Some(msg) = chunk.message {
-            if let Some(thinking) = msg.thinking.filter(|t| !t.is_empty()) {
-                if !std::mem::replace(&mut in_thinking, true) {
-                    let _ = tx.send(EngineEvent::StreamChunk(format!("{THINK_OPEN}\n")));
-                }
-                let _ = tx.send(EngineEvent::StreamChunk(thinking));
-            }
             if let Some(content) = msg.content.filter(|c| !c.is_empty()) {
-                close_thinking(&mut in_thinking);
                 let _ = tx.send(EngineEvent::StreamChunk(content));
             }
             if let Some(mut tc) = msg.tool_calls.filter(|t| !t.is_empty()) {
-                close_thinking(&mut in_thinking);
                 collected_tools.append(&mut tc);
             }
         }
 
         if chunk.done {
-            if in_thinking {
-                let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}")));
-                in_thinking = false;
-            }
             prompt_tokens = chunk.prompt_eval_count.unwrap_or(0).max(0) as u64;
             eval_tokens = chunk.eval_count.unwrap_or(0).max(0) as u64;
             done_reason = chunk.done_reason;
         }
-    }
-
-    if in_thinking {
-        let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}")));
     }
 
     info!(
