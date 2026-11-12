@@ -15,7 +15,6 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -32,15 +31,12 @@ struct ContextArgs {
     /// Optional additional glob patterns to exclude for this call.
     #[serde(default)]
     exclude: Vec<String>,
-    /// Optional git ref or branch to include a `git diff` section (e.g. "HEAD", "main", "--staged"). Leave empty for no diff.
-    #[serde(default)]
-    diff: String,
 }
 
 pub fn schema() -> Value {
     auto_schema::<ContextArgs>(
         "context",
-        "Generates a formatted project snapshot including directory tree, file contents, and optional git diff. Respects .gitignore and .archon.toml [context] settings.",
+        "Generates a formatted project snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [context] settings.",
     )
 }
 
@@ -197,36 +193,6 @@ fn get_fence(content: &str) -> String {
         }
     }
     "`".repeat(max_backticks.max(2) + 1)
-}
-
-fn run_git_diff(git_root: &Path, target: &str) -> Result<Option<(String, String)>> {
-    let trimmed = target.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if trimmed.starts_with('-') && trimmed != "--staged" && trimmed != "--cached" {
-        bail!("Invalid diff target '{trimmed}': only '--staged' or a valid git ref is allowed");
-    }
-
-    let output = Command::new("git")
-        .current_dir(git_root)
-        .args(["--no-pager", "diff", "--no-ext-diff", trimmed])
-        .output()
-        .context("Failed to execute git diff")?;
-
-    if !output.status.success() {
-        bail!(
-            "git diff failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let diff_str = String::from_utf8_lossy(&output.stdout).into_owned();
-    if diff_str.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some((trimmed.to_string(), diff_str)))
-    }
 }
 
 fn archon_config_dir() -> Option<PathBuf> {
@@ -526,12 +492,6 @@ pub fn execute(
         }
     }
 
-    let git_diff = if used_bytes <= max_output_size {
-        run_git_diff(&base_root, &args.diff)?
-    } else {
-        None
-    };
-
     let mut out = String::new();
     let _ = writeln!(out, "# Project: {project_name}\n");
     out.push_str("## Directory Structure\n\n```text\n");
@@ -557,17 +517,6 @@ pub fn execute(
                 let _ = writeln!(out, "{fence}\n");
             }
         }
-    }
-
-    if let Some((target, diff)) = git_diff {
-        let _ = writeln!(out, "## Git Diff (Target: {target})\n");
-        let fence = get_fence(&diff);
-        let _ = writeln!(out, "{fence}diff");
-        out.push_str(&diff);
-        if !diff.ends_with('\n') {
-            out.push('\n');
-        }
-        let _ = writeln!(out, "{fence}\n");
     }
 
     Ok(out.trim_end().to_string())
