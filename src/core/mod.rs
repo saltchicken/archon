@@ -679,8 +679,8 @@ impl CoreEngine {
                     self.save_and_emit_chat().await;
 
                     let prefix = match (hit_length, is_near_limit) {
-                        (true, _) => "⚠️ CTX MAXED OUT (Truncated) — ",
-                        (false, true) => "⚠️ CTX LIMIT NEAR — ",
+                        (true, _) => "⚠ CTX MAXED OUT (Truncated) — ",
+                        (false, true) => "⚠ CTX LIMIT NEAR — ",
                         _ => "",
                     };
 

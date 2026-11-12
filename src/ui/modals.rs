@@ -1,4 +1,4 @@
-use super::{titled_block, TuiApp};
+use super::{render::sanitize_line, titled_block, TuiApp};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -43,13 +43,14 @@ fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget
     f.render_widget(widget, area);
 }
 
-fn format_tool_preview_lines(preview: &str) -> Vec<Line<'_>> {
+fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
     let mut section_color = Color::White;
     let mut in_diff = false;
 
     preview
         .lines()
-        .map(|line| {
+        .map(|raw_line| {
+            let line = sanitize_line(raw_line);
             if line.starts_with("--- ") && line.ends_with(" ---") {
                 in_diff = line == "--- UNIFIED DIFF ---";
                 let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
@@ -95,7 +96,7 @@ impl TuiApp {
     pub(super) fn draw_file_modal(&self, f: &mut Frame) {
         let widget = Paragraph::new(format!(
             "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
-            self.file_path_input
+            sanitize_line(&self.file_path_input)
         ))
         .block(titled_block(" Add Image File "));
         render_modal(f, 60, 20, widget);
@@ -110,7 +111,9 @@ impl TuiApp {
                 let prefix = if i == self.session_idx { ">> " } else { "   " };
                 ListItem::new(format!(
                     "{prefix}[{}] {} ({} msgs)",
-                    s.updated_at, s.title, s.messages
+                    s.updated_at,
+                    sanitize_line(&s.title),
+                    s.messages
                 ))
             })
             .collect();
@@ -228,7 +231,7 @@ impl TuiApp {
                     .fg(Color::Blue)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from(format!("> {}", self.tool_feedback)),
+            Line::from(format!("> {}", sanitize_line(&self.tool_feedback))),
             Line::from(""),
             Line::from(Span::styled(
                 "[⏎] Approve Once   [^A] Always (Session)   [Esc] Decline   [↑/↓/PgUp/PgDn] Scroll",
@@ -241,7 +244,7 @@ impl TuiApp {
             .scroll((self.tool_scroll, 0))
             .block(
                 titled_block(format!(
-                    " ⚠️ Tool Execution Approval Required ({idx}/{total}) "
+                    " ⚠ Tool Execution Approval Required ({idx}/{total}) "
                 ))
                 .border_style(Style::default().fg(Color::Yellow)),
             );

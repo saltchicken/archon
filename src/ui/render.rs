@@ -19,7 +19,7 @@ enum ColAlign {
     Right,
 }
 
-fn sanitize_line(s: &str) -> String {
+pub(super) fn sanitize_line(s: &str) -> String {
     // Strip \r and Variation Selector-16 (\u{fe0f}) which causes terminal/ratatui
     // cursor desync on ambiguous-width symbols like ⚠️ (U+26A0 + U+FE0F).
     s.replace('\r', "")
@@ -541,7 +541,7 @@ impl TuiApp {
             .split(area);
 
         f.render_widget(
-            Paragraph::new(format!(" {}", self.status_bar.0)).style(status_style),
+            Paragraph::new(format!(" {}", sanitize_line(&self.status_bar.0))).style(status_style),
             status_chunks[0],
         );
 
@@ -721,7 +721,7 @@ impl TuiApp {
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
                         .map_or_else(|| "tool".to_string(), format_tool_call_summary);
-                    (format!("⚙ TOOL [{summary}]"), Color::Yellow)
+                    (sanitize_line(&format!("⚙ TOOL [{summary}]")), Color::Yellow)
                 }
                 _ => ("SYS".to_string(), Color::Gray),
             };
