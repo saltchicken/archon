@@ -104,24 +104,28 @@ fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) 
     });
 }
 
-fn format_edit_approval(mut out: String, obj: &Map<String, Value>) -> String {
-    let get_str = |key| obj.get(key).and_then(Value::as_str).unwrap_or("");
-    let file_path = get_str("file_path");
-    let search = get_str("search_string");
-    let replace = get_str("replace_string");
+fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
+    let file_path = obj
+        .get("file_path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     out.push_str(&format!("  file_path: {file_path}\n"));
     for (k, v) in obj {
-        if !matches!(k.as_str(), "file_path" | "search_string" | "replace_string") {
+        if !matches!(k.as_str(), "file_path" | "edits") {
             out.push_str(&format_kv(k, v));
         }
     }
 
-    match tools::edit_file::apply_edit(file_path, search, replace) {
-        Ok((_, original, updated)) => append_unified_diff(&mut out, file_path, &original, &updated),
+    match tools::edit_file::apply_edits_from_value(args) {
+        Ok((_, original, updated, hunk_count)) => {
+            out.push_str(&format!("  hunks: {hunk_count}\n"));
+            append_unified_diff(&mut out, file_path, &original, &updated);
+        }
         Err(e) => {
             out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-            append_unified_diff(&mut out, file_path, search, replace);
+            let (raw_search, raw_replace) = tools::edit_file::fallback_hunk_preview(args);
+            append_unified_diff(&mut out, file_path, &raw_search, &raw_replace);
         }
     }
 
@@ -135,7 +139,7 @@ fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -
 
     match tools::fs::preview_action(args) {
         Ok((summary, maybe_diff)) => {
-            out.push_str(&format!("\n---OPERATION ---\n{summary}\n"));
+            out.push_str(&format!("\n--- OPERATION ---\n{summary}\n"));
             if let Some((file_path, deleted_content)) = maybe_diff {
                 append_unified_diff(&mut out, &file_path, &deleted_content, "");
             }
@@ -162,7 +166,7 @@ pub fn format_approval(call: &ToolCall) -> String {
 
     let mut out = format!("Tool: {name} (Rule: {sig})\n");
     if name == "edit_file" {
-        return format_edit_approval(out, obj);
+        return format_edit_approval(out, args, obj);
     }
     if name == "fs" {
         return format_fs_approval(out, args, obj);
@@ -171,13 +175,7 @@ pub fn format_approval(call: &ToolCall) -> String {
     let mut multiline_blocks = Vec::new();
     for (k, v) in obj {
         match v.as_str() {
-            Some(s)
-                if s.contains('\n')
-                    || matches!(
-                        k.as_str(),
-                        "search_string" | "replace_string" | "content" | "message"
-                    ) =>
-            {
+            Some(s) if s.contains('\n') || matches!(k.as_str(), "content" | "message") => {
                 multiline_blocks.push((k, s));
             }
             _ => out.push_str(&format_kv(k, v)),
