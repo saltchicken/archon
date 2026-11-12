@@ -18,6 +18,14 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThoughtPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -29,6 +37,8 @@ pub struct ChatMessage {
     pub image_paths: Option<Vec<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thoughts: Option<Vec<ThoughtPart>>,
 }
 
 impl ChatMessage {
@@ -40,6 +50,7 @@ impl ChatMessage {
             images: None,
             image_paths: None,
             tool_calls: None,
+            thoughts: None,
         }
     }
 

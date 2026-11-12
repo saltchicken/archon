@@ -10,7 +10,7 @@ pub mod workspace;
 use config::Config;
 use provider::Provider;
 use reqwest::Client;
-use session::{ChatMessage, SessionManager, SessionSummary};
+use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
 use std::{
     collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -78,6 +78,7 @@ pub enum EngineEvent {
         eval_tokens: u64,
         done_reason: Option<String>,
         tool_calls: Vec<ToolCall>,
+        thoughts: Vec<ThoughtPart>,
     },
     StreamError(String),
     ToolApprovalRequested {
@@ -657,6 +658,7 @@ impl CoreEngine {
                 eval_tokens,
                 ref done_reason,
                 ref tool_calls,
+                ref thoughts,
             } => {
                 self.active_task = None;
                 let final_text = std::mem::take(&mut self.stream_buffer);
@@ -668,9 +670,10 @@ impl CoreEngine {
                     || usage_pct >= 90.0
                     || prompt_tokens >= ctx_limit.saturating_sub(256);
 
-                if !final_text.trim().is_empty() || !tool_calls.is_empty() {
+                if !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty() {
                     self.messages.push(ChatMessage {
                         tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
+                        thoughts: (!thoughts.is_empty()).then(|| thoughts.clone()),
                         ..ChatMessage::new("assistant", final_text)
                     });
                     self.save_and_emit_chat().await;

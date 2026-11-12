@@ -207,5 +207,6 @@ pub async fn stream_chat(
         eval_tokens,
         done_reason,
         tool_calls: collected_tools,
+        thoughts: Vec::new(),
     });
 }
