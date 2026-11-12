@@ -284,6 +284,15 @@ impl TuiApp {
                 self.is_streaming = false;
                 self.streaming_text.clear();
                 self.msg_states.clear();
+                self.msg_states
+                    .resize(self.messages.len() + 1, MsgUiState::default());
+
+                // Keep the latest assistant response unfolded so it doesn't clip at 25 lines
+                if let Some(last_idx) = self.messages.len().checked_sub(1)
+                    && self.messages[last_idx].role == "assistant"
+                {
+                    self.msg_states[last_idx].unfolded = true;
+                }
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;

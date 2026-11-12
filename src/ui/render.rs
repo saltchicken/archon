@@ -1,6 +1,6 @@
 use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
 use crate::core::{
-    ollama::strip_thinking,
+    ollama::{format_thinking_tags, strip_thinking},
     session::{truncate_str, ChatMessage},
 };
 use ratatui::{
@@ -29,9 +29,11 @@ fn sanitize_line(s: &str) -> String {
 
 fn format_message_display(m: &ChatMessage, show_thinking: bool) -> String {
     let mut text = if show_thinking {
-        m.content.clone()
-    } else {
+        format_thinking_tags(&m.content)
+    } else if m.role == "assistant" {
         strip_thinking(&m.content).0
+    } else {
+        m.content.clone()
     };
 
     text = sanitize_line(&text);
@@ -702,8 +704,10 @@ impl TuiApp {
 
         if self.is_streaming {
             let i = self.messages.len();
+            self.msg_states[i].unfolded = true;
+
             let text_to_wrap = if self.show_thinking {
-                self.streaming_text.clone()
+                format_thinking_tags(&self.streaming_text)
             } else {
                 let (mut stripped, is_thinking) = strip_thinking(&self.streaming_text);
                 if is_thinking {

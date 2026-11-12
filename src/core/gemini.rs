@@ -1,6 +1,6 @@
 use crate::core::{
     config::Config,
-    ollama::strip_thinking,
+    ollama::{strip_thinking, THINK_CLOSE, THINK_OPEN},
     session::ChatMessage,
     tools::{ToolCall, ToolFunction},
     EngineEvent,
@@ -354,7 +354,7 @@ pub async fn stream_chat(
 
     let close_thinking = |in_thinking: &mut bool| {
         if std::mem::replace(in_thinking, false) {
-            let _ = tx.send(EngineEvent::StreamChunk("\n</think>\n\n".into()));
+            let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}\n\n")));
         }
     };
 
@@ -413,7 +413,9 @@ pub async fn stream_chat(
                         if part.thought {
                             if let Some(t) = part.text.filter(|t| !t.is_empty()) {
                                 if !std::mem::replace(&mut in_thinking, true) {
-                                    let _ = tx.send(EngineEvent::StreamChunk("<think>\n".into()));
+                                    let _ = tx.send(EngineEvent::StreamChunk(format!(
+                                        "{THINK_OPEN}\n"
+                                    )));
                                 }
                                 let _ = tx.send(EngineEvent::StreamChunk(t));
                             }
@@ -439,7 +441,7 @@ pub async fn stream_chat(
     }
 
     if in_thinking {
-        let _ = tx.send(EngineEvent::StreamChunk("\n</think>".into()));
+        let _ = tx.send(EngineEvent::StreamChunk(format!("\n{THINK_CLOSE}")));
     }
 
     info!(
