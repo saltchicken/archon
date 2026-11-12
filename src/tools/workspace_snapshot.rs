@@ -1,8 +1,8 @@
 use crate::{
-    core::config::{expand_tilde, WorkspaceSnapshotSettings},
+    core::config::{WorkspaceSnapshotSettings, expand_tilde},
     tools::{auto_schema, parse_args, validate_relative_path, workspace_root},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;

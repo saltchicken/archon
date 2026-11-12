@@ -2,7 +2,7 @@ use crate::{
     core::config::WorkspaceSnapshotSettings,
     tools::{auto_schema, parse_args, validate_relative_path, workspace_root},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;
@@ -68,12 +68,10 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
         if pat.contains('/') || pat.contains('\\') {
-            builder
-                .add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
+            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
         } else {
             // Allow shorthand like "*.rs" to match at any directory depth
-            builder
-                .add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
+            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
             let recursive = format!("**/{pat}");
             builder.add(
                 Glob::new(&recursive)

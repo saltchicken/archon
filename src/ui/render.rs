@@ -1,14 +1,14 @@
-use super::{preset_label, titled_block, ActiveModal, MsgUiState, TuiApp};
+use super::{ActiveModal, MsgUiState, TuiApp, preset_label, titled_block};
 use crate::core::{
-    session::{truncate_str, ChatMessage},
+    session::{ChatMessage, truncate_str},
     tools::ToolCall,
 };
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
-    Frame,
 };
 use textwrap::core::display_width;
 
@@ -187,10 +187,8 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         let target_sum = available_width - overhead;
         let min_col = 3usize;
         while col_widths.iter().sum::<usize>() > target_sum {
-            if let Some((max_idx, &max_val)) = col_widths
-                .iter()
-                .enumerate()
-                .max_by_key(|&(_, &w)| w)
+            if let Some((max_idx, &max_val)) =
+                col_widths.iter().enumerate().max_by_key(|&(_, &w)| w)
             {
                 if max_val <= min_col {
                     break;
@@ -233,9 +231,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         for sub in 0..max_sublines {
             let mut line = String::from("│");
             for c_idx in 0..num_cols {
-                let part = wrapped_cells[c_idx]
-                    .get(sub)
-                    .map_or("", String::as_str);
+                let part = wrapped_cells[c_idx].get(sub).map_or("", String::as_str);
                 let padded = pad_cell(part, col_widths[c_idx], aligns[c_idx]);
                 line.push(' ');
                 line.push_str(&padded);
@@ -399,7 +395,9 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
                 Span::raw("  "),
                 Span::styled(
                     line.clone(),
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]
         } else if in_code_block {
@@ -645,8 +643,10 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items)
-                .block(titled_block(format!(" Images ({}) ", self.attachments.len()))),
+            List::new(items).block(titled_block(format!(
+                " Images ({}) ",
+                self.attachments.len()
+            ))),
             chunks[1],
         );
     }
@@ -806,7 +806,10 @@ impl TuiApp {
         let title_line = Line::from(vec![
             Span::raw(format!(" Conversation [{}] ", self.model)),
             Span::styled(
-                format!("[Ctx: {} / {} ({pct:.0}%)] ", self.used_tokens, self.num_ctx),
+                format!(
+                    "[Ctx: {} / {} ({pct:.0}%)] ",
+                    self.used_tokens, self.num_ctx
+                ),
                 Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -819,8 +822,7 @@ impl TuiApp {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
             .end_symbol(Some("▼"));
-        let mut scrollbar_state =
-            ScrollbarState::new(max_scroll).position(self.chat_scroll);
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(self.chat_scroll);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
         f.render_widget(&self.text_area, chunks[1]);

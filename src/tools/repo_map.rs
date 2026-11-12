@@ -2,7 +2,7 @@ use crate::{
     core::config::WorkspaceSnapshotSettings,
     tools::{auto_schema, parse_args, validate_relative_path, workspace_root},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;
@@ -129,11 +129,9 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
         if pat.contains('/') || pat.contains('\\') {
-            builder
-                .add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
+            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
         } else {
-            builder
-                .add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
+            builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
             let recursive = format!("**/{pat}");
             builder.add(
                 Glob::new(&recursive)
@@ -208,7 +206,10 @@ fn extract_leading_docs(node: Node<'_>, source: &str) -> Option<String> {
             break;
         }
 
-        if matches!(kind, "attribute_item" | "inner_attribute_item" | "decorator") {
+        if matches!(
+            kind,
+            "attribute_item" | "inner_attribute_item" | "decorator"
+        ) {
             expected_end_row = sib_start_row;
             cur = sib.prev_sibling();
             continue;
@@ -284,7 +285,11 @@ fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
         // For Rust structs/enums/type aliases that are short, keep compact signatures
         if lang == SupportedLang::Rust
             && matches!(node.kind(), "struct_item" | "enum_item")
-            && node.end_position().row.saturating_sub(node.start_position().row) <= 10
+            && node
+                .end_position()
+                .row
+                .saturating_sub(node.start_position().row)
+                <= 10
         {
             return None;
         }
@@ -304,11 +309,12 @@ fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
                 | "enum_variant_list"
         ) {
             if lang == SupportedLang::Rust
-                && matches!(
-                    child.kind(),
-                    "field_declaration_list" | "enum_variant_list"
-                )
-                && node.end_position().row.saturating_sub(node.start_position().row) <= 10
+                && matches!(child.kind(), "field_declaration_list" | "enum_variant_list")
+                && node
+                    .end_position()
+                    .row
+                    .saturating_sub(node.start_position().row)
+                    <= 10
             {
                 return None;
             }
@@ -323,7 +329,10 @@ fn format_node_signature(node: Node<'_>, source: &str, lang: SupportedLang) -> S
     let end = find_body_start_byte(node, lang).unwrap_or_else(|| node.end_byte());
     let slice = &source[start..end.max(start).min(source.len())];
 
-    if lang == SupportedLang::Rust && matches!(node.kind(), "struct_item" | "enum_item") && end == node.end_byte() {
+    if lang == SupportedLang::Rust
+        && matches!(node.kind(), "struct_item" | "enum_item")
+        && end == node.end_byte()
+    {
         let lines: Vec<String> = slice
             .lines()
             .map(|l| l.trim())
@@ -366,7 +375,12 @@ fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Optio
         }
     }
 
-    if lang == SupportedLang::Go && matches!(node.kind(), "type_declaration" | "const_declaration" | "var_declaration") {
+    if lang == SupportedLang::Go
+        && matches!(
+            node.kind(),
+            "type_declaration" | "const_declaration" | "var_declaration"
+        )
+    {
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             if child.kind().ends_with("_spec")
@@ -417,9 +431,10 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
             "enum_declaration" => Some(("enum", false)),
             "lexical_declaration" => {
                 // Only include top-level const/let declarations or exported arrow functions
-                if node.parent().is_some_and(|p| {
-                    matches!(p.kind(), "program" | "export_statement")
-                }) {
+                if node
+                    .parent()
+                    .is_some_and(|p| matches!(p.kind(), "program" | "export_statement"))
+                {
                     Some(("const", false))
                 } else {
                     None
@@ -887,7 +902,10 @@ pub fn execute(
                     let _ = writeln!(block, "{indent}/// {doc}");
                 }
                 let ref_tag = if def.cross_file_refs > 0 {
-                    format!(" // [L{}-L{} | {} refs]", def.start_line, def.end_line, def.cross_file_refs)
+                    format!(
+                        " // [L{}-L{} | {} refs]",
+                        def.start_line, def.end_line, def.cross_file_refs
+                    )
                 } else {
                     format!(" // [L{}-L{}]", def.start_line, def.end_line)
                 };

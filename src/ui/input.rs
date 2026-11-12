@@ -1,4 +1,4 @@
-use super::{create_text_area, ActiveModal, TuiApp};
+use super::{ActiveModal, TuiApp, create_text_area};
 use crate::core::EngineCommand;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;

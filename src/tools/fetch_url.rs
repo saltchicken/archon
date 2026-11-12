@@ -1,7 +1,7 @@
 use crate::tools::{auto_schema, parse_args};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use reqwest::{redirect::Policy, Client, Url};
+use reqwest::{Client, Url, redirect::Policy};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -277,8 +277,8 @@ fn html_to_text(raw_html: &str) -> String {
 
 pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     let args: FetchUrlArgs = parse_args(json_args, "fetch_url")?;
-    let mut current_url =
-        Url::parse(args.url.trim()).with_context(|| format!("Invalid URL: '{}'", args.url.trim()))?;
+    let mut current_url = Url::parse(args.url.trim())
+        .with_context(|| format!("Invalid URL: '{}'", args.url.trim()))?;
 
     let mut resp = None;
     for hop in 0..=MAX_REDIRECTS {
@@ -300,7 +300,10 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
                 bail!("Exceeded maximum redirect limit ({MAX_REDIRECTS})");
             }
             let Some(loc) = r.headers().get(reqwest::header::LOCATION) else {
-                bail!("Redirect response (HTTP {}) missing Location header", r.status());
+                bail!(
+                    "Redirect response (HTTP {}) missing Location header",
+                    r.status()
+                );
             };
             let loc_str = loc
                 .to_str()

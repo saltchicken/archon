@@ -2,7 +2,7 @@ use crate::tools::{
     auto_schema, ensure_path_or_ancestor_within_workspace, parse_args, resolve_existing_path,
     run_workspace_command, validate_relative_path, workspace_root,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -149,8 +149,7 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             "No commit output."
         }
         GitAction::Blame => {
-            let path = validate_scoped_path(&args.path, true)?
-                .expect("must_exist guarantees Some");
+            let path = validate_scoped_path(&args.path, true)?.expect("must_exist guarantees Some");
             cmd_args.push("blame".into());
             if let Some(t) = validate_git_target(&args.target, false)? {
                 cmd_args.push(t.into());
@@ -164,14 +163,16 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             "No branches found."
         }
         GitAction::Add => {
-            let path = validate_scoped_path(&args.path, false)?
-                .ok_or_else(|| anyhow::anyhow!("'path' is required for git add (use '.' for all)"))?;
+            let path = validate_scoped_path(&args.path, false)?.ok_or_else(|| {
+                anyhow::anyhow!("'path' is required for git add (use '.' for all)")
+            })?;
             cmd_args.extend(["add".into(), "--".into(), path]);
             "Files staged successfully."
         }
         GitAction::Unstage => {
-            let path = validate_scoped_path(&args.path, false)?
-                .ok_or_else(|| anyhow::anyhow!("'path' is required for git unstage (use '.' for all)"))?;
+            let path = validate_scoped_path(&args.path, false)?.ok_or_else(|| {
+                anyhow::anyhow!("'path' is required for git unstage (use '.' for all)")
+            })?;
             cmd_args.extend(["restore".into(), "--staged".into(), "--".into(), path]);
             "Files unstaged successfully."
         }

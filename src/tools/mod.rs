@@ -11,10 +11,10 @@ pub mod search;
 pub mod workspace_snapshot;
 
 use crate::core::config::Config;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env,
     ffi::OsStr,
@@ -235,8 +235,14 @@ where
         .with_context(|| format!("Error executing {program}"))?;
 
     let cap = (max_output_size as u64).saturating_add(1);
-    let stdout = child.stdout.take().context("Failed to capture child stdout")?;
-    let stderr = child.stderr.take().context("Failed to capture child stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture child stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture child stderr")?;
 
     let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(timeout_secs), async {
         let (r1, r2, status) = tokio::join!(
@@ -247,12 +253,12 @@ where
         Ok::<_, std::io::Error>((r1?, r2?, status?))
     })
     .await
-    .map_err(|_| {
-        anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds")
-    })?
+    .map_err(|_| anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds"))?
     .with_context(|| format!("Error reading output from {program}"))?;
 
-    Ok(format_process_bytes(&out_bytes, &err_bytes, status, empty_msg))
+    Ok(format_process_bytes(
+        &out_bytes, &err_bytes, status, empty_msg,
+    ))
 }
 
 pub fn format_process_bytes(

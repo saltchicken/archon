@@ -105,10 +105,7 @@ fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) 
 }
 
 fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    let file_path = obj
-        .get("file_path")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
 
     out.push_str(&format!("  file_path: {file_path}\n"));
     for (k, v) in obj {

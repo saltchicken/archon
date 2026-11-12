@@ -1,5 +1,5 @@
 use crate::tools::{auto_schema, parse_args, resolve_existing_path};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;

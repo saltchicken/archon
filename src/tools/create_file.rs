@@ -12,10 +12,7 @@ struct CreateFileArgs {
 }
 
 pub fn schema() -> Value {
-    auto_schema::<CreateFileArgs>(
-        "create_file",
-        "Create a new file in the workspace.",
-    )
+    auto_schema::<CreateFileArgs>("create_file", "Create a new file in the workspace.")
 }
 
 pub fn execute(json_args: &Value) -> Result<String> {

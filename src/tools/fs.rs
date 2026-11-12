@@ -2,16 +2,12 @@ use crate::tools::{
     auto_schema, ensure_within_workspace, parse_args, resolve_existing_path, resolve_new_path,
     validate_relative_path, workspace_root,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::{
-    fmt::Write as _,
-    fs,
-    path::Path,
-};
+use std::{fmt::Write as _, fs, path::Path};
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -239,7 +235,9 @@ fn list_dir_recursive(
     entries.sort_by(|a, b| {
         let a_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let b_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        b_dir.cmp(&a_dir).then_with(|| a.file_name().cmp(&b.file_name()))
+        b_dir
+            .cmp(&a_dir)
+            .then_with(|| a.file_name().cmp(&b.file_name()))
     });
 
     let indent = "  ".repeat(current_depth);
@@ -307,9 +305,18 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
             }
 
             let max_depth = args.max_depth.unwrap_or(1).clamp(1, 5);
-            let mut out = format!("Directory listing for '{rel_display}' (max_depth: {max_depth}):\n");
+            let mut out =
+                format!("Directory listing for '{rel_display}' (max_depth: {max_depth}):\n");
             let mut count = 0usize;
-            list_dir_recursive(&target, &cwd, 1, max_depth, &mut out, max_output_size, &mut count)?;
+            list_dir_recursive(
+                &target,
+                &cwd,
+                1,
+                max_depth,
+                &mut out,
+                max_output_size,
+                &mut count,
+            )?;
 
             if count == 0 {
                 return Ok(format!("Directory '{rel_display}' is empty."));
@@ -330,7 +337,8 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
             }
 
             if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).context("Error creating destination parent directories")?;
+                fs::create_dir_all(parent)
+                    .context("Error creating destination parent directories")?;
                 ensure_within_workspace(parent, &cwd, "destination parent")?;
             }
 
@@ -362,7 +370,8 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
             }
 
             if let Some(parent) = dst.parent() {
-                fs::create_dir_all(parent).context("Error creating destination parent directories")?;
+                fs::create_dir_all(parent)
+                    .context("Error creating destination parent directories")?;
                 ensure_within_workspace(parent, &cwd, "destination parent")?;
             }
 
@@ -406,14 +415,20 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
                 }
                 if args.recursive {
                     fs::remove_dir_all(&target).with_context(|| {
-                        format!("Failed to recursively remove directory '{}'", args.path.trim())
+                        format!(
+                            "Failed to recursively remove directory '{}'",
+                            args.path.trim()
+                        )
                     })?;
                 } else {
                     fs::remove_dir(&target).with_context(|| {
                         format!("Failed to remove empty directory '{}'", args.path.trim())
                     })?;
                 }
-                Ok(format!("Successfully removed directory '{}'", args.path.trim()))
+                Ok(format!(
+                    "Successfully removed directory '{}'",
+                    args.path.trim()
+                ))
             } else {
                 fs::remove_file(&target)
                     .with_context(|| format!("Failed to remove file '{}'", args.path.trim()))?;

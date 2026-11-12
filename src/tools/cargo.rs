@@ -1,5 +1,5 @@
 use crate::tools::{auto_schema, parse_args, run_workspace_command_with_timeout};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;

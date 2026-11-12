@@ -1,10 +1,10 @@
-use super::{render::sanitize_line, titled_block, TuiApp};
+use super::{TuiApp, render::sanitize_line, titled_block};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, Paragraph, Widget, Wrap},
-    Frame,
 };
 
 pub const CTX_PRESETS: &[(u32, &str)] = &[
@@ -68,7 +68,9 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
                 };
                 Line::from(Span::styled(
                     line,
-                    Style::default().fg(header_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(header_color)
+                        .add_modifier(Modifier::BOLD),
                 ))
             } else if in_diff {
                 let style = if line.starts_with("+++") || line.starts_with("---") {
@@ -118,8 +120,9 @@ impl TuiApp {
             })
             .collect();
 
-        let widget =
-            List::new(items).block(titled_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
+        let widget = List::new(items).block(titled_block(
+            " Saved Sessions (⏎=Load, D=Delete, Esc=Close) ",
+        ));
         render_modal(f, 70, 60, widget);
     }
 
@@ -156,8 +159,7 @@ impl TuiApp {
             })
             .collect();
 
-        let widget =
-            List::new(items).block(titled_block(" Select Model (⏎=Switch, Esc=Cancel) "));
+        let widget = List::new(items).block(titled_block(" Select Model (⏎=Switch, Esc=Cancel) "));
         render_modal(f, 65, 45, widget);
     }
 

@@ -2,7 +2,7 @@ use crate::tools::{
     auto_schema, ensure_path_or_ancestor_within_workspace, parse_args, run_workspace_command,
     validate_relative_path, workspace_root,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;

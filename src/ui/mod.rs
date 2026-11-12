@@ -3,10 +3,10 @@ mod modals;
 mod render;
 
 use crate::core::{
+    EngineCommand, EngineEvent, TurnConfig,
     config::{Config, Preset},
     session::{ChatMessage, SessionSummary},
     workspace::ImageAttachment,
-    EngineCommand, EngineEvent, TurnConfig,
 };
 use anyhow::Result;
 use crossterm::{
@@ -17,18 +17,18 @@ use crossterm::{
     },
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
     },
 };
 use futures_util::{FutureExt, StreamExt};
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::Rect,
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders},
-    Terminal,
 };
 use ratatui_textarea::TextArea;
 use std::{io, time::Duration};
@@ -337,10 +337,8 @@ impl TuiApp {
                     .resize(self.messages.len() + 1, MsgUiState::default());
 
                 // Unfold the latest assistant response while keeping separate `tool` blocks folded.
-                if let Some(last_assistant_idx) = self
-                    .messages
-                    .iter()
-                    .rposition(|m| m.role == "assistant")
+                if let Some(last_assistant_idx) =
+                    self.messages.iter().rposition(|m| m.role == "assistant")
                 {
                     self.msg_states[last_assistant_idx].unfolded = true;
                 }

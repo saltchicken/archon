@@ -1,6 +1,4 @@
-use crate::core::{
-    config::Config, gemini, ollama, session::ChatMessage, EngineEvent, TurnConfig,
-};
+use crate::core::{EngineEvent, TurnConfig, config::Config, gemini, ollama, session::ChatMessage};
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::Value;
@@ -95,20 +93,9 @@ impl Provider {
                     ));
                     return;
                 };
-                let payload = gemini::build_payload(
-                    &messages,
-                    &turn.system_prompt,
-                    tools_schema,
-                );
-                gemini::stream_chat(
-                    client,
-                    config.gemini.base_url,
-                    api_key,
-                    model,
-                    payload,
-                    tx,
-                )
-                .await;
+                let payload = gemini::build_payload(&messages, &turn.system_prompt, tools_schema);
+                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
+                    .await;
             }
         }
     }

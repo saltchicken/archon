@@ -1,9 +1,9 @@
-use crate::core::{config::Config, session::ChatMessage, tools::ToolCall, EngineEvent};
-use anyhow::{bail, Context, Result};
+use crate::core::{EngineEvent, config::Config, session::ChatMessage, tools::ToolCall};
+use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::{
@@ -151,9 +151,7 @@ pub async fn stream_chat(
             Ok(l) => l,
             Err(e) => {
                 error!("Stream reading error: {}", e);
-                let _ = tx.send(EngineEvent::StreamError(format!(
-                    "Stream interrupted: {e}"
-                )));
+                let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
                 return;
             }
         };

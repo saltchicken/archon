@@ -4,9 +4,9 @@ mod ui;
 
 use anyhow::Result;
 use core::{
-    config::{load_dotenv, Config},
-    provider::Provider,
     CoreEngine, EngineEvent,
+    config::{Config, load_dotenv},
+    provider::Provider,
 };
 use std::env;
 use tokio::sync::mpsc;
@@ -36,12 +36,13 @@ async fn main() -> Result<()> {
         info!("Archon starting up. Config loaded successfully.");
     }
 
-    let target_model = env::args()
-        .nth(1)
-        .unwrap_or_else(|| config.startup_model());
+    let target_model = env::args().nth(1).unwrap_or_else(|| config.startup_model());
     let provider = Provider::from_model(&target_model);
 
-    info!("Targeting model: {} (Provider: {:?})", target_model, provider);
+    info!(
+        "Targeting model: {} (Provider: {:?})",
+        target_model, provider
+    );
 
     if let Err(e) = provider.run_preflight(&target_model, &config).await {
         error!("Preflight failed: {}", e);

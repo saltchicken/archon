@@ -1,6 +1,6 @@
 use crate::core::config::expand_tilde;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub fn init(history_dir: &str) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = expand_tilde(history_dir).join("logs");

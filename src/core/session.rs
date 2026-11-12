@@ -2,8 +2,8 @@ use crate::core::{config::expand_tilde, tools::ToolCall};
 use anyhow::{Context, Result};
 use chrono::Local;
 use serde::{
-    de::{IgnoredAny, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
+    de::{IgnoredAny, SeqAccess, Visitor},
 };
 use std::{
     fmt, fs,
@@ -94,7 +94,9 @@ pub struct SessionSummary {
     pub file_path: PathBuf,
 }
 
-fn count_sequence<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<usize, D::Error> {
+fn count_sequence<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<usize, D::Error> {
     struct CountVisitor;
     impl<'de> Visitor<'de> for CountVisitor {
         type Value = usize;

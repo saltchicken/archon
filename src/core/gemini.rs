@@ -1,14 +1,14 @@
 use crate::core::{
+    EngineEvent,
     config::Config,
     session::{ChatMessage, ThoughtPart},
     tools::{ToolCall, ToolFunction},
-    EngineEvent,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt};
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::{
@@ -59,7 +59,10 @@ fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) 
     }
 
     if let Some(obj) = val.as_object_mut() {
-        if let Some(ref_str) = obj.remove("$ref").and_then(|v| v.as_str().map(String::from)) {
+        if let Some(ref_str) = obj
+            .remove("$ref")
+            .and_then(|v| v.as_str().map(String::from))
+        {
             let def_name = ref_str
                 .strip_prefix("#/$defs/")
                 .or_else(|| ref_str.strip_prefix("#/definitions/"));
@@ -143,7 +146,10 @@ fn sanitize_schema_node(val: &mut Value) {
         if let Some(const_val) = obj.remove("const") {
             if let Some(s) = const_val.as_str() {
                 obj.insert("type".to_string(), Value::String("string".to_string()));
-                obj.insert("enum".to_string(), Value::Array(vec![Value::String(s.to_string())]));
+                obj.insert(
+                    "enum".to_string(),
+                    Value::Array(vec![Value::String(s.to_string())]),
+                );
             }
         }
 
@@ -406,11 +412,7 @@ struct GeminiUsage {
     thoughts_token_count: Option<u64>,
 }
 
-fn push_thought_part(
-    collected: &mut Vec<ThoughtPart>,
-    text: Option<String>,
-    sig: Option<String>,
-) {
+fn push_thought_part(collected: &mut Vec<ThoughtPart>, text: Option<String>, sig: Option<String>) {
     let text = text.filter(|t| !t.is_empty());
     let sig = sig.filter(|s| !s.is_empty());
     if text.is_none() && sig.is_none() {
@@ -503,9 +505,7 @@ pub async fn stream_chat(
             Ok(l) => l,
             Err(e) => {
                 error!("Gemini stream reading error: {}", e);
-                let _ = tx.send(EngineEvent::StreamError(format!(
-                    "Stream interrupted: {e}"
-                )));
+                let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
                 return;
             }
         };

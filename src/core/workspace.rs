@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{ImageBuffer, ImageFormat, Rgba};
 use std::{
     fs,
@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
-use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
+use wl_clipboard_rs::paste::{ClipboardType, MimeType, Seat, get_contents};
 
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {
@@ -101,9 +101,12 @@ impl ImageWorkspace {
         ["image/png", "image/jpeg", "image/webp", "image/bmp"]
             .into_iter()
             .find_map(|mime| {
-                let (mut pipe, _) =
-                    get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
-                        .ok()?;
+                let (mut pipe, _) = get_contents(
+                    ClipboardType::Regular,
+                    Seat::Unspecified,
+                    MimeType::Specific(mime),
+                )
+                .ok()?;
                 let mut buf = Vec::new();
                 (pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty()).then_some(buf)
             })
