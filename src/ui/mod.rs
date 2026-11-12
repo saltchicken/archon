@@ -284,8 +284,14 @@ impl TuiApp {
                 self.msg_states
                     .resize(self.messages.len() + 1, MsgUiState::default());
 
+                // Only auto-unfold the final assistant response (when it has no pending/inline tool calls)
+                // so large tool outputs stay folded and scrollable with a pinned [Tool Call: ...] header.
                 if let Some(last_idx) = self.messages.len().checked_sub(1)
                     && self.messages[last_idx].role == "assistant"
+                    && self.messages[last_idx]
+                        .tool_calls
+                        .as_ref()
+                        .is_none_or(Vec::is_empty)
                 {
                     self.msg_states[last_idx].unfolded = true;
                 }
