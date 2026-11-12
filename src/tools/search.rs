@@ -33,13 +33,19 @@ struct SearchArgs {
     /// If true, treats `pattern` as a literal string instead of a regular expression.
     #[serde(default)]
     fixed_strings: bool,
+    /// If true, restricts matches to symbol definitions (`struct`, `enum`, `trait`, `fn`, `type`, `const`, `mod`, `class`, `interface`, `def`, `func`) whose name matches `pattern`.
+    #[serde(default)]
+    definitions_only: bool,
+    /// If true, returns only the list of matching file paths with their match counts (sorted by match count descending) instead of individual lines, avoiding early line-limit truncation on broad queries.
+    #[serde(default)]
+    files_with_matches: bool,
     /// Optional case sensitivity override. Defaults to smart-case (case-insensitive unless `pattern` contains uppercase characters).
     #[serde(default)]
     case_sensitive: Option<bool>,
-    /// Number of surrounding context lines to show before and after each match (0 to 5, default: 0).
+    /// Number of surrounding context lines to show before and after each match (0 to 5, default: 0). Ignored when `files_with_matches: true`.
     #[serde(default)]
     context_lines: Option<usize>,
-    /// Maximum number of matching lines to return across the workspace (default: 100, max: 500).
+    /// Maximum number of matching lines (or matching files when `files_with_matches: true`) to return across the workspace (default: 100, max: 500).
     #[serde(default)]
     max_results: Option<usize>,
 }
@@ -47,7 +53,7 @@ struct SearchArgs {
 pub fn schema() -> Value {
     auto_schema::<SearchArgs>(
         "search",
-        "Searches file contents in the workspace using regular expressions or literal strings. Respects .gitignore and outputs 1-based line numbers.",
+        "Searches file contents in the workspace using regular expressions or literal strings. Supports `definitions_only` to jump to symbol declarations and `files_with_matches` to survey all matching files and counts across large codebases. Respects .gitignore and outputs 1-based line numbers.",
     )
 }
 
@@ -108,6 +114,13 @@ fn read_searchable_text(path: &Path, max_file_size: u64) -> Option<String> {
     String::from_utf8(buffer).ok()
 }
 
+/// Wraps a user pattern in a multi-language declaration matcher covering Rust, TS/JS, Python, and Go.
+fn build_definition_regex(inner_pattern: &str) -> String {
+    format!(
+        r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:export\s+(?:default\s+)?)?(?:async\s+|const\s+|unsafe\s+|extern(?:\s+\x22[^\x22]*\x22)?\s+|abstract\s+|static\s+)*(?:struct|enum|trait|type|fn|mod|const|static|macro_rules!|class|interface|function|def|func(?:\s*\([^)]*\))?|let|var)\s+(?:mut\s+)?(?:{inner_pattern})\b"
+    )
+}
+
 pub fn execute(
     json_args: &Value,
     settings: &WorkspaceSnapshotSettings,
@@ -121,13 +134,19 @@ pub fn execute(
     let case_sensitive = args
         .case_sensitive
         .unwrap_or_else(|| args.pattern.chars().any(char::is_uppercase));
-    let raw_pattern = if args.fixed_strings {
+    let base_pattern = if args.fixed_strings {
         regex::escape(&args.pattern)
     } else {
         args.pattern.clone()
     };
 
-    let matcher = RegexBuilder::new(&raw_pattern)
+    let effective_pattern = if args.definitions_only {
+        build_definition_regex(&base_pattern)
+    } else {
+        base_pattern
+    };
+
+    let matcher = RegexBuilder::new(&effective_pattern)
         .case_insensitive(!case_sensitive)
         .build()
         .with_context(|| format!("Invalid regex pattern: '{}'", args.pattern))?;
@@ -219,6 +238,73 @@ pub fn execute(
         candidate_files.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
+    if args.files_with_matches {
+        let mut file_hits: Vec<(String, usize, usize)> = Vec::new();
+        let mut total_matches = 0usize;
+
+        for (abs_path, display_path) in candidate_files {
+            let Some(content) = read_searchable_text(&abs_path, settings.max_size) else {
+                continue;
+            };
+            let mut count = 0usize;
+            let mut first_line = 0usize;
+            for (idx, line) in content.lines().enumerate() {
+                if matcher.is_match(line) {
+                    if count == 0 {
+                        first_line = idx + 1;
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                total_matches += count;
+                file_hits.push((display_path, count, first_line));
+            }
+        }
+
+        if file_hits.is_empty() {
+            let mode_note = if args.definitions_only {
+                " (definitions_only: true)"
+            } else {
+                ""
+            };
+            return Ok(format!(
+                "No matches found for pattern '{}'{mode_note}.",
+                args.pattern
+            ));
+        }
+
+        // Sort by descending match count, then alphabetically by path
+        file_hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let total_matched_files = file_hits.len();
+        let hit_limit = total_matched_files > max_results;
+        let mut out = String::new();
+
+        for (display_path, count, first_line) in file_hits.into_iter().take(max_results) {
+            let plural = if count == 1 { "match" } else { "matches" };
+            let _ = writeln!(
+                out,
+                "{display_path} ({count} {plural}, first at L{first_line})"
+            );
+            if out.len() > max_output_size {
+                break;
+            }
+        }
+
+        let _ = write!(
+            out,
+            "\n[Found {total_matches} match(es) across {total_matched_files} file(s){}]",
+            if hit_limit {
+                format!(" — showing top {max_results} files")
+            } else {
+                String::new()
+            }
+        );
+
+        return Ok(out);
+    }
+
     let mut out = String::new();
     let mut total_matches = 0usize;
     let mut matched_files = 0usize;
@@ -300,7 +386,15 @@ pub fn execute(
     }
 
     if total_matches == 0 {
-        return Ok(format!("No matches found for pattern '{}'.", args.pattern));
+        let mode_note = if args.definitions_only {
+            " (definitions_only: true)"
+        } else {
+            ""
+        };
+        return Ok(format!(
+            "No matches found for pattern '{}'{mode_note}.",
+            args.pattern
+        ));
     }
 
     let _ = write!(
