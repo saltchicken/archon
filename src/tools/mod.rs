@@ -2,6 +2,7 @@ pub mod context;
 pub mod create_file;
 pub mod edit_file;
 pub mod execute_command;
+pub mod git;
 pub mod read_file;
 
 use crate::core::config::Config;
@@ -30,6 +31,7 @@ pub fn schemas() -> Vec<Value> {
         create_file::schema(),
         edit_file::schema(),
         execute_command::schema(),
+        git::schema(),
         read_file::schema(),
     ]
 }
@@ -58,6 +60,7 @@ pub async fn execute(
         "execute_command" => {
             execute_command::execute(args, &config.app.allowed_commands, max_output_size).await
         }
+        "git" => git::execute(args, max_output_size).await,
         "create_file" => spawn_blocking_tool(move || create_file::execute(&cloned)).await,
         "edit_file" => spawn_blocking_tool(move || edit_file::execute(&cloned)).await,
         "read_file" => {
