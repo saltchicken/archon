@@ -2,6 +2,7 @@ pub mod cargo;
 pub mod create_file;
 pub mod edit_file;
 pub mod execute_command;
+pub mod fs;
 pub mod git;
 pub mod read_file;
 pub mod search;
@@ -33,6 +34,7 @@ pub fn schemas() -> Vec<Value> {
         create_file::schema(),
         edit_file::schema(),
         execute_command::schema(),
+        fs::schema(),
         git::schema(),
         read_file::schema(),
         search::schema(),
@@ -69,6 +71,7 @@ pub async fn execute(
             let ws_cfg = config.workspace_snapshot.clone();
             spawn_blocking_tool(move || search::execute(&cloned, &ws_cfg, max_output_size)).await
         }
+        "fs" => spawn_blocking_tool(move || fs::execute(&cloned, max_output_size)).await,
         "execute_command" => {
             execute_command::execute(args, &config.app.allowed_commands, max_output_size).await
         }

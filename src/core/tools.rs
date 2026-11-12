@@ -19,6 +19,7 @@ pub struct ToolFunction {
 
 /// Computes a canonical signature for a tool call, such as:
 /// - `"read_file"`
+/// - `"fs:list"`
 /// - `"git:status"`
 /// - `"cargo:check"`
 /// - `"execute_command:ls"`
@@ -27,7 +28,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     match name {
-        "git" | "cargo" => {
+        "git" | "cargo" | "fs" => {
             let action = args
                 .get("action")
                 .and_then(Value::as_str)
@@ -58,7 +59,7 @@ pub fn call_signature(call: &ToolCall) -> String {
 /// Supported patterns:
 /// - `"*"` (matches all tools)
 /// - `"<tool_name>"` or `"<tool_name>:*"` (matches any invocation of `<tool_name>`)
-/// - `"<tool_name>:<sub_action>"` (e.g. `"git:status"`, `"execute_command:ls"`)
+/// - `"<tool_name>:<sub_action>"` (e.g. `"git:status"`, `"fs:list"`, `"execute_command:ls"`)
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
@@ -127,6 +128,26 @@ fn format_edit_approval(mut out: String, obj: &Map<String, Value>) -> String {
     out.trim_end().to_string()
 }
 
+fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
+    for (k, v) in obj {
+        out.push_str(&format_kv(k, v));
+    }
+
+    match tools::fs::preview_action(args) {
+        Ok((summary, maybe_diff)) => {
+            out.push_str(&format!("\n---OPERATION ---\n{summary}\n"));
+            if let Some((file_path, deleted_content)) = maybe_diff {
+                append_unified_diff(&mut out, &file_path, &deleted_content, "");
+            }
+        }
+        Err(e) => {
+            out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
 pub fn format_approval(call: &ToolCall) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -143,6 +164,9 @@ pub fn format_approval(call: &ToolCall) -> String {
     if name == "edit_file" {
         return format_edit_approval(out, obj);
     }
+    if name == "fs" {
+        return format_fs_approval(out, args, obj);
+    }
 
     let mut multiline_blocks = Vec::new();
     for (k, v) in obj {
@@ -151,7 +175,7 @@ pub fn format_approval(call: &ToolCall) -> String {
                 if s.contains('\n')
                     || matches!(
                         k.as_str(),
-                        "content" | "message"
+                        "search_string" | "replace_string" | "content" | "message"
                     ) =>
             {
                 multiline_blocks.push((k, s));
