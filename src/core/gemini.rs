@@ -1,8 +1,10 @@
-use crate::core::{
-    EngineEvent,
-    config::Config,
-    provider::open_line_stream,
-    session::{ChatMessage, ThoughtPart},
+use crate::{
+    core::{
+        EngineEvent,
+        config::Config,
+        provider::open_line_stream,
+        session::{ChatMessage, ThoughtPart},
+    },
     tools::{ToolCall, ToolFunction},
 };
 use anyhow::{Context, Result, bail};
@@ -20,7 +22,9 @@ fn normalize_model_name(model: &str) -> &str {
 
 pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
     let Some(api_key) = config.gemini.resolve_api_key() else {
-        bail!("Gemini API key not found. Add GEMINI_API_KEY=... to your .env file or set `gemini.api_key` in config.toml.");
+        bail!(
+            "Gemini API key not found. Add GEMINI_API_KEY=... to your .env file or set `gemini.api_key` in config.toml."
+        );
     };
 
     let base = config.gemini.base_url.trim_end_matches('/');
@@ -49,7 +53,9 @@ fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) 
     match val {
         Value::Object(obj) => {
             if let Some(ref_str) = obj.remove("$ref").and_then(|v| v.as_str().map(String::from))
-                && let Some(name) = ref_str.strip_prefix("#/$defs/").or_else(|| ref_str.strip_prefix("#/definitions/"))
+                && let Some(name) = ref_str
+                    .strip_prefix("#/$defs/")
+                    .or_else(|| ref_str.strip_prefix("#/definitions/"))
                 && let Some(Value::Object(target_obj)) = defs.get(name).cloned()
             {
                 for (k, v) in target_obj {
@@ -106,8 +112,17 @@ fn sanitize_schema_node(val: &mut Value) {
     match val {
         Value::Object(obj) => {
             for k in [
-                "$schema", "$defs", "definitions", "$ref", "title",
-                "additionalProperties", "format", "default", "examples", "minimum", "maximum",
+                "$schema",
+                "$defs",
+                "definitions",
+                "$ref",
+                "title",
+                "additionalProperties",
+                "format",
+                "default",
+                "examples",
+                "minimum",
+                "maximum",
             ] {
                 obj.remove(k);
             }
@@ -119,7 +134,10 @@ fn sanitize_schema_node(val: &mut Value) {
 
             if let Some(Value::Array(types)) = obj.get("type").cloned() {
                 let orig_len = types.len();
-                let mut non_null: Vec<Value> = types.into_iter().filter(|t| t.as_str() != Some("null")).collect();
+                let mut non_null: Vec<Value> = types
+                    .into_iter()
+                    .filter(|t| t.as_str() != Some("null"))
+                    .collect();
                 let had_null = non_null.len() < orig_len;
                 if let Some(first) = non_null.pop() {
                     obj.insert("type".into(), first);
@@ -134,7 +152,10 @@ fn sanitize_schema_node(val: &mut Value) {
                     let orig_len = variants.len();
                     let non_null: Vec<Value> = variants
                         .into_iter()
-                        .filter(|i| i.get("type").and_then(Value::as_str) != Some("null") && i.get("const") != Some(&Value::Null))
+                        .filter(|i| {
+                            i.get("type").and_then(Value::as_str) != Some("null")
+                                && i.get("const") != Some(&Value::Null)
+                        })
                         .collect();
                     let had_null = non_null.len() < orig_len;
 
@@ -172,7 +193,11 @@ fn sanitize_schema_node(val: &mut Value) {
     }
 }
 
-pub fn build_payload(messages: &[ChatMessage], system_prompt: &str, tools: Option<Vec<Value>>) -> Value {
+pub fn build_payload(
+    messages: &[ChatMessage],
+    system_prompt: &str,
+    tools: Option<Vec<Value>>,
+) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut pending_tool_names: Vec<String> = Vec::new();
     let mut tool_resp_idx = 0usize;
@@ -243,7 +268,9 @@ pub fn build_payload(messages: &[ChatMessage], system_prompt: &str, tools: Optio
                     last["role"] == "user" && last["parts"][0].get("functionResponse").is_some()
                 });
 
-                if last_is_fn_resp && let Some(parts) = contents.last_mut().and_then(|l| l["parts"].as_array_mut()) {
+                if last_is_fn_resp
+                    && let Some(parts) = contents.last_mut().and_then(|l| l["parts"].as_array_mut())
+                {
                     parts.push(part);
                 } else {
                     contents.push(json!({ "role": "user", "parts": [part] }));
@@ -331,7 +358,10 @@ fn push_thought_part(collected: &mut Vec<ThoughtPart>, text: Option<String>, sig
         return;
     }
 
-    if let Some(last) = collected.last_mut().filter(|l| l.thought_signature.is_none()) {
+    if let Some(last) = collected
+        .last_mut()
+        .filter(|l| l.thought_signature.is_none())
+    {
         if let Some(new_t) = text {
             last.text.get_or_insert_with(String::new).push_str(&new_t);
         }
@@ -341,7 +371,10 @@ fn push_thought_part(collected: &mut Vec<ThoughtPart>, text: Option<String>, sig
         return;
     }
 
-    collected.push(ThoughtPart { text, thought_signature: sig });
+    collected.push(ThoughtPart {
+        text,
+        thought_signature: sig,
+    });
 }
 
 pub async fn stream_chat(
@@ -353,12 +386,23 @@ pub async fn stream_chat(
     tx: UnboundedSender<EngineEvent>,
 ) {
     let model_id = normalize_model_name(&model);
-    let url = format!("{}/models/{model_id}:streamGenerateContent?alt=sse", base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/models/{model_id}:streamGenerateContent?alt=sse",
+        base_url.trim_end_matches('/')
+    );
     info!("Initiating Gemini stream request for model {model_id}");
-    debug!("Gemini Payload: {}", serde_json::to_string(&payload).unwrap_or_default());
+    debug!(
+        "Gemini Payload: {}",
+        serde_json::to_string(&payload).unwrap_or_default()
+    );
 
-    let req = client.post(&url).header("x-goog-api-key", &api_key).json(&payload);
-    let Some(mut lines) = open_line_stream(req, &tx).await else { return };
+    let req = client
+        .post(&url)
+        .header("x-goog-api-key", &api_key)
+        .json(&payload);
+    let Some(mut lines) = open_line_stream(req, &tx).await else {
+        return;
+    };
 
     let mut collected_tools = Vec::new();
     let mut collected_thoughts = Vec::new();
@@ -374,7 +418,9 @@ pub async fn stream_chat(
             return;
         };
 
-        let Some(data_str) = line.trim().strip_prefix("data:").map(str::trim) else { continue };
+        let Some(data_str) = line.trim().strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
         if data_str.is_empty() || data_str == "[DONE]" {
             continue;
         }
@@ -386,7 +432,8 @@ pub async fn stream_chat(
 
         if let Some(usage) = chunk.usage_metadata {
             prompt_tokens = usage.prompt_token_count.unwrap_or(prompt_tokens);
-            let total_eval = usage.candidates_token_count.unwrap_or(0) + usage.thoughts_token_count.unwrap_or(0);
+            let total_eval =
+                usage.candidates_token_count.unwrap_or(0) + usage.thoughts_token_count.unwrap_or(0);
             if total_eval > 0 {
                 eval_tokens = total_eval;
             }
@@ -394,7 +441,11 @@ pub async fn stream_chat(
 
         for cand in chunk.candidates.into_iter().flatten() {
             if let Some(reason) = cand.finish_reason {
-                done_reason = Some(if reason == "MAX_TOKENS" { "length".into() } else { reason.to_lowercase() });
+                done_reason = Some(if reason == "MAX_TOKENS" {
+                    "length".into()
+                } else {
+                    reason.to_lowercase()
+                });
             }
 
             for part in cand.content.and_then(|c| c.parts).into_iter().flatten() {
@@ -403,7 +454,10 @@ pub async fn stream_chat(
                         push_thought_part(&mut collected_thoughts, part.text, None);
                     }
                     collected_tools.push(ToolCall {
-                        function: ToolFunction { name: fc.name, arguments: fc.args },
+                        function: ToolFunction {
+                            name: fc.name,
+                            arguments: fc.args,
+                        },
                         thought_signature: part.thought_signature,
                     });
                 } else if part.thought {

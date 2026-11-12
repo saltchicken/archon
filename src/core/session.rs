@@ -1,4 +1,4 @@
-use crate::core::{config::expand_tilde, tools::ToolCall};
+use crate::{core::config::expand_tilde, tools::ToolCall};
 use anyhow::{Context, Result};
 use chrono::Local;
 use serde::{
@@ -55,11 +55,18 @@ impl ChatMessage {
     }
 
     pub fn without_images(&self) -> Self {
-        Self { images: None, ..self.clone() }
+        Self {
+            images: None,
+            ..self.clone()
+        }
     }
 
     pub fn with_ui_image_placeholders(&self) -> Self {
-        let count = self.images.as_ref().map_or(0, Vec::len).max(self.image_paths.as_ref().map_or(0, Vec::len));
+        let count = self
+            .images
+            .as_ref()
+            .map_or(0, Vec::len)
+            .max(self.image_paths.as_ref().map_or(0, Vec::len));
         Self {
             images: (count > 0).then(|| vec![String::new(); count]),
             ..self.without_images()
@@ -88,7 +95,9 @@ pub struct SessionSummary {
     pub file_path: PathBuf,
 }
 
-fn count_sequence<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<usize, D::Error> {
+fn count_sequence<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<usize, D::Error> {
     struct CountVisitor;
     impl<'de> Visitor<'de> for CountVisitor {
         type Value = usize;
@@ -137,7 +146,8 @@ impl SessionManager {
             return Ok(());
         }
 
-        let clean_msgs: Vec<ChatMessage> = messages.iter().map(ChatMessage::without_images).collect();
+        let clean_msgs: Vec<ChatMessage> =
+            messages.iter().map(ChatMessage::without_images).collect();
         let title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
@@ -169,12 +179,15 @@ impl SessionManager {
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
-                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.starts_with('.'))
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| !n.starts_with('.'))
                     && p.extension().is_some_and(|ext| ext == "json")
             })
             .filter_map(|path| {
                 let file = fs::File::open(&path).ok()?;
-                let mut summary: SessionSummary = serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
+                let mut summary: SessionSummary =
+                    serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
                 summary.file_path = path;
                 Some(summary)
             })
@@ -195,7 +208,11 @@ impl SessionManager {
         if !path.exists() {
             return Ok(());
         }
-        if let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("session_")) {
+        if let Some(id) = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_prefix("session_"))
+        {
             let _ = fs::remove_dir_all(self.asset_dir(id));
         }
         fs::remove_file(path)?;

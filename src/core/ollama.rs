@@ -1,4 +1,7 @@
-use crate::core::{EngineEvent, config::Config, provider::open_line_stream, session::ChatMessage, tools::ToolCall};
+use crate::{
+    core::{EngineEvent, config::Config, provider::open_line_stream, session::ChatMessage},
+    tools::ToolCall,
+};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -40,7 +43,11 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
         .await
         .context("Invalid JSON from Ollama server")?;
 
-    let target = if model.contains(':') { model.to_string() } else { format!("{model}:latest") };
+    let target = if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    };
     let installed = resp["models"]
         .as_array()
         .into_iter()
@@ -89,12 +96,22 @@ pub fn build_payload(
     payload
 }
 
-pub async fn stream_chat(client: Client, base_url: String, payload: Value, tx: UnboundedSender<EngineEvent>) {
+pub async fn stream_chat(
+    client: Client,
+    base_url: String,
+    payload: Value,
+    tx: UnboundedSender<EngineEvent>,
+) {
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
     info!("Initiating stream request to {url}");
-    debug!("Payload: {}", serde_json::to_string(&payload).unwrap_or_default());
+    debug!(
+        "Payload: {}",
+        serde_json::to_string(&payload).unwrap_or_default()
+    );
 
-    let Some(mut lines) = open_line_stream(client.post(&url).json(&payload), &tx).await else { return };
+    let Some(mut lines) = open_line_stream(client.post(&url).json(&payload), &tx).await else {
+        return;
+    };
 
     let mut collected_tools = Vec::new();
     let mut prompt_tokens = 0u64;

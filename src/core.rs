@@ -5,8 +5,8 @@ pub mod logger;
 pub mod ollama;
 pub mod provider;
 pub mod session;
-pub mod tools;
 
+use crate::tools::{self, ToolCall};
 use attachments::{ImageAttachment, ImageStaging};
 use config::Config;
 use provider::Provider;
@@ -21,7 +21,6 @@ use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
-use tools::ToolCall;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -749,7 +748,7 @@ impl CoreEngine {
         internal_tx: UnboundedSender<EngineEvent>,
     ) {
         self.stream_buffer.clear();
-        let tools_schema = turn.enable_tools.then(crate::tools::schemas);
+        let tools_schema = turn.enable_tools.then(tools::schemas);
         let asset_dir = self.sessions.asset_dir(&self.session_id);
 
         // Clone lightweight messages (without Base64 payloads) and hydrate Base64
