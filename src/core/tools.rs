@@ -151,7 +151,7 @@ pub fn format_approval(call: &ToolCall) -> String {
                 if s.contains('\n')
                     || matches!(
                         k.as_str(),
-                        "search_string" | "replace_string" | "content" | "message"
+                        "content" | "message"
                     ) =>
             {
                 multiline_blocks.push((k, s));
