@@ -423,10 +423,8 @@ fn render_message_block(
     } else {
         max_folded_lines
     };
-    let toggle_hint = if state.unfolded { " [Click to fold]" } else { "" };
-
     let mut header_spans = vec![Span::styled(
-        format!("━━ {header_label}{toggle_hint} "),
+        format!("━━ {header_label} "),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )];
     if truncated {
