@@ -732,22 +732,60 @@ pub fn format_approval(call: &ToolCall) -> String {
     out.trim_end().to_string()
 }
 
-pub fn schemas() -> Vec<Value> {
-    vec![
-        async_schema::<cargo::Tool>(),
-        blocking_schema::<create_file::Tool>(),
-        blocking_schema::<dotfiles::Tool>(),
-        blocking_schema::<edit_file::Tool>(),
-        async_schema::<execute_command::Tool>(),
-        async_schema::<fetch_url::Tool>(),
-        blocking_schema::<fs::Tool>(),
-        async_schema::<git::Tool>(),
-        blocking_schema::<read_file::Tool>(),
-        blocking_schema::<repo_map::Tool>(),
-        blocking_schema::<search::Tool>(),
-        async_schema::<system::Tool>(),
-        blocking_schema::<workspace_snapshot::Tool>(),
-    ]
+pub const ALL_TOOL_NAMES: &[&str] = &[
+    cargo::Tool::NAME,
+    create_file::Tool::NAME,
+    dotfiles::Tool::NAME,
+    edit_file::Tool::NAME,
+    execute_command::Tool::NAME,
+    fetch_url::Tool::NAME,
+    fs::Tool::NAME,
+    git::Tool::NAME,
+    read_file::Tool::NAME,
+    repo_map::Tool::NAME,
+    search::Tool::NAME,
+    system::Tool::NAME,
+    workspace_snapshot::Tool::NAME,
+];
+
+pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
+    config
+        .app
+        .enabled_tools
+        .iter()
+        .map(|s| s.trim())
+        .any(|t| t == "*" || t == name)
+}
+
+pub fn schemas(config: &Config) -> Vec<Value> {
+    let all = [
+        (cargo::Tool::NAME, async_schema::<cargo::Tool>()),
+        (
+            create_file::Tool::NAME,
+            blocking_schema::<create_file::Tool>(),
+        ),
+        (dotfiles::Tool::NAME, blocking_schema::<dotfiles::Tool>()),
+        (edit_file::Tool::NAME, blocking_schema::<edit_file::Tool>()),
+        (
+            execute_command::Tool::NAME,
+            async_schema::<execute_command::Tool>(),
+        ),
+        (fetch_url::Tool::NAME, async_schema::<fetch_url::Tool>()),
+        (fs::Tool::NAME, blocking_schema::<fs::Tool>()),
+        (git::Tool::NAME, async_schema::<git::Tool>()),
+        (read_file::Tool::NAME, blocking_schema::<read_file::Tool>()),
+        (repo_map::Tool::NAME, blocking_schema::<repo_map::Tool>()),
+        (search::Tool::NAME, blocking_schema::<search::Tool>()),
+        (system::Tool::NAME, async_schema::<system::Tool>()),
+        (
+            workspace_snapshot::Tool::NAME,
+            blocking_schema::<workspace_snapshot::Tool>(),
+        ),
+    ];
+
+    all.into_iter()
+        .filter_map(|(name, schema)| is_tool_enabled(name, config).then_some(schema))
+        .collect()
 }
 
 async fn dispatch_tool(
@@ -756,6 +794,10 @@ async fn dispatch_tool(
     config: &Config,
     max_output_size: usize,
 ) -> Result<String> {
+    if !is_tool_enabled(name, config) {
+        bail!("Unknown tool: '{name}'");
+    }
+
     let ctx = ToolContext::new(config, max_output_size)?;
     match name {
         cargo::Tool::NAME => run_async::<cargo::Tool>(args, &ctx).await,

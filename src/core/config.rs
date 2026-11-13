@@ -61,6 +61,7 @@ pub struct AppSettings {
     pub default_model: String,
     pub max_msg_lines: usize,
     pub history_dir: String,
+    pub enabled_tools: Vec<String>,
     pub allowed_commands: Vec<String>,
     pub auto_approve: Vec<String>,
 }
@@ -121,6 +122,10 @@ impl Default for AppSettings {
             default_model: "qwen3.8:27b".into(),
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
+            enabled_tools: crate::tools::ALL_TOOL_NAMES
+                .iter()
+                .map(|&s| String::from(s))
+                .collect(),
             allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
                 .map(String::from)
                 .into(),

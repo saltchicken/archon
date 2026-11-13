@@ -108,7 +108,10 @@ impl Provider {
         turn: TurnConfig,
         tx: UnboundedSender<EngineEvent>,
     ) {
-        let tools_schema = turn.enable_tools.then(tools::schemas);
+        let tools_schema = turn
+            .enable_tools
+            .then(|| tools::schemas(&config))
+            .filter(|t| !t.is_empty());
         match self {
             Self::Ollama => {
                 let payload = ollama::build_payload(
