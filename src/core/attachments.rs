@@ -65,8 +65,8 @@ impl ImageStaging {
             .collect()
     }
 
-    pub fn encode_image(path: &Path) -> Result<String> {
-        Ok(STANDARD.encode(fs::read(path)?))
+    pub fn encode_bytes(bytes: &[u8]) -> String {
+        STANDARD.encode(bytes)
     }
 
     pub fn paste_clipboard(&self) -> Result<PathBuf> {
@@ -121,19 +121,18 @@ impl ImageStaging {
         Ok(out_path)
     }
 
-    pub fn restore_from_session(&self, asset_paths: &[PathBuf]) -> Vec<PathBuf> {
+    pub fn restore_from_bytes(&self, assets: &[(String, Vec<u8>)]) -> Vec<PathBuf> {
         self.clear();
-        asset_paths
+        assets
             .iter()
             .enumerate()
-            .filter(|(_, src)| src.exists())
-            .filter_map(|(idx, src)| {
-                let name = src
+            .filter_map(|(idx, (raw_name, bytes))| {
+                let safe_name = Path::new(raw_name)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .map_or_else(|| format!("restored_{idx}.png"), String::from);
-                let dest = self.img_dir.join(name);
-                fs::copy(src, &dest).ok().map(|_| dest)
+                let dest = self.img_dir.join(safe_name);
+                fs::write(&dest, bytes).ok().map(|()| dest)
             })
             .collect()
     }

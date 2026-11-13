@@ -1,14 +1,17 @@
-use crate::{core::config::expand_tilde, tools::ToolCall};
+use crate::{
+    core::{attachments::ImageStaging, config::expand_tilde},
+    tools::ToolCall,
+};
 use anyhow::{Context, Result};
 use chrono::Local;
-use serde::{
-    Deserialize, Deserializer, Serialize,
-    de::{IgnoredAny, SeqAccess, Visitor},
-};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::{
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
+use tracing::{info, warn};
 
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
@@ -33,8 +36,8 @@ pub struct ChatMessage {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_paths: Option<Vec<PathBuf>>,
+    #[serde(skip_serializing_if = "Option::is_none", alias = "image_paths")]
+    pub image_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +51,7 @@ impl ChatMessage {
             content: content.into(),
             truncated: false,
             images: None,
-            image_paths: None,
+            image_names: None,
             tool_calls: None,
             thoughts: None,
         }
@@ -66,7 +69,7 @@ impl ChatMessage {
             .images
             .as_ref()
             .map_or(0, Vec::len)
-            .max(self.image_paths.as_ref().map_or(0, Vec::len));
+            .max(self.image_names.as_ref().map_or(0, Vec::len));
         Self {
             images: (count > 0).then(|| vec![String::new(); count]),
             ..self.without_images()
@@ -85,53 +88,71 @@ pub struct SessionData {
     pub messages: Vec<ChatMessage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SessionSummary {
+    pub id: String,
     pub title: String,
     pub updated_at: String,
-    #[serde(default, deserialize_with = "count_sequence")]
     pub messages: usize,
-    #[serde(skip)]
-    pub file_path: PathBuf,
-}
-
-fn count_sequence<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<usize, D::Error> {
-    struct CountVisitor;
-    impl<'de> Visitor<'de> for CountVisitor {
-        type Value = usize;
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a sequence of messages")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<usize, A::Error> {
-            let mut count = 0;
-            while seq.next_element::<IgnoredAny>()?.is_some() {
-                count += 1;
-            }
-            Ok(count)
-        }
-    }
-    deserializer.deserialize_seq(CountVisitor)
 }
 
 pub struct SessionManager {
-    history_dir: PathBuf,
+    conn: Mutex<Connection>,
 }
 
 impl SessionManager {
     pub fn new(raw_dir: &str) -> Result<Self> {
         let history_dir = expand_tilde(raw_dir);
         fs::create_dir_all(&history_dir)?;
-        Ok(Self { history_dir })
+
+        let db_path = history_dir.join("archon.db");
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("Failed to open SQLite database at {}", db_path.display()))?;
+
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+
+             CREATE TABLE IF NOT EXISTS sessions (
+                 id TEXT PRIMARY KEY,
+                 title TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 system_prompt TEXT NOT NULL,
+                 num_ctx INTEGER NOT NULL,
+                 message_count INTEGER NOT NULL DEFAULT 0,
+                 messages_json TEXT NOT NULL
+             );
+
+             CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
+                 ON sessions(updated_at DESC);
+
+             CREATE TABLE IF NOT EXISTS session_images (
+                 session_id TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 data BLOB NOT NULL,
+                 PRIMARY KEY (session_id, name),
+                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );",
+        )
+        .context("Failed to initialize database schema")?;
+
+        let mgr = Self {
+            conn: Mutex::new(conn),
+        };
+        mgr.migrate_legacy_json_sessions(&history_dir);
+        Ok(mgr)
     }
 
     pub fn new_id() -> String {
         Local::now().format("%Y%m%d_%H%M%S_%3f").to_string()
     }
 
-    pub fn asset_dir(&self, id: &str) -> PathBuf {
-        self.history_dir.join("assets").join(id)
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn save(
@@ -141,8 +162,9 @@ impl SessionManager {
         system_prompt: &str,
         num_ctx: u32,
         messages: &[ChatMessage],
+        new_images: &[(String, Vec<u8>)],
     ) -> Result<()> {
-        if messages.is_empty() {
+        if messages.is_empty() && new_images.is_empty() {
             return Ok(());
         }
 
@@ -154,26 +176,154 @@ impl SessionManager {
             .and_then(|m| m.content.lines().next())
             .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50));
 
-        let path = self.history_dir.join(format!("session_{id}.json"));
-        let tmp_path = self.history_dir.join(format!(".session_{id}.json.tmp"));
+        let updated_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let messages_json = serde_json::to_string(&clean_msgs)?;
+        let msg_count = clean_msgs.len() as i64;
 
-        let data = SessionData {
-            id: id.into(),
-            title,
-            model: model.into(),
-            updated_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            system_prompt: system_prompt.into(),
-            num_ctx,
-            messages: clean_msgs,
-        };
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
 
-        fs::write(&tmp_path, serde_json::to_string_pretty(&data)?)?;
-        fs::rename(&tmp_path, &path)?;
+        tx.execute(
+            "INSERT INTO sessions (id, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+                 title = excluded.title,
+                 model = excluded.model,
+                 updated_at = excluded.updated_at,
+                 system_prompt = excluded.system_prompt,
+                 num_ctx = excluded.num_ctx,
+                 message_count = excluded.message_count,
+                 messages_json = excluded.messages_json",
+            params![
+                id,
+                title,
+                model,
+                updated_at,
+                system_prompt,
+                num_ctx,
+                msg_count,
+                messages_json
+            ],
+        )?;
+
+        for (name, bytes) in new_images {
+            tx.execute(
+                "INSERT OR REPLACE INTO session_images (session_id, name, data)
+                 VALUES (?1, ?2, ?3)",
+                params![id, name, bytes],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {
-        let mut list: Vec<SessionSummary> = fs::read_dir(&self.history_dir)
+        let conn = self.lock_conn();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, title, updated_at, message_count
+             FROM sessions
+             ORDER BY updated_at DESC",
+        ) else {
+            return Vec::new();
+        };
+
+        let rows = stmt.query_map([], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                updated_at: row.get(2)?,
+                messages: row.get::<_, i64>(3)?.max(0) as usize,
+            })
+        });
+
+        match rows {
+            Ok(iter) => iter.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn load(&self, id: &str) -> Result<SessionData> {
+        let conn = self.lock_conn();
+        let (title, model, updated_at, system_prompt, num_ctx, messages_json): (
+            String,
+            String,
+            String,
+            String,
+            u32,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT title, model, updated_at, system_prompt, num_ctx, messages_json
+                 FROM sessions
+                 WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .with_context(|| format!("Session '{id}' not found in database"))?;
+
+        let messages: Vec<ChatMessage> = serde_json::from_str(&messages_json)
+            .with_context(|| format!("Failed to parse messages JSON for session '{id}'"))?;
+
+        Ok(SessionData {
+            id: id.to_string(),
+            title,
+            model,
+            updated_at,
+            system_prompt,
+            num_ctx,
+            messages,
+        })
+    }
+
+    pub fn load_images(&self, session_id: &str, names: &[String]) -> Vec<(String, Vec<u8>)> {
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let conn = self.lock_conn();
+        let Ok(mut stmt) = conn
+            .prepare("SELECT data FROM session_images WHERE session_id = ?1 AND name = ?2")
+        else {
+            return Vec::new();
+        };
+
+        names
+            .iter()
+            .filter_map(|name| {
+                let bytes: Option<Vec<u8>> = stmt
+                    .query_row(params![session_id, name], |row| row.get(0))
+                    .optional()
+                    .ok()
+                    .flatten();
+                bytes.map(|b| (name.clone(), b))
+            })
+            .collect()
+    }
+
+    pub fn load_images_base64(&self, session_id: &str, names: &[String]) -> Vec<String> {
+        self.load_images(session_id, names)
+            .into_iter()
+            .map(|(_, bytes)| ImageStaging::encode_bytes(&bytes))
+            .collect()
+    }
+
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let conn = self.lock_conn();
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    fn migrate_legacy_json_sessions(&self, history_dir: &Path) {
+        let json_paths: Vec<PathBuf> = fs::read_dir(history_dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -181,41 +331,149 @@ impl SessionManager {
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| !n.starts_with('.'))
-                    && p.extension().is_some_and(|ext| ext == "json")
-            })
-            .filter_map(|path| {
-                let file = fs::File::open(&path).ok()?;
-                let mut summary: SessionSummary =
-                    serde_json::from_reader(std::io::BufReader::new(file)).ok()?;
-                summary.file_path = path;
-                Some(summary)
+                    .is_some_and(|n| n.starts_with("session_") && n.ends_with(".json"))
             })
             .collect();
 
-        list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        list
-    }
-
-    pub fn load(&self, path: &Path) -> Result<SessionData> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read session file: {}", path.display()))?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse session file: {}", path.display()))
-    }
-
-    pub fn delete(&self, path: &Path) -> Result<()> {
-        if !path.exists() {
-            return Ok(());
+        if json_paths.is_empty() {
+            return;
         }
-        if let Some(id) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_prefix("session_"))
-        {
-            let _ = fs::remove_dir_all(self.asset_dir(id));
+
+        let mut migrated_count = 0usize;
+        for path in json_paths {
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(mut data) = serde_json::from_str::<SessionData>(&content) else {
+                warn!("Skipping malformed legacy session file: {}", path.display());
+                continue;
+            };
+
+            let asset_dir = history_dir.join("assets").join(&data.id);
+            let mut images_to_store = Vec::new();
+
+            for msg in &mut data.messages {
+                msg.images = None;
+                let Some(raw_entries) = msg.image_names.as_mut() else {
+                    continue;
+                };
+
+                let mut normalized_names = Vec::new();
+                for entry in raw_entries.iter() {
+                    let p = Path::new(entry);
+                    let candidates = [
+                        Some(p.to_path_buf()),
+                        Some(expand_tilde(entry)),
+                        p.file_name().map(|f| asset_dir.join(f)),
+                    ];
+                    if let Some(found) = candidates.into_iter().flatten().find(|c| c.is_file()) {
+                        let file_name = found
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image.png")
+                            .to_string();
+                        if let Ok(bytes) = fs::read(&found) {
+                            images_to_store.push((file_name.clone(), bytes));
+                            normalized_names.push(file_name);
+                        }
+                    } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        normalized_names.push(name.to_string());
+                    }
+                }
+                *raw_entries = normalized_names;
+            }
+
+            let Ok(messages_json) = serde_json::to_string(&data.messages) else {
+                continue;
+            };
+
+            let mut conn = self.lock_conn();
+            let Ok(tx) = conn.transaction() else {
+                continue;
+            };
+
+            let ins_res = tx.execute(
+                "INSERT OR IGNORE INTO sessions (id, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    data.id,
+                    data.title,
+                    data.model,
+                    data.updated_at,
+                    data.system_prompt,
+                    data.num_ctx,
+                    data.messages.len() as i64,
+                    messages_json
+                ],
+            );
+
+            if ins_res.is_ok() {
+                for (name, bytes) in images_to_store {
+                    let _ = tx.execute(
+                        "INSERT OR IGNORE INTO session_images (session_id, name, data)
+                         VALUES (?1, ?2, ?3)",
+                        params![data.id, name, bytes],
+                    );
+                }
+                if tx.commit().is_ok() {
+                    let backup = path.with_extension("json.migrated");
+                    let _ = fs::rename(&path, backup);
+                    if asset_dir.exists() {
+                        let _ = fs::remove_dir_all(&asset_dir);
+                    }
+                    migrated_count += 1;
+                }
+            }
         }
-        fs::remove_file(path)?;
-        Ok(())
+
+        if migrated_count > 0 {
+            info!("Migrated {migrated_count} legacy JSON session(s) into archon.db");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saves_loads_and_cascades_delete_in_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(dir.path().to_str().unwrap()).unwrap();
+
+        let mut msg = ChatMessage::new("user", "Hello database");
+        msg.image_names = Some(vec!["paste_123.png".into()]);
+        let img_bytes = vec![137, 80, 78, 71, 13, 10, 26, 10];
+
+        mgr.save(
+            "sess_1",
+            "qwen3.8:27b",
+            "System prompt",
+            32768,
+            &[msg],
+            &[("paste_123.png".into(), img_bytes.clone())],
+        )
+        .unwrap();
+
+        let list = mgr.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "sess_1");
+        assert_eq!(list[0].title, "Hello database");
+        assert_eq!(list[0].messages, 1);
+
+        let loaded = mgr.load("sess_1").unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(
+            loaded.messages[0].image_names.as_deref(),
+            Some(&["paste_123.png".to_string()][..])
+        );
+
+        let imgs = mgr.load_images("sess_1", &["paste_123.png".into()]);
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].1, img_bytes);
+
+        mgr.delete("sess_1").unwrap();
+        assert!(mgr.list().is_empty());
+        assert!(mgr.load_images("sess_1", &["paste_123.png".into()]).is_empty());
     }
 }

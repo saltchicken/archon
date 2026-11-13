@@ -14,7 +14,7 @@ use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
 use std::{
     collections::{HashSet, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 use tokio::{
@@ -46,8 +46,8 @@ pub enum EngineCommand {
         feedback: String,
         turn: TurnConfig,
     },
-    LoadSession(PathBuf),
-    DeleteSession(PathBuf),
+    LoadSession(String),
+    DeleteSession(String),
     RefreshSessions,
     ResetChat,
     SwitchModel {
@@ -111,19 +111,6 @@ pub struct CoreEngine {
     save_task: Option<JoinHandle<()>>,
     pending_tools: VecDeque<ToolCall>,
     tx: UnboundedSender<EngineEvent>,
-}
-
-fn resolve_session_image_path(p: &Path, asset_dir: &Path) -> PathBuf {
-    let candidates = [
-        Some(p.to_path_buf()),
-        Some(config::expand_tilde(&p.to_string_lossy())),
-        p.file_name().map(|f| asset_dir.join(f)),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|c| c.exists())
-        .unwrap_or_else(|| p.to_path_buf())
 }
 
 impl CoreEngine {
@@ -243,7 +230,7 @@ impl CoreEngine {
 
             if !self.is_call_auto_approved(call) {
                 if auto_executed {
-                    self.save_and_emit_chat().await;
+                    self.save_and_emit_chat(Vec::new()).await;
                 }
                 self.prompt_next_tool();
                 return;
@@ -267,7 +254,7 @@ impl CoreEngine {
         }
 
         if auto_executed {
-            self.save_and_emit_chat().await;
+            self.save_and_emit_chat(Vec::new()).await;
         }
 
         let turn = self.turn.clone();
@@ -290,40 +277,39 @@ impl CoreEngine {
         }
     }
 
-    async fn collect_unsent_images(&mut self) -> Option<Vec<PathBuf>> {
-        let asset_dir = self.sessions.asset_dir(&self.session_id);
+    async fn collect_unsent_images(&mut self) -> (Option<Vec<String>>, Vec<(String, Vec<u8>)>) {
         let staging = Arc::clone(&self.attachments);
         let already_sent = self.sent_images.clone();
 
-        let (paths, newly_sent) = tokio::task::spawn_blocking(move || {
-            let _ = std::fs::create_dir_all(&asset_dir);
-            let mut paths = Vec::new();
+        let (names, blobs, newly_sent) = tokio::task::spawn_blocking(move || {
+            let mut names = Vec::new();
+            let mut blobs = Vec::new();
             let mut sent = Vec::new();
 
             for att in staging.list_attachments() {
                 if already_sent.contains(&att.path) {
                     continue;
                 }
-                let dest = asset_dir.join(att.path.file_name().unwrap_or_default());
-                if std::fs::copy(&att.path, &dest).is_ok() {
-                    paths.push(dest);
+                if let Ok(bytes) = std::fs::read(&att.path) {
+                    names.push(att.name.clone());
+                    blobs.push((att.name, bytes));
                     sent.push(att.path);
                 }
             }
-            (paths, sent)
+            (names, blobs, sent)
         })
         .await
         .unwrap_or_default();
 
         self.sent_images.extend(newly_sent);
-        (!paths.is_empty()).then_some(paths)
+        ((!names.is_empty()).then_some(names), blobs)
     }
 
-    async fn emit_sessions(&self, delete_first: Option<PathBuf>) {
+    async fn emit_sessions(&self, delete_first: Option<String>) {
         let sessions = Arc::clone(&self.sessions);
         if let Ok(list) = tokio::task::spawn_blocking(move || {
-            if let Some(path) = delete_first {
-                let _ = sessions.delete(&path);
+            if let Some(id) = delete_first {
+                let _ = sessions.delete(&id);
             }
             sessions.list()
         })
@@ -397,15 +383,15 @@ impl CoreEngine {
                 }
 
                 self.turn = turn.clone();
-                let image_paths = self.collect_unsent_images().await;
+                let (image_names, new_image_blobs) = self.collect_unsent_images().await;
 
                 self.messages.push(ChatMessage {
                     images: None,
-                    image_paths,
+                    image_names,
                     ..ChatMessage::new("user", prompt)
                 });
 
-                self.save_and_emit_chat().await;
+                self.save_and_emit_chat(new_image_blobs).await;
                 self.spawn_model_turn(&turn, internal_tx.clone()).await;
             }
             EngineCommand::CancelStream => {
@@ -420,7 +406,7 @@ impl CoreEngine {
                         "assistant",
                         format!("{text}\n\n*[Generation cancelled]*"),
                     ));
-                    self.save_session_bg().await;
+                    self.save_session_bg(Vec::new()).await;
                 }
                 self.emit_chat();
                 self.notify("Stream cancelled.", false);
@@ -471,7 +457,7 @@ impl CoreEngine {
                     truncated,
                     ..ChatMessage::new("tool", internal_out)
                 });
-                self.save_and_emit_chat().await;
+                self.save_and_emit_chat(Vec::new()).await;
                 info!("Tool execution resolved and recorded to chat history.");
 
                 self.process_pending_tools(internal_tx).await;
@@ -480,41 +466,40 @@ impl CoreEngine {
                 info!("Refreshing sessions list");
                 self.emit_sessions(None).await;
             }
-            EngineCommand::LoadSession(path) => {
-                info!("Loading session from path: {}", path.display());
+            EngineCommand::LoadSession(session_id) => {
+                info!("Loading session from database: {session_id}");
                 self.flush_save_task().await;
 
                 let sessions = Arc::clone(&self.sessions);
-                let res = tokio::task::spawn_blocking(move || sessions.load(&path)).await;
+                let staging = Arc::clone(&self.attachments);
+                let res = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let mut data = sessions.load(&session_id)?;
+                    let mut all_image_names = Vec::new();
 
-                match res {
-                    Ok(Ok(mut data)) => {
-                        self.abort_active_state();
-                        let asset_dir = self.sessions.asset_dir(&data.id);
-
-                        let mut session_img_paths = Vec::new();
-                        for msg in &mut data.messages {
-                            // Ensure no base64 image payloads are retained in memory from disk
-                            msg.images = None;
-                            if let Some(paths) = msg.image_paths.as_mut() {
-                                for p in paths {
-                                    *p = resolve_session_image_path(p, &asset_dir);
-                                    session_img_paths.push(p.clone());
+                    for msg in &mut data.messages {
+                        msg.images = None;
+                        if let Some(names) = msg.image_names.as_mut() {
+                            for name in names {
+                                if let Some(base) =
+                                    std::path::Path::new(name).file_name().and_then(|s| s.to_str())
+                                {
+                                    *name = base.to_string();
                                 }
+                                all_image_names.push(name.clone());
                             }
                         }
+                    }
 
-                        let staging = Arc::clone(&self.attachments);
-                        let (restored_staging_paths, attachments) =
-                            tokio::task::spawn_blocking(move || {
-                                (
-                                    staging.restore_from_session(&session_img_paths),
-                                    staging.list_attachments(),
-                                )
-                            })
-                            .await
-                            .unwrap_or_default();
+                    let image_blobs = sessions.load_images(&data.id, &all_image_names);
+                    let restored_paths = staging.restore_from_bytes(&image_blobs);
+                    let attachments = staging.list_attachments();
+                    Ok((data, restored_paths, attachments))
+                })
+                .await;
 
+                match res {
+                    Ok(Ok((data, restored_staging_paths, attachments))) => {
+                        self.abort_active_state();
                         self.sent_images.extend(restored_staging_paths);
                         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
@@ -563,9 +548,9 @@ impl CoreEngine {
                     }
                 }
             }
-            EngineCommand::DeleteSession(path) => {
-                info!("Deleting session at path: {}", path.display());
-                self.emit_sessions(Some(path)).await;
+            EngineCommand::DeleteSession(session_id) => {
+                info!("Deleting session: {session_id}");
+                self.emit_sessions(Some(session_id)).await;
             }
             EngineCommand::ResetChat => {
                 info!("Resetting chat session");
@@ -619,7 +604,7 @@ impl CoreEngine {
                 self.turn.num_ctx = num_ctx.max(512);
                 self.active_max_tool_output_size = max_tool_output_size.max(1024);
 
-                self.save_session_bg().await;
+                self.save_session_bg(Vec::new()).await;
                 self.emit_model_config();
                 self.notify(
                     format!(
@@ -635,7 +620,7 @@ impl CoreEngine {
                 let clamped = new_ctx.max(512);
                 info!("Updating context window to {}", clamped);
                 self.turn.num_ctx = clamped;
-                self.save_session_bg().await;
+                self.save_session_bg(Vec::new()).await;
                 self.emit_model_config();
                 self.notify(format!("Context window set to {} tokens.", clamped), false);
             }
@@ -675,7 +660,7 @@ impl CoreEngine {
                         thoughts: (!thoughts.is_empty()).then(|| thoughts.clone()),
                         ..ChatMessage::new("assistant", final_text)
                     });
-                    self.save_and_emit_chat().await;
+                    self.save_and_emit_chat(Vec::new()).await;
 
                     let prefix = match (hit_length, is_near_limit) {
                         (true, _) => "⚠ CTX MAXED OUT (Truncated) — ",
@@ -720,12 +705,12 @@ impl CoreEngine {
         }
     }
 
-    async fn save_and_emit_chat(&mut self) {
-        self.save_session_bg().await;
+    async fn save_and_emit_chat(&mut self, new_images: Vec<(String, Vec<u8>)>) {
+        self.save_session_bg(new_images).await;
         self.emit_chat();
     }
 
-    async fn save_session_bg(&mut self) {
+    async fn save_session_bg(&mut self, new_images: Vec<(String, Vec<u8>)>) {
         self.flush_save_task().await;
 
         let sessions = Arc::clone(&self.sessions);
@@ -736,7 +721,7 @@ impl CoreEngine {
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs) {
+            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images) {
                 error!("Failed to save session {id}: {e}");
             }
         }));
@@ -748,27 +733,20 @@ impl CoreEngine {
         internal_tx: UnboundedSender<EngineEvent>,
     ) {
         self.stream_buffer.clear();
-        let asset_dir = self.sessions.asset_dir(&self.session_id);
+        self.flush_save_task().await;
+
+        let sessions = Arc::clone(&self.sessions);
+        let session_id = self.session_id.clone();
 
         // Clone lightweight messages (without Base64 payloads) and hydrate Base64
-        // strings only into the transient `hydrated_msgs` sent to the provider.
+        // strings directly from the SQLite database into the transient `hydrated_msgs`.
         let mut msgs = self.messages.clone();
         let hydrated_msgs = tokio::task::spawn_blocking(move || {
             for msg in &mut msgs {
-                let Some(paths) = &msg.image_paths else {
+                let Some(names) = &msg.image_names else {
                     continue;
                 };
-                let b64s: Vec<String> = paths
-                    .iter()
-                    .filter_map(|p| {
-                        let resolved = resolve_session_image_path(p, &asset_dir);
-                        ImageStaging::encode_image(&resolved)
-                            .inspect_err(|e| {
-                                warn!("Failed to encode session image {}: {e}", resolved.display())
-                            })
-                            .ok()
-                    })
-                    .collect();
+                let b64s = sessions.load_images_base64(&session_id, names);
                 if !b64s.is_empty() {
                     msg.images = Some(b64s);
                 }

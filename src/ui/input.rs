@@ -131,7 +131,7 @@ impl TuiApp {
                 if let Some(s) = self.sessions.get(self.session_idx) {
                     let _ = self
                         .cmd_tx
-                        .send(EngineCommand::LoadSession(s.file_path.clone()));
+                        .send(EngineCommand::LoadSession(s.id.clone()));
                     self.modal = ActiveModal::None;
                 }
             }
@@ -139,7 +139,7 @@ impl TuiApp {
                 if let Some(s) = self.sessions.get(self.session_idx) {
                     let _ = self
                         .cmd_tx
-                        .send(EngineCommand::DeleteSession(s.file_path.clone()));
+                        .send(EngineCommand::DeleteSession(s.id.clone()));
                 }
             }
             _ => {}
