@@ -588,8 +588,10 @@ impl TuiApp {
         self.chat_area = chunks[0];
         let available_width = chunks[0].width.saturating_sub(4).max(1) as usize;
 
-        self.msg_states
-            .resize(self.messages.len() + 1, MsgUiState::default());
+        self.msg_states.resize(
+            self.messages.len() + 1 + self.queued_messages.len(),
+            MsgUiState::default(),
+        );
         self.msg_visual_ranges.clear();
 
         let options = textwrap::Options::new(available_width).break_words(true);
@@ -691,6 +693,26 @@ impl TuiApp {
                 Color::Yellow,
                 false,
                 &styled_tool,
+                &mut lines,
+            );
+        }
+
+        for q_idx in 0..self.queued_messages.len() {
+            let block_idx = self.messages.len() + 1 + q_idx;
+            self.msg_states[block_idx].unfolded = true;
+            let qm = &self.queued_messages[q_idx];
+            let badge = qm
+                .images
+                .as_ref()
+                .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
+            let header = format!("USER{badge} (QUEUED — Esc to send now)");
+            let styled_queued = style_lines(&wrap_text(&sanitize_line(&qm.content), &options));
+            self.render_message_block(
+                block_idx,
+                &header,
+                Color::LightCyan,
+                false,
+                &styled_queued,
                 &mut lines,
             );
         }

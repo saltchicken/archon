@@ -67,9 +67,11 @@ pub enum EngineEvent {
     AttachmentsUpdated(Vec<ImageAttachment>),
     ChatUpdated {
         messages: Vec<ChatMessage>,
+        queued_messages: Vec<ChatMessage>,
         num_ctx: u32,
         system_prompt: String,
     },
+    QueuedInterjectionsUpdated(Vec<ChatMessage>),
     StreamStarted,
     StreamChunk(String),
     StreamDone {
@@ -123,6 +125,7 @@ pub struct CoreEngine {
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
     active_task: Option<JoinHandle<()>>,
+    internal_rx: Option<UnboundedReceiver<EngineEvent>>,
     executing_tool: bool,
     queued_interjections: Vec<QueuedInterjection>,
     save_task: Option<JoinHandle<()>>,
@@ -162,6 +165,7 @@ impl CoreEngine {
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
             active_task: None,
+            internal_rx: None,
             executing_tool: false,
             queued_interjections: Vec::new(),
             save_task: None,
@@ -170,10 +174,18 @@ impl CoreEngine {
         })
     }
 
-    fn abort_active_state(&mut self) {
+    fn abort_active_task(&mut self) -> bool {
+        self.internal_rx = None;
         if let Some(h) = self.active_task.take() {
             h.abort();
+            true
+        } else {
+            false
         }
+    }
+
+    fn abort_active_state(&mut self) {
+        self.abort_active_task();
         self.executing_tool = false;
         self.queued_interjections.clear();
         self.pending_tools.clear();
@@ -260,10 +272,7 @@ impl CoreEngine {
         });
     }
 
-    async fn flush_queued_interjections(
-        &mut self,
-        internal_tx: &UnboundedSender<EngineEvent>,
-    ) -> bool {
+    async fn flush_queued_interjections(&mut self) -> bool {
         if self.queued_interjections.is_empty() {
             return false;
         }
@@ -281,7 +290,7 @@ impl CoreEngine {
         }
         self.save_and_emit_chat(new_images).await;
         let turn = self.turn.clone();
-        self.spawn_model_turn(&turn, internal_tx.clone()).await;
+        self.spawn_model_turn(&turn).await;
         true
     }
 
@@ -291,7 +300,6 @@ impl CoreEngine {
         index: usize,
         total: usize,
         feedback: Option<String>,
-        internal_tx: &UnboundedSender<EngineEvent>,
     ) {
         let sig = tools::call_signature(&call);
         self.executing_tool = true;
@@ -303,7 +311,8 @@ impl CoreEngine {
 
         let cfg = self.config.clone();
         let max_out = self.active_max_tool_output_size;
-        let tx = internal_tx.clone();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.internal_rx = Some(rx);
 
         self.active_task = Some(tokio::spawn(async move {
             let (mut output, truncated) = tools::execute(&call, &cfg, max_out).await;
@@ -314,8 +323,8 @@ impl CoreEngine {
         }));
     }
 
-    async fn process_pending_tools(&mut self, internal_tx: &UnboundedSender<EngineEvent>) {
-        if self.flush_queued_interjections(internal_tx).await {
+    async fn process_pending_tools(&mut self) {
+        if self.flush_queued_interjections().await {
             return;
         }
 
@@ -355,7 +364,7 @@ impl CoreEngine {
             if modified {
                 self.save_and_emit_chat(Vec::new()).await;
             }
-            self.spawn_tool_execution(call, index, total, None, internal_tx);
+            self.spawn_tool_execution(call, index, total, None);
             return;
         }
 
@@ -364,7 +373,7 @@ impl CoreEngine {
         }
 
         let turn = self.turn.clone();
-        self.spawn_model_turn(&turn, internal_tx.clone()).await;
+        self.spawn_model_turn(&turn).await;
     }
 
     async fn update_attachments<F>(&self, op: F, success_msg: impl Into<String>)
@@ -426,32 +435,36 @@ impl CoreEngine {
     }
 
     pub async fn run(mut self, mut cmd_rx: UnboundedReceiver<EngineCommand>) {
-        let (internal_tx, mut internal_rx) = tokio::sync::mpsc::unbounded_channel::<EngineEvent>();
-
         loop {
             tokio::select! {
                 maybe_cmd = cmd_rx.recv() => match maybe_cmd {
-                    Some(cmd) => self.handle_command(cmd, &internal_tx).await,
+                    Some(cmd) => self.handle_command(cmd).await,
                     None => break,
                 },
-                Some(ev) = internal_rx.recv() => self.handle_internal_event(ev, &internal_tx).await,
+                maybe_ev = async {
+                    match self.internal_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => match maybe_ev {
+                    Some(ev) => self.handle_internal_event(ev).await,
+                    None => {
+                        self.active_task = None;
+                        self.internal_rx = None;
+                        self.executing_tool = false;
+                    }
+                },
             }
         }
 
-        if let Some(h) = self.active_task.take() {
-            h.abort();
-        }
+        self.abort_active_task();
 
         info!("Shutting down CoreEngine, awaiting pending session save...");
         self.flush_save_task().await;
         info!("All background tasks completely flushed.");
     }
 
-    async fn handle_command(
-        &mut self,
-        cmd: EngineCommand,
-        internal_tx: &UnboundedSender<EngineEvent>,
-    ) {
+    async fn handle_command(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::PasteClipboard => {
                 info!("Pasting image from clipboard");
@@ -493,9 +506,10 @@ impl CoreEngine {
                         turn,
                     });
                     let queued_total = self.queued_interjections.len();
+                    self.emit_queued_interjections();
                     self.notify(
                         format!(
-                            "Interjection queued ({queued_total}). Will send as soon as current step finishes (Esc to cancel now)."
+                            "Interjection queued ({queued_total}). Will send as soon as current step finishes (Esc to send now)."
                         ),
                         false,
                     );
@@ -513,16 +527,11 @@ impl CoreEngine {
                 self.messages.push(user_msg);
 
                 self.save_and_emit_chat(new_image_blobs).await;
-                self.spawn_model_turn(&turn, internal_tx.clone()).await;
+                self.spawn_model_turn(&turn).await;
             }
             EngineCommand::CancelStream => {
                 let was_tool = self.executing_tool;
-                let had_task = if let Some(handle) = self.active_task.take() {
-                    handle.abort();
-                    true
-                } else {
-                    false
-                };
+                let had_task = self.abort_active_task();
                 self.executing_tool = false;
 
                 if !had_task
@@ -549,6 +558,7 @@ impl CoreEngine {
                     changed = true;
                 }
 
+                let had_interjections = !self.queued_interjections.is_empty();
                 let mut extra_images = Vec::new();
                 for item in self.queued_interjections.drain(..) {
                     self.turn = item.turn;
@@ -557,12 +567,23 @@ impl CoreEngine {
                     changed = true;
                 }
 
+                if had_interjections {
+                    self.save_and_emit_chat(extra_images).await;
+                    let turn = self.turn.clone();
+                    self.spawn_model_turn(&turn).await;
+                    self.notify(
+                        "Interrupted active step — sending queued interjection...",
+                        false,
+                    );
+                    return;
+                }
+
                 if changed {
                     self.save_session_bg(extra_images).await;
                 }
                 self.emit_chat();
                 self.notify(
-                    if was_tool {
+                    if was_tool || closed > 0 {
                         "Tool execution cancelled."
                     } else {
                         "Stream cancelled."
@@ -604,7 +625,6 @@ impl CoreEngine {
                         index,
                         total,
                         (!trimmed_fb.is_empty()).then_some(trimmed_fb),
-                        internal_tx,
                     );
                 } else {
                     let mut internal_out = String::from("The user declined to run this command.");
@@ -618,7 +638,7 @@ impl CoreEngine {
                     });
                     self.save_and_emit_chat(Vec::new()).await;
                     info!("Tool declination recorded to chat history.");
-                    self.process_pending_tools(internal_tx).await;
+                    self.process_pending_tools().await;
                 }
             }
             EngineCommand::RefreshSessions => {
@@ -687,7 +707,7 @@ impl CoreEngine {
                             .filter(|c| !c.is_empty())
                         {
                             self.pending_tools = VecDeque::from(calls);
-                            self.process_pending_tools(internal_tx).await;
+                            self.process_pending_tools().await;
                         }
                     }
                     Ok(Err(e)) => {
@@ -725,9 +745,13 @@ impl CoreEngine {
                 num_ctx,
                 max_tool_output_size,
             } => {
-                if self.active_task.is_some() {
+                if self.active_task.is_some()
+                    || self.executing_tool
+                    || !self.pending_tools.is_empty()
+                    || !self.queued_interjections.is_empty()
+                {
                     self.notify(
-                        "Cannot switch model while streaming. Cancel stream first.",
+                        "Cannot switch model while a turn or tool approval is active. Cancel first.",
                         true,
                     );
                     return;
@@ -779,11 +803,7 @@ impl CoreEngine {
         }
     }
 
-    async fn handle_internal_event(
-        &mut self,
-        ev: EngineEvent,
-        internal_tx: &UnboundedSender<EngineEvent>,
-    ) {
+    async fn handle_internal_event(&mut self, ev: EngineEvent) {
         match ev {
             EngineEvent::StreamChunk(ref chunk) => {
                 self.stream_buffer.push_str(chunk);
@@ -797,6 +817,7 @@ impl CoreEngine {
                 ref thoughts,
             } => {
                 self.active_task = None;
+                self.internal_rx = None;
                 let final_text = std::mem::take(&mut self.stream_buffer);
                 let total_used = prompt_tokens + eval_tokens;
                 let ctx_limit = self.turn.num_ctx as u64;
@@ -842,21 +863,23 @@ impl CoreEngine {
                 let _ = self.tx.send(ev.clone());
                 if !tool_calls.is_empty() {
                     self.pending_tools = VecDeque::from(tool_calls.clone());
-                    self.process_pending_tools(internal_tx).await;
+                    self.process_pending_tools().await;
                 } else {
-                    self.flush_queued_interjections(internal_tx).await;
+                    self.flush_queued_interjections().await;
                 }
             }
             EngineEvent::StreamError(ref err) => {
                 self.active_task = None;
+                self.internal_rx = None;
                 self.executing_tool = false;
                 self.stream_buffer.clear();
                 self.notify(format!("API Error: {err}"), true);
                 let _ = self.tx.send(ev);
-                self.flush_queued_interjections(internal_tx).await;
+                self.flush_queued_interjections().await;
             }
             EngineEvent::ToolCompleted { output, truncated } => {
                 self.active_task = None;
+                self.internal_rx = None;
                 self.executing_tool = false;
                 self.messages.push(ChatMessage {
                     truncated,
@@ -864,7 +887,7 @@ impl CoreEngine {
                 });
                 self.save_and_emit_chat(Vec::new()).await;
                 info!("Tool execution completed and recorded to chat history.");
-                self.process_pending_tools(internal_tx).await;
+                self.process_pending_tools().await;
             }
             other => {
                 let _ = self.tx.send(other);
@@ -894,11 +917,7 @@ impl CoreEngine {
         }));
     }
 
-    async fn spawn_model_turn(
-        &mut self,
-        turn: &TurnConfig,
-        internal_tx: UnboundedSender<EngineEvent>,
-    ) {
+    async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
         self.stream_buffer.clear();
         self.flush_save_task().await;
 
@@ -929,12 +948,27 @@ impl CoreEngine {
         let model = self.model.clone();
         let config = self.config.clone();
         let turn_cfg = turn.clone();
+        let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.internal_rx = Some(internal_rx);
 
         self.active_task = Some(tokio::spawn(async move {
             provider
                 .stream_turn(client, model, config, hydrated_msgs, turn_cfg, internal_tx)
                 .await;
         }));
+    }
+
+    fn queued_ui_messages(&self) -> Vec<ChatMessage> {
+        self.queued_interjections
+            .iter()
+            .map(|q| q.msg.with_ui_image_placeholders())
+            .collect()
+    }
+
+    fn emit_queued_interjections(&self) {
+        let _ = self.tx.send(EngineEvent::QueuedInterjectionsUpdated(
+            self.queued_ui_messages(),
+        ));
     }
 
     fn emit_chat(&self) {
@@ -945,6 +979,7 @@ impl CoreEngine {
             .collect();
         let _ = self.tx.send(EngineEvent::ChatUpdated {
             messages,
+            queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,
             system_prompt: self.turn.system_prompt.clone(),
         });

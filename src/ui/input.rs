@@ -85,6 +85,7 @@ impl TuiApp {
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if ctrl && key.code == KeyCode::Char('q') {
             return true;
         }
@@ -92,7 +93,7 @@ impl TuiApp {
         match self.modal {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
-            ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl),
+            ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
             ActiveModal::None => self.handle_main_key(key, ctrl),
@@ -146,10 +147,17 @@ impl TuiApp {
         }
     }
 
-    fn handle_tool_approval_key(&mut self, code: KeyCode, ctrl: bool) {
+    fn handle_tool_approval_key(&mut self, code: KeyCode, ctrl: bool, shift: bool) {
         match code {
             KeyCode::Enter => self.resolve_modal_tool(true, false),
             KeyCode::Char('a') if ctrl => self.resolve_modal_tool(true, true),
+            KeyCode::Esc if shift => {
+                self.pending_tool = None;
+                self.tool_feedback.clear();
+                self.modal = ActiveModal::None;
+                self.follow_tail = true;
+                let _ = self.cmd_tx.send(EngineCommand::CancelStream);
+            }
             KeyCode::Esc => self.resolve_modal_tool(false, false),
             KeyCode::Up => self.tool_scroll = self.tool_scroll.saturating_sub(1),
             KeyCode::Down => self.tool_scroll = self.tool_scroll.saturating_add(1),
@@ -223,7 +231,11 @@ impl TuiApp {
         let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
 
         match key.code {
-            KeyCode::Esc if self.is_streaming || self.active_tool_status.is_some() => {
+            KeyCode::Esc
+                if self.is_streaming
+                    || self.active_tool_status.is_some()
+                    || !self.queued_messages.is_empty() =>
+            {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
             KeyCode::PageUp => self.scroll_chat(-page_step),

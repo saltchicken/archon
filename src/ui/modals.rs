@@ -230,7 +230,7 @@ impl TuiApp {
             Line::from(format!("> {}", sanitize_line(&self.tool_feedback))),
             Line::from(""),
             Line::from(Span::styled(
-                "[⏎] Approve Once   [^A] Always (Session)   [Esc] Decline   [↑/↓/PgUp/PgDn] Scroll",
+                "[⏎] Approve Once    [^A] Always (Session)    [Esc] Decline    [⇧Esc] Cancel All    [↑/↓/PgUp/PgDn] Scroll",
                 Style::default().fg(Color::Yellow),
             )),
         ]);

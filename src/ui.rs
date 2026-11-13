@@ -73,6 +73,7 @@ pub struct TuiApp {
 
     pub(super) attachments: Vec<ImageAttachment>,
     pub(super) messages: Vec<ChatMessage>,
+    pub(super) queued_messages: Vec<ChatMessage>,
     pub(super) styled_messages: Vec<Vec<Line<'static>>>,
     pub(super) styled_stream: Vec<Line<'static>>,
     pub(super) stream_dirty: bool,
@@ -146,6 +147,7 @@ impl TuiApp {
             cmd_tx,
             attachments: Vec::new(),
             messages: Vec::new(),
+            queued_messages: Vec::new(),
             styled_messages: Vec::new(),
             styled_stream: Vec::new(),
             stream_dirty: false,
@@ -320,6 +322,7 @@ impl TuiApp {
             EngineEvent::AttachmentsUpdated(list) => self.attachments = list,
             EngineEvent::ChatUpdated {
                 messages,
+                queued_messages,
                 num_ctx,
                 system_prompt,
             } => {
@@ -327,14 +330,17 @@ impl TuiApp {
                     self.used_tokens = 0;
                 }
                 self.messages = messages;
+                self.queued_messages = queued_messages;
                 self.styled_messages.clear();
                 self.finish_stream();
                 self.streaming_text.clear();
                 self.num_ctx = num_ctx;
                 self.sync_system_prompt(&system_prompt);
                 self.msg_states.clear();
-                self.msg_states
-                    .resize(self.messages.len() + 1, MsgUiState::default());
+                self.msg_states.resize(
+                    self.messages.len() + 1 + self.queued_messages.len(),
+                    MsgUiState::default(),
+                );
 
                 // Unfold the latest assistant response while keeping separate `tool` blocks folded.
                 if let Some(last_assistant_idx) =
@@ -342,6 +348,10 @@ impl TuiApp {
                 {
                     self.msg_states[last_assistant_idx].unfolded = true;
                 }
+            }
+            EngineEvent::QueuedInterjectionsUpdated(queued) => {
+                self.queued_messages = queued;
+                self.scroll_to_bottom();
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
