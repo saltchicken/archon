@@ -6,12 +6,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
-use tracing::{info, warn};
+use std::{fs, sync::Mutex};
 
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
@@ -36,7 +31,7 @@ pub struct ChatMessage {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none", alias = "image_paths")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -138,11 +133,9 @@ impl SessionManager {
         )
         .context("Failed to initialize database schema")?;
 
-        let mgr = Self {
+        Ok(Self {
             conn: Mutex::new(conn),
-        };
-        mgr.migrate_legacy_json_sessions(&history_dir);
-        Ok(mgr)
+        })
     }
 
     pub fn new_id() -> String {
@@ -320,115 +313,6 @@ impl SessionManager {
         let conn = self.lock_conn();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
         Ok(())
-    }
-
-    fn migrate_legacy_json_sessions(&self, history_dir: &Path) {
-        let json_paths: Vec<PathBuf> = fs::read_dir(history_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("session_") && n.ends_with(".json"))
-            })
-            .collect();
-
-        if json_paths.is_empty() {
-            return;
-        }
-
-        let mut migrated_count = 0usize;
-        for path in json_paths {
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(mut data) = serde_json::from_str::<SessionData>(&content) else {
-                warn!("Skipping malformed legacy session file: {}", path.display());
-                continue;
-            };
-
-            let asset_dir = history_dir.join("assets").join(&data.id);
-            let mut images_to_store = Vec::new();
-
-            for msg in &mut data.messages {
-                msg.images = None;
-                let Some(raw_entries) = msg.image_names.as_mut() else {
-                    continue;
-                };
-
-                let mut normalized_names = Vec::new();
-                for entry in raw_entries.iter() {
-                    let p = Path::new(entry);
-                    let candidates = [
-                        Some(p.to_path_buf()),
-                        Some(expand_tilde(entry)),
-                        p.file_name().map(|f| asset_dir.join(f)),
-                    ];
-                    if let Some(found) = candidates.into_iter().flatten().find(|c| c.is_file()) {
-                        let file_name = found
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("image.png")
-                            .to_string();
-                        if let Ok(bytes) = fs::read(&found) {
-                            images_to_store.push((file_name.clone(), bytes));
-                            normalized_names.push(file_name);
-                        }
-                    } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                        normalized_names.push(name.to_string());
-                    }
-                }
-                *raw_entries = normalized_names;
-            }
-
-            let Ok(messages_json) = serde_json::to_string(&data.messages) else {
-                continue;
-            };
-
-            let mut conn = self.lock_conn();
-            let Ok(tx) = conn.transaction() else {
-                continue;
-            };
-
-            let ins_res = tx.execute(
-                "INSERT OR IGNORE INTO sessions (id, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    data.id,
-                    data.title,
-                    data.model,
-                    data.updated_at,
-                    data.system_prompt,
-                    data.num_ctx,
-                    data.messages.len() as i64,
-                    messages_json
-                ],
-            );
-
-            if ins_res.is_ok() {
-                for (name, bytes) in images_to_store {
-                    let _ = tx.execute(
-                        "INSERT OR IGNORE INTO session_images (session_id, name, data)
-                         VALUES (?1, ?2, ?3)",
-                        params![data.id, name, bytes],
-                    );
-                }
-                if tx.commit().is_ok() {
-                    let backup = path.with_extension("json.migrated");
-                    let _ = fs::rename(&path, backup);
-                    if asset_dir.exists() {
-                        let _ = fs::remove_dir_all(&asset_dir);
-                    }
-                    migrated_count += 1;
-                }
-            }
-        }
-
-        if migrated_count > 0 {
-            info!("Migrated {migrated_count} legacy JSON session(s) into archon.db");
-        }
     }
 }
 

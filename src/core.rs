@@ -478,15 +478,8 @@ impl CoreEngine {
 
                     for msg in &mut data.messages {
                         msg.images = None;
-                        if let Some(names) = msg.image_names.as_mut() {
-                            for name in names {
-                                if let Some(base) =
-                                    std::path::Path::new(name).file_name().and_then(|s| s.to_str())
-                                {
-                                    *name = base.to_string();
-                                }
-                                all_image_names.push(name.clone());
-                            }
+                        if let Some(names) = &msg.image_names {
+                            all_image_names.extend(names.iter().cloned());
                         }
                     }
 
