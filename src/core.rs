@@ -227,6 +227,20 @@ impl CoreEngine {
         let mut auto_executed = false;
 
         while let Some(call) = self.pending_tools.front() {
+            if !tools::is_tool_enabled(&call.function.name, &self.config) {
+                let call = self.pending_tools.pop_front().unwrap();
+                warn!(
+                    "Rejecting disabled tool call '{}' without prompting",
+                    call.function.name
+                );
+                self.messages.push(ChatMessage::new(
+                    "tool",
+                    format!("Error: Unknown tool: '{}'", call.function.name),
+                ));
+                auto_executed = true;
+                continue;
+            }
+
             if !self.is_call_auto_approved(call) {
                 if auto_executed {
                     self.save_and_emit_chat().await;
