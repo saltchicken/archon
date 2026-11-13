@@ -1,4 +1,6 @@
-use crate::tools::{auto_schema, ensure_within_workspace, parse_args, resolve_new_path};
+use crate::tools::{
+    atomic_write_file, auto_schema, ensure_within_workspace, parse_args, resolve_new_path,
+};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -24,6 +26,6 @@ pub fn execute(json_args: &Value) -> Result<String> {
         ensure_within_workspace(parent, &cwd, "created path")?;
     }
 
-    fs::write(&target_path, &args.content).context("Error writing new file")?;
+    atomic_write_file(&target_path, &args.content).context("Error writing new file")?;
     Ok(format!("Successfully created {}", args.file_path.trim()))
 }

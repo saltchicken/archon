@@ -1,4 +1,4 @@
-use crate::tools::{auto_schema, parse_args, resolve_existing_path};
+use crate::tools::{atomic_write_file, auto_schema, parse_args, resolve_existing_path};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -158,7 +158,7 @@ pub fn fallback_hunk_preview(json_args: &Value) -> (String, String) {
 pub fn execute(json_args: &Value) -> Result<String> {
     let args: EditFileArgs = parse_args(json_args, "edit_file")?;
     let (target_path, _, updated, hunk_count) = apply_edits_from_value(json_args)?;
-    fs::write(&target_path, updated).context("Error writing file")?;
+    atomic_write_file(&target_path, updated).context("Error writing file")?;
 
     let path = args.file_path.trim();
     if hunk_count == 1 {
@@ -227,5 +227,41 @@ mod tests {
 
         let err = apply_hunks_to_str(original, "test.txt", &edits).unwrap_err();
         assert!(err.to_string().contains("overlap in test.txt"));
+    }
+
+    #[test]
+    fn atomic_write_creates_and_updates_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("script.sh");
+
+        atomic_write_file(&file_path, "#!/bin/sh\necho old\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "#!/bin/sh\necho old\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&file_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&file_path, perms).unwrap();
+        }
+
+        atomic_write_file(&file_path, "#!/bin/sh\necho new\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755);
+        }
+
+        let remaining_entries: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert_eq!(remaining_entries.len(), 1);
     }
 }

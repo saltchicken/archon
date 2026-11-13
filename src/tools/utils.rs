@@ -8,11 +8,11 @@ use serde_json::{Value, json};
 use std::{
     env,
     ffi::OsStr,
-    fs::File,
-    io::Read as _,
+    fs::{self, File, OpenOptions},
+    io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -140,6 +140,62 @@ pub fn resolve_new_path(raw: &str) -> Result<(PathBuf, PathBuf)> {
     }
     ensure_path_or_ancestor_within_workspace(&target, &cwd, trimmed)?;
     Ok((cwd, target))
+}
+
+/// Atomically writes `content` to `target_path` via a sibling temporary file,
+/// preserving existing file permissions when overwriting an existing file.
+pub fn atomic_write_file(target_path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+    let parent = target_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let existing_perms = fs::metadata(target_path).ok().map(|m| m.permissions());
+
+    let file_name = target_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    let pid = std::process::id();
+
+    let (mut tmp_file, tmp_path) = (0..64u32)
+        .find_map(|attempt| {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let candidate = parent.join(format!(".{file_name}.archon-{pid}-{nanos}-{attempt}.tmp"));
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+                .ok()
+                .map(|f| (f, candidate))
+        })
+        .context("Failed to create temporary file for atomic write")?;
+
+    let write_res = (|| -> Result<()> {
+        tmp_file
+            .write_all(content.as_ref())
+            .context("Error writing to temporary file")?;
+        tmp_file
+            .sync_all()
+            .context("Error syncing temporary file to disk")?;
+        drop(tmp_file);
+
+        if let Some(perms) = existing_perms {
+            fs::set_permissions(&tmp_path, perms)
+                .context("Error preserving file permissions on temporary file")?;
+        }
+
+        fs::rename(&tmp_path, target_path).context("Error committing atomic file write")?;
+        Ok(())
+    })();
+
+    if write_res.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_res
 }
 
 async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, cap: u64) -> std::io::Result<Vec<u8>> {
