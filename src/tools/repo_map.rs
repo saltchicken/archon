@@ -1,10 +1,8 @@
 use crate::{
     core::{config::WorkspaceSnapshotSettings, session::truncate_str},
-    tools::{auto_schema, build_globset, parse_args, resolve_scan_roots},
+    tools::utils::{auto_schema, parse_args, resolve_scan_roots, walk_workspace_files},
 };
 use anyhow::{Result, bail};
-use ignore::WalkBuilder;
-use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -921,74 +919,23 @@ fn collect_candidate_files(
         "target_path escapes workspace root",
     )?;
 
-    let include_set = (!args.include.is_empty())
-        .then(|| build_globset(&args.include, true))
-        .transpose()?;
-    let mut exclude_patterns: Vec<String> = [
-        "**/.git/**",
-        "**/*.venv/**",
-        "**/node_modules/**",
-        "**/target/**",
-        "**/.env*",
-    ]
-    .map(String::from)
-    .into();
-    exclude_patterns.extend(settings.exclude.iter().cloned());
-    exclude_patterns.extend(args.exclude.iter().cloned());
-    let exclude_set = build_globset(&exclude_patterns, true)?;
+    let walked = walk_workspace_files(
+        &base_root,
+        &scan_root,
+        settings.git_root,
+        &args.include,
+        &settings.exclude,
+        &args.exclude,
+        settings.max_files,
+    )?;
 
-    let mut files = Vec::new();
-    if scan_root.is_file() {
-        let Some(lang) = SupportedLang::from_path(&scan_root) else {
-            return Ok(files);
-        };
-        let rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
-        if exclude_set.is_match(&rel) {
-            bail!(
-                "Security violation: '{}' matches an excluded pattern",
-                rel.display()
-            );
-        }
-        files.push((scan_root, rel.to_string_lossy().into_owned(), lang));
-    } else {
-        let walker = WalkBuilder::new(&scan_root)
-            .hidden(false)
-            .git_ignore(settings.git_root)
-            .git_global(settings.git_root)
-            .git_exclude(settings.git_root)
-            .build();
-
-        for entry in walker.flatten() {
-            if files.len() >= settings.max_files {
-                break;
-            }
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Some(lang) = SupportedLang::from_path(path) else {
-                continue;
-            };
-            let Some(relative) = diff_paths(path, &base_root) else {
-                continue;
-            };
-            if exclude_set.is_match(&relative)
-                || include_set
-                    .as_ref()
-                    .is_some_and(|inc| !inc.is_match(&relative))
-            {
-                continue;
-            }
-            files.push((
-                path.to_path_buf(),
-                relative.to_string_lossy().into_owned(),
-                lang,
-            ));
-        }
-        files.sort_by(|a, b| a.1.cmp(&b.1));
-    }
-
-    Ok(files)
+    Ok(walked
+        .into_iter()
+        .filter_map(|(abs_path, rel_display)| {
+            let lang = SupportedLang::from_path(&abs_path)?;
+            Some((abs_path, rel_display, lang))
+        })
+        .collect())
 }
 
 fn execute_map(

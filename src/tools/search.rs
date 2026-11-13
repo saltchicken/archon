@@ -1,10 +1,10 @@
 use crate::{
     core::config::WorkspaceSnapshotSettings,
-    tools::{auto_schema, build_globset, parse_args, read_utf8_capped, resolve_scan_roots},
+    tools::utils::{
+        auto_schema, parse_args, read_utf8_capped, resolve_scan_roots, walk_workspace_files,
+    },
 };
 use anyhow::{Context, Result, bail};
-use ignore::WalkBuilder;
-use pathdiff::diff_paths;
 use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -84,64 +84,15 @@ pub fn execute(
     let (base_root, scan_root) =
         resolve_scan_roots(settings.git_root, &args.path, "path escapes workspace root")?;
 
-    let include_set = (!args.include.is_empty())
-        .then(|| build_globset(&args.include, true))
-        .transpose()?;
-    let mut exclude_patterns: Vec<String> = [
-        "**/.git/**",
-        "**/*.venv/**",
-        "**/.env*",
-        "**/*.pem",
-        "**/*.key",
-        "**/id_rsa*",
-        "**/secrets.json",
-    ]
-    .map(String::from)
-    .into();
-    exclude_patterns.extend(settings.exclude.iter().cloned());
-    exclude_patterns.extend(args.exclude);
-    let exclude_set = build_globset(&exclude_patterns, true)?;
-
-    let mut candidate_files = Vec::new();
-    if scan_root.is_file() {
-        let rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
-        if exclude_set.is_match(&rel) {
-            bail!(
-                "Security violation: '{}' matches an excluded pattern",
-                rel.display()
-            );
-        }
-        candidate_files.push((scan_root, rel.to_string_lossy().into_owned()));
-    } else {
-        let walker = WalkBuilder::new(&scan_root)
-            .hidden(false)
-            .git_ignore(settings.git_root)
-            .git_global(settings.git_root)
-            .git_exclude(settings.git_root)
-            .build();
-
-        for entry in walker.flatten() {
-            if candidate_files.len() >= settings.max_files {
-                break;
-            }
-            let path = entry.path();
-            if !path.is_file() || path.components().any(|c| c.as_os_str() == ".git") {
-                continue;
-            }
-            let Some(relative) = diff_paths(path, &base_root) else {
-                continue;
-            };
-            if exclude_set.is_match(&relative)
-                || include_set
-                    .as_ref()
-                    .is_some_and(|inc| !inc.is_match(&relative))
-            {
-                continue;
-            }
-            candidate_files.push((path.to_path_buf(), relative.to_string_lossy().into_owned()));
-        }
-        candidate_files.sort_by(|a, b| a.0.cmp(&b.0));
-    }
+    let candidate_files = walk_workspace_files(
+        &base_root,
+        &scan_root,
+        settings.git_root,
+        &args.include,
+        &settings.exclude,
+        &args.exclude,
+        settings.max_files,
+    )?;
 
     if args.files_with_matches {
         let mut file_hits: Vec<(String, usize, usize)> = Vec::new();

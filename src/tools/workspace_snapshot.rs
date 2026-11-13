@@ -1,10 +1,12 @@
 use crate::{
     core::config::{WorkspaceSnapshotSettings, expand_tilde},
-    tools::{auto_schema, build_globset, is_binary_bytes, parse_args, resolve_scan_roots},
+    tools::utils::{
+        auto_schema, build_exclude_globset, build_globset, build_workspace_walker, is_binary_bytes,
+        parse_args, resolve_scan_roots,
+    },
 };
 use anyhow::Result;
 use globset::GlobSet;
-use ignore::WalkBuilder;
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -184,33 +186,12 @@ pub fn execute(
         vec!["**/*".into()]
     };
 
-    let mut exclude_patterns: Vec<String> = [
-        "**/.git/**",
-        "**/*.venv/**",
-        "**/.env*",
-        "**/*.pem",
-        "**/*.key",
-        "**/id_rsa*",
-        "**/secrets.json",
-    ]
-    .map(String::from)
-    .into();
-    exclude_patterns.extend(settings.exclude.iter().cloned());
-    exclude_patterns.extend(args.exclude);
-
     let include_set = build_globset(&include_patterns, false)?;
-    let exclude_set = build_globset(&exclude_patterns, false)?;
+    let exclude_set = build_exclude_globset(&settings.exclude, &args.exclude, false)?;
     let tree_only_set = build_globset(&settings.include_in_tree, false)?;
 
     let mut entries = Vec::new();
-    let walker = WalkBuilder::new(&scan_root)
-        .hidden(false)
-        .git_ignore(settings.git_root)
-        .git_global(settings.git_root)
-        .git_exclude(settings.git_root)
-        .build();
-
-    for entry in walker.flatten() {
+    for entry in build_workspace_walker(&scan_root, settings.git_root) {
         if entries.len() >= settings.max_files {
             break;
         }
