@@ -8,6 +8,10 @@ pub fn workspace_root() -> Result<PathBuf> {
     Ok(dunce::canonicalize(env::current_dir()?)?)
 }
 
+pub fn has_git_dir_component(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".git")
+}
+
 pub fn ensure_within_workspace(path: &Path, cwd: &Path, label: &str) -> Result<PathBuf> {
     let canon = dunce::canonicalize(path)?;
     if !canon.starts_with(cwd) {
@@ -45,6 +49,27 @@ pub fn validate_relative_path(raw: &str) -> Result<&Path> {
         bail!("Security violation: path traversal blocked for '{trimmed}'");
     }
     Ok(rel_path)
+}
+
+pub fn resolve_existing_under_root(
+    base_root: &Path,
+    raw: &str,
+    escape_label: &str,
+) -> Result<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return Ok(base_root.to_path_buf());
+    }
+    let rel = validate_relative_path(trimmed)?;
+    let candidate = base_root.join(rel);
+    if !candidate.exists() {
+        bail!("Target path does not exist: '{trimmed}'");
+    }
+    let canon = dunce::canonicalize(&candidate)?;
+    if !canon.starts_with(base_root) {
+        bail!("Security violation: {escape_label}");
+    }
+    Ok(canon)
 }
 
 fn resolve_workspace_path(raw: &str) -> Result<(PathBuf, PathBuf)> {

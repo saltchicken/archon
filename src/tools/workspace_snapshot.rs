@@ -1,8 +1,8 @@
 use crate::{
     core::config::{WorkspaceSnapshotSettings, expand_tilde},
     tools::utils::{
-        auto_schema, build_exclude_globset, build_globset, build_workspace_walker, is_binary_bytes,
-        parse_args, resolve_scan_roots,
+        ReadFileOutcome, auto_schema, build_exclude_globset, build_globset, build_workspace_walker,
+        has_git_dir_component, parse_args, read_text_file_inspected, resolve_scan_roots,
     },
 };
 use anyhow::Result;
@@ -14,8 +14,6 @@ use serde_json::Value;
 use std::{
     collections::HashSet,
     fmt::Write as _,
-    fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -48,7 +46,6 @@ struct FileEntry {
     depth: usize,
     is_dir: bool,
     include_content: bool,
-    exceeds_size: bool,
 }
 
 enum FileOutcome {
@@ -75,6 +72,7 @@ fn shrink_tilde(path: &Path) -> String {
 fn read_to_outcome(
     path: &Path,
     display_len: usize,
+    max_file_size: u64,
     used_bytes: &mut usize,
     max_output_size: usize,
 ) -> FileOutcome {
@@ -82,35 +80,20 @@ fn read_to_outcome(
         return FileOutcome::Skipped("Workspace snapshot output size limit reached.");
     }
 
-    let mut file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => return FileOutcome::Error(format!("Error reading file: {e}")),
-    };
-    let file_size = file.metadata().map_or(0, |m| m.len() as usize);
-
-    let mut chunk = [0u8; 8192];
-    let n = match file.read(&mut chunk) {
-        Ok(0) => return FileOutcome::Content(String::new()),
-        Ok(n) => n,
-        Err(e) => return FileOutcome::Error(format!("Error reading file: {e}")),
-    };
-
-    if is_binary_bytes(&chunk[..n]) {
-        return FileOutcome::Skipped("Binary file detected.");
-    }
-
-    let mut buffer = Vec::with_capacity(file_size);
-    buffer.extend_from_slice(&chunk[..n]);
-    if let Err(e) = file.read_to_end(&mut buffer) {
-        return FileOutcome::Error(format!("Error reading file: {e}"));
-    }
-
-    match String::from_utf8(buffer) {
-        Ok(content) => {
+    match read_text_file_inspected(path, max_file_size) {
+        ReadFileOutcome::Empty => FileOutcome::Content(String::new()),
+        ReadFileOutcome::Content(content) => {
             *used_bytes = used_bytes.saturating_add(content.len() + display_len + 32);
             FileOutcome::Content(content)
         }
-        Err(_) => FileOutcome::Skipped("Non-UTF-8 text / binary file detected."),
+        ReadFileOutcome::ExceedsMaxSize => {
+            FileOutcome::Error("File exceeds maximum size limit.".into())
+        }
+        ReadFileOutcome::Binary => FileOutcome::Skipped("Binary file detected."),
+        ReadFileOutcome::InvalidUtf8 => {
+            FileOutcome::Skipped("Non-UTF-8 text / binary file detected.")
+        }
+        ReadFileOutcome::IoError(e) => FileOutcome::Error(format!("Error reading file: {e}")),
     }
 }
 
@@ -196,7 +179,7 @@ pub fn execute(
             break;
         }
         let path = entry.path();
-        if path == base_root || path.components().any(|c| c.as_os_str() == ".git") {
+        if path == base_root || has_git_dir_component(path) {
             continue;
         }
         let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
@@ -224,7 +207,6 @@ pub fn execute(
             depth: relative.components().count(),
             is_dir,
             include_content: !is_dir && matches_include && !matches_tree,
-            exceeds_size: metadata.len() > settings.max_size,
         });
     }
 
@@ -254,16 +236,13 @@ pub fn execute(
 
     if !args.tree_only {
         for entry in entries.iter().filter(|e| e.include_content) {
-            let outcome = if entry.exceeds_size {
-                FileOutcome::Error("File exceeds maximum size limit.".into())
-            } else {
-                read_to_outcome(
-                    &entry.path,
-                    entry.display_path.len(),
-                    &mut used_bytes,
-                    max_output_size,
-                )
-            };
+            let outcome = read_to_outcome(
+                &entry.path,
+                entry.display_path.len(),
+                settings.max_size,
+                &mut used_bytes,
+                max_output_size,
+            );
             files.push((entry.display_path.clone(), outcome));
         }
     }
@@ -310,19 +289,13 @@ pub fn execute(
                     } else {
                         let _ = writeln!(tree_out, "{display_path}");
                         if !args.tree_only {
-                            let exceeds = valid_path
-                                .metadata()
-                                .is_ok_and(|m| m.len() > settings.max_size);
-                            let outcome = if exceeds {
-                                FileOutcome::Error("File exceeds maximum size limit.".into())
-                            } else {
-                                read_to_outcome(
-                                    &valid_path,
-                                    display_path.len(),
-                                    &mut used_bytes,
-                                    max_output_size,
-                                )
-                            };
+                            let outcome = read_to_outcome(
+                                &valid_path,
+                                display_path.len(),
+                                settings.max_size,
+                                &mut used_bytes,
+                                max_output_size,
+                            );
                             files.push((display_path, outcome));
                         }
                     }

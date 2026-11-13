@@ -1,4 +1,4 @@
-use super::paths::{validate_relative_path, workspace_root};
+use super::paths::{has_git_dir_component, resolve_existing_under_root, workspace_root};
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -21,6 +21,15 @@ pub const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "**/secrets.json",
 ];
 
+pub enum ReadFileOutcome {
+    Empty,
+    Content(String),
+    ExceedsMaxSize,
+    Binary,
+    InvalidUtf8,
+    IoError(std::io::Error),
+}
+
 pub fn find_git_root(start_path: &Path) -> Option<PathBuf> {
     start_path
         .ancestors()
@@ -41,22 +50,8 @@ pub fn resolve_scan_roots(
         cwd
     };
     let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
-
-    let trimmed = target_path.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return Ok((base_root.clone(), base_root));
-    }
-
-    let rel = validate_relative_path(trimmed)?;
-    let candidate = base_root.join(rel);
-    if !candidate.exists() {
-        bail!("Target path does not exist: '{trimmed}'");
-    }
-    let canon = dunce::canonicalize(&candidate)?;
-    if !canon.starts_with(&base_root) {
-        bail!("Security violation: {escape_label}");
-    }
-    Ok((base_root, canon))
+    let scan_root = resolve_existing_under_root(&base_root, target_path, escape_label)?;
+    Ok((base_root, scan_root))
 }
 
 /// Builds a configured `ignore::Walk` iterator over `scan_root`.
@@ -139,7 +134,7 @@ pub fn walk_workspace_files(
             break;
         }
         let path = entry.path();
-        if !path.is_file() || path.components().any(|c| c.as_os_str() == ".git") {
+        if !path.is_file() || has_git_dir_component(path) {
             continue;
         }
         let Some(relative) = diff_paths(path, base_root) else {
@@ -170,21 +165,47 @@ pub fn is_binary_bytes(data: &[u8]) -> bool {
     (control_chars as f32 / data.len() as f32) > 0.3
 }
 
-pub fn read_utf8_capped(path: &Path, max_file_size: u64) -> Option<String> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len == 0 || len > max_file_size {
-        return None;
+pub fn read_text_file_inspected(path: &Path, max_file_size: u64) -> ReadFileOutcome {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => return ReadFileOutcome::IoError(e),
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => return ReadFileOutcome::IoError(e),
+    };
+    if len == 0 {
+        return ReadFileOutcome::Empty;
+    }
+    if len > max_file_size {
+        return ReadFileOutcome::ExceedsMaxSize;
     }
 
     let mut chunk = [0u8; 8192];
-    let n = file.read(&mut chunk).ok()?;
-    if n == 0 || is_binary_bytes(&chunk[..n]) {
-        return None;
+    let n = match file.read(&mut chunk) {
+        Ok(0) => return ReadFileOutcome::Empty,
+        Ok(n) => n,
+        Err(e) => return ReadFileOutcome::IoError(e),
+    };
+    if is_binary_bytes(&chunk[..n]) {
+        return ReadFileOutcome::Binary;
     }
 
     let mut buffer = Vec::with_capacity(len as usize);
     buffer.extend_from_slice(&chunk[..n]);
-    file.read_to_end(&mut buffer).ok()?;
-    String::from_utf8(buffer).ok()
+    if let Err(e) = file.read_to_end(&mut buffer) {
+        return ReadFileOutcome::IoError(e);
+    }
+
+    match String::from_utf8(buffer) {
+        Ok(s) => ReadFileOutcome::Content(s),
+        Err(_) => ReadFileOutcome::InvalidUtf8,
+    }
+}
+
+pub fn read_utf8_capped(path: &Path, max_file_size: u64) -> Option<String> {
+    match read_text_file_inspected(path, max_file_size) {
+        ReadFileOutcome::Content(s) => Some(s),
+        _ => None,
+    }
 }

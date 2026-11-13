@@ -1,6 +1,6 @@
-use crate::tools::{
-    auto_schema, ensure_within_workspace, parse_args, resolve_existing_path, resolve_new_path,
-    validate_relative_path, workspace_root,
+use crate::tools::utils::{
+    auto_schema, ensure_within_workspace, has_git_dir_component, parse_args, resolve_existing_path,
+    resolve_existing_under_root, resolve_new_path, workspace_root,
 };
 use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;
@@ -53,7 +53,7 @@ pub fn schema() -> Value {
 
 fn ensure_not_git_metadata(path: &Path, cwd: &Path) -> Result<()> {
     let rel = diff_paths(path, cwd).unwrap_or_else(|| path.to_path_buf());
-    if rel.components().any(|c| c.as_os_str() == ".git") {
+    if has_git_dir_component(&rel) {
         bail!("Security violation: cannot modify or delete '.git' repository metadata");
     }
     Ok(())
@@ -141,12 +141,8 @@ pub fn preview_action(json_args: &Value) -> Result<(String, Option<(String, Stri
     let args: FsArgs = parse_args(json_args, "fs")?;
     match args.action {
         FsAction::List => {
-            let raw = if args.path.trim().is_empty() {
-                "."
-            } else {
-                args.path.trim()
-            };
-            let (_, target) = resolve_existing_path(raw)?;
+            let cwd = workspace_root()?;
+            let target = resolve_existing_under_root(&cwd, &args.path, "path escapes workspace")?;
             Ok((format!("List directory: {}", target.display()), None))
         }
         FsAction::Rename | FsAction::Copy => {
@@ -268,15 +264,7 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
     match args.action {
         FsAction::List => {
             let cwd = workspace_root()?;
-            let target = if src_str.is_empty() || src_str == "." {
-                cwd.clone()
-            } else {
-                let candidate = cwd.join(validate_relative_path(src_str)?);
-                if !candidate.exists() {
-                    bail!("Target path does not exist: '{src_str}'");
-                }
-                ensure_within_workspace(&candidate, &cwd, src_str)?
-            };
+            let target = resolve_existing_under_root(&cwd, src_str, "path escapes workspace")?;
 
             let rel_display = diff_paths(&target, &cwd)
                 .filter(|p| !p.as_os_str().is_empty())

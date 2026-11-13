@@ -1,6 +1,8 @@
 use crate::{
     core::{config::WorkspaceSnapshotSettings, session::truncate_str},
-    tools::utils::{auto_schema, parse_args, resolve_scan_roots, walk_workspace_files},
+    tools::utils::{
+        auto_schema, parse_args, read_utf8_capped, resolve_scan_roots, walk_workspace_files,
+    },
 };
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
@@ -9,10 +11,9 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
-    fs,
     path::{Path, PathBuf},
 };
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, Parser, Tree};
 
 const PAGERANK_ITERATIONS: usize = 25;
 const PAGERANK_DAMPING: f64 = 0.85;
@@ -496,21 +497,32 @@ fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String
     }
 }
 
+fn parse_ast_file(
+    parser: &mut Parser,
+    abs_path: &Path,
+    lang: SupportedLang,
+    max_file_size: u64,
+    required_substring: Option<&str>,
+) -> Option<(String, Tree)> {
+    let source = read_utf8_capped(abs_path, max_file_size)?;
+    if let Some(needle) = required_substring
+        && !source.contains(needle)
+    {
+        return None;
+    }
+    parser.set_language(&lang.ts_language()).ok()?;
+    let tree = parser.parse(&source, None)?;
+    Some((source, tree))
+}
+
 fn parse_source_file(
+    parser: &mut Parser,
     abs_path: &Path,
     display_path: String,
     lang: SupportedLang,
     max_file_size: u64,
 ) -> Option<ParsedFile> {
-    let len = fs::metadata(abs_path).ok()?.len();
-    if len == 0 || len > max_file_size {
-        return None;
-    }
-
-    let source = fs::read_to_string(abs_path).ok()?;
-    let mut parser = Parser::new();
-    parser.set_language(&lang.ts_language()).ok()?;
-    let tree = parser.parse(&source, None)?;
+    let (source, tree) = parse_ast_file(parser, abs_path, lang, max_file_size, None)?;
     let root = tree.root_node();
 
     let mut defs = Vec::new();
@@ -944,10 +956,17 @@ fn execute_map(
     settings: &WorkspaceSnapshotSettings,
     max_output_size: usize,
 ) -> Result<String> {
+    let mut parser = Parser::new();
     let mut parsed_files: Vec<ParsedFile> = candidate_files
         .into_iter()
         .filter_map(|(abs_path, display_path, lang)| {
-            parse_source_file(&abs_path, display_path, lang, settings.max_size)
+            parse_source_file(
+                &mut parser,
+                &abs_path,
+                display_path,
+                lang,
+                settings.max_size,
+            )
         })
         .collect();
 
@@ -1080,22 +1099,13 @@ fn execute_definition(
         if matches.len() >= max_results {
             break;
         }
-        let Ok(meta) = fs::metadata(&abs_path) else {
-            continue;
-        };
-        if meta.len() == 0 || meta.len() > settings.max_size {
-            continue;
-        }
-        let Ok(source) = fs::read_to_string(&abs_path) else {
-            continue;
-        };
-        if !source.contains(&target_leaf) {
-            continue;
-        }
-        if parser.set_language(&lang.ts_language()).is_err() {
-            continue;
-        }
-        let Some(tree) = parser.parse(&source, None) else {
+        let Some((source, tree)) = parse_ast_file(
+            &mut parser,
+            &abs_path,
+            lang,
+            settings.max_size,
+            Some(&target_leaf),
+        ) else {
             continue;
         };
 
@@ -1172,22 +1182,13 @@ fn execute_references(
         if total_hits >= max_results || out.len() > max_output_size {
             break;
         }
-        let Ok(meta) = fs::metadata(&abs_path) else {
-            continue;
-        };
-        if meta.len() == 0 || meta.len() > settings.max_size {
-            continue;
-        }
-        let Ok(source) = fs::read_to_string(&abs_path) else {
-            continue;
-        };
-        if !source.contains(&target_leaf) {
-            continue;
-        }
-        if parser.set_language(&lang.ts_language()).is_err() {
-            continue;
-        }
-        let Some(tree) = parser.parse(&source, None) else {
+        let Some((source, tree)) = parse_ast_file(
+            &mut parser,
+            &abs_path,
+            lang,
+            settings.max_size,
+            Some(&target_leaf),
+        ) else {
             continue;
         };
 
