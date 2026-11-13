@@ -36,7 +36,7 @@ struct WorkspaceSnapshotArgs {
 pub fn schema() -> Value {
     auto_schema::<WorkspaceSnapshotArgs>(
         "workspace_snapshot",
-        "Generates a formatted workspace snapshot including directory tree and file contents. Respects .gitignore and .archon.toml [workspace_snapshot] settings.",
+        "Generates a full workspace directory tree and dumps complete file contents (including configs like Cargo.toml and non-code files). Use `tree_only: true` to inspect project structure, or scope with `target_path` / `include` for small modules. For navigating medium-to-large codebases without exhausting context, prefer `repo_map`.",
     )
 }
 
