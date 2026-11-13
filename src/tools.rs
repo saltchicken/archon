@@ -1,5 +1,6 @@
 mod cargo;
 mod create_file;
+mod delegate_task;
 mod dotfiles;
 mod edit_file;
 mod execute_command;
@@ -80,6 +81,7 @@ pub(super) struct ToolContext {
     pub max_output_size: usize,
     pub snapshot: WorkspaceSnapshotSettings,
     pub allowed_commands: Vec<String>,
+    pub config: Config,
 }
 
 impl ToolContext {
@@ -89,6 +91,7 @@ impl ToolContext {
             max_output_size,
             snapshot: config.workspace_snapshot.clone(),
             allowed_commands: config.app.allowed_commands.clone(),
+            config: config.clone(),
         })
     }
 
@@ -98,6 +101,7 @@ impl ToolContext {
             max_output_size: 0,
             snapshot: WorkspaceSnapshotSettings::default(),
             allowed_commands: Vec::new(),
+            config: Config::default(),
         })
     }
 
@@ -736,6 +740,7 @@ pub fn format_approval(call: &ToolCall) -> String {
 pub const ALL_TOOL_NAMES: &[&str] = &[
     cargo::Tool::NAME,
     create_file::Tool::NAME,
+    delegate_task::Tool::NAME,
     dotfiles::Tool::NAME,
     edit_file::Tool::NAME,
     execute_command::Tool::NAME,
@@ -765,6 +770,10 @@ pub fn schemas(config: &Config) -> Vec<Value> {
         (
             create_file::Tool::NAME,
             blocking_schema::<create_file::Tool>(),
+        ),
+        (
+            delegate_task::Tool::NAME,
+            async_schema::<delegate_task::Tool>(),
         ),
         (dotfiles::Tool::NAME, blocking_schema::<dotfiles::Tool>()),
         (edit_file::Tool::NAME, blocking_schema::<edit_file::Tool>()),
@@ -805,6 +814,7 @@ async fn dispatch_tool(
     match name {
         cargo::Tool::NAME => run_async::<cargo::Tool>(args, &ctx).await,
         create_file::Tool::NAME => run_blocking::<create_file::Tool>(args, ctx).await,
+        delegate_task::Tool::NAME => run_async::<delegate_task::Tool>(args, &ctx).await,
         dotfiles::Tool::NAME => run_blocking::<dotfiles::Tool>(args, ctx).await,
         edit_file::Tool::NAME => run_blocking::<edit_file::Tool>(args, ctx).await,
         execute_command::Tool::NAME => run_async::<execute_command::Tool>(args, &ctx).await,

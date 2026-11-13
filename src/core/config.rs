@@ -59,6 +59,7 @@ pub struct Config {
 #[serde(default)]
 pub struct AppSettings {
     pub default_model: String,
+    pub sub_agent_model: String,
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub enabled_tools: Vec<String>,
@@ -120,6 +121,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_model: "qwen3.8:27b".into(),
+            sub_agent_model: "qwen3.8:27b".into(),
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
             enabled_tools: crate::tools::ALL_TOOL_NAMES
@@ -134,6 +136,7 @@ impl Default for AppSettings {
                 "search",
                 "repo_map",
                 "workspace_snapshot",
+                "delegate_task",
                 "fs:list",
                 "git:status",
                 "git:diff",
@@ -223,7 +226,7 @@ impl Default for Config {
                 ),
                 preset(
                     "Codebase Architect",
-                    "You are an expert software architect working inside Archon. Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and verify changes with `cargo` (`check`, `clippy`, `test`).",
+                    "You are an expert software architect working inside Archon. Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and delegate routine formatting/lint verification (`cargo fmt`, `cargo clippy`, `cargo check`) to the local model via `delegate_task`.",
                 ),
                 preset(
                     "CachyOS Optimizer",
