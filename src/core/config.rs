@@ -191,7 +191,7 @@ impl Default for Config {
                     max_tool_output_size: 131_072,
                 },
                 ModelPreset {
-                    name: "gemini-3.8-flash".into(),
+                    name: "gemini-4-hydrogen".into(),
                     context: 1_048_576,
                     max_tool_output_size: 524_288,
                 },
