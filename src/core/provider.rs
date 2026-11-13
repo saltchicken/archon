@@ -112,6 +112,22 @@ impl Provider {
             .enable_tools
             .then(|| tools::schemas(&config))
             .filter(|t| !t.is_empty());
+
+        // Strip any historical tool_calls for tools that are currently disabled
+        let messages: Vec<ChatMessage> = messages
+            .into_iter()
+            .map(|mut m| {
+                if let Some(calls) = m.tool_calls.take() {
+                    let filtered: Vec<_> = calls
+                        .into_iter()
+                        .filter(|tc| tools::is_tool_enabled(&tc.function.name, &config))
+                        .collect();
+                    m.tool_calls = (!filtered.is_empty()).then_some(filtered);
+                }
+                m
+            })
+            .collect();
+
         match self {
             Self::Ollama => {
                 let payload = ollama::build_payload(

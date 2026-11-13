@@ -1,3 +1,16 @@
+[app]
+enabled_tools = [
+    "cargo",
+    "create_file",
+    "edit_file",
+    "fetch_url",
+    "fs",
+    "git",
+    "repo_map",
+    "search",
+    "workspace_snapshot",
+]
+
 [workspace_snapshot]
 git_root = true
 include = ["**/*"]
