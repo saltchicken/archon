@@ -1,9 +1,10 @@
-use crate::tools::{atomic_write_file, auto_schema, parse_args, resolve_existing_path};
+use super::{BlockingTool, ToolContext, atomic_write_file};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 use std::{borrow::Cow, fs, path::PathBuf};
+
+pub struct Tool;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct EditHunk {
@@ -14,18 +15,11 @@ pub struct EditHunk {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct EditFileArgs {
+pub struct EditFileArgs {
     /// Relative path to the file in the workspace.
     file_path: String,
     /// Disjoint search/replace hunks to apply atomically to the file in a single pass.
     edits: Vec<EditHunk>,
-}
-
-pub fn schema() -> Value {
-    auto_schema::<EditFileArgs>(
-        "edit_file",
-        "Edit a file by applying one or more disjoint, exact, unique search/replace hunks atomically.",
-    )
 }
 
 fn normalize_eol(s: &str, use_crlf: bool) -> String {
@@ -125,23 +119,22 @@ pub fn apply_hunks_to_str(content: &str, file_path: &str, edits: &[EditHunk]) ->
     Ok(out)
 }
 
-pub fn apply_edits_from_value(json_args: &Value) -> Result<(PathBuf, String, String, usize)> {
-    let args: EditFileArgs = parse_args(json_args, "edit_file")?;
+pub fn preview_edits(
+    args: &EditFileArgs,
+    ctx: &ToolContext,
+) -> Result<(PathBuf, String, String, usize)> {
     if args.edits.is_empty() {
         bail!("'edits' array cannot be empty");
     }
 
-    let (_, target_path) = resolve_existing_path(&args.file_path)?;
+    let target_path = ctx.resolve_existing_path(&args.file_path)?;
     let original = fs::read_to_string(&target_path).context("Error reading file")?;
     let updated = apply_hunks_to_str(&original, args.file_path.trim(), &args.edits)?;
 
     Ok((target_path, original, updated, args.edits.len()))
 }
 
-pub fn fallback_hunk_preview(json_args: &Value) -> (String, String) {
-    let Ok(args) = parse_args::<EditFileArgs>(json_args, "edit_file") else {
-        return (String::new(), String::new());
-    };
+pub fn fallback_hunk_preview(args: &EditFileArgs) -> (String, String) {
     let join_field = |f: fn(&EditHunk) -> &str| {
         args.edits
             .iter()
@@ -155,16 +148,21 @@ pub fn fallback_hunk_preview(json_args: &Value) -> (String, String) {
     )
 }
 
-pub fn execute(json_args: &Value) -> Result<String> {
-    let args: EditFileArgs = parse_args(json_args, "edit_file")?;
-    let (target_path, _, updated, hunk_count) = apply_edits_from_value(json_args)?;
-    atomic_write_file(&target_path, updated).context("Error writing file")?;
+impl BlockingTool for Tool {
+    const NAME: &'static str = "edit_file";
+    const DESCRIPTION: &'static str = "Edit a file by applying one or more disjoint, exact, unique search/replace hunks atomically.";
+    type Args = EditFileArgs;
 
-    let path = args.file_path.trim();
-    if hunk_count == 1 {
-        Ok(format!("Successfully edited {path}"))
-    } else {
-        Ok(format!("Successfully applied {hunk_count} edits to {path}"))
+    fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let (target_path, _, updated, hunk_count) = preview_edits(&args, ctx)?;
+        atomic_write_file(&target_path, updated).context("Error writing file")?;
+
+        let path = args.file_path.trim();
+        if hunk_count == 1 {
+            Ok(format!("Successfully edited {path}"))
+        } else {
+            Ok(format!("Successfully applied {hunk_count} edits to {path}"))
+        }
     }
 }
 

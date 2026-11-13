@@ -1,10 +1,11 @@
-use crate::tools::{auto_schema, parse_args, run_workspace_command_with_timeout};
+use super::{AsyncTool, ToolContext};
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 
 const CARGO_TIMEOUT_SECS: u64 = 120;
+
+pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +27,7 @@ enum CargoAction {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct CargoArgs {
+pub struct CargoArgs {
     /// The Cargo action to run.
     action: CargoAction,
     /// Optional workspace package name (`--package <name>`).
@@ -41,13 +42,6 @@ struct CargoArgs {
     /// If true during `test`, compiles test binaries without executing them (`--no-run`).
     #[serde(default)]
     no_run: bool,
-}
-
-pub fn schema() -> Value {
-    auto_schema::<CargoArgs>(
-        "cargo",
-        "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata) within the workspace.",
-    )
 }
 
 fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>> {
@@ -78,77 +72,76 @@ fn push_target_filters(
     Ok(())
 }
 
-pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
-    let args: CargoArgs = parse_args(json_args, "cargo")?;
-    let (base_flags, allow_targets, allow_bin, empty_msg): (&[&str], bool, bool, &str) =
-        match args.action {
-            CargoAction::Check => (
-                &["check", "--locked", "--all-targets", "--color", "never"],
-                true,
-                true,
-                "cargo check passed with no warnings or errors.",
-            ),
-            CargoAction::Clippy => (
-                &["clippy", "--locked", "--all-targets", "--color", "never"],
-                true,
-                true,
-                "cargo clippy passed with no warnings or errors.",
-            ),
-            CargoAction::Test => (
-                &["test", "--locked", "--color", "never"],
-                true,
-                true,
-                "cargo test completed successfully.",
-            ),
-            CargoAction::FmtCheck => (
-                &["fmt", "--all", "--check"],
-                false,
-                false,
-                "All files are properly formatted.",
-            ),
-            CargoAction::Fmt => (
-                &["fmt", "--all"],
-                false,
-                false,
-                "Formatted all workspace packages.",
-            ),
-            CargoAction::Doc => (
-                &["doc", "--locked", "--no-deps", "--color", "never"],
-                true,
-                false,
-                "Documentation built successfully with no warnings or errors.",
-            ),
-            CargoAction::Metadata => (
-                &["metadata", "--locked", "--no-deps", "--format-version", "1"],
-                false,
-                false,
-                "No metadata output.",
-            ),
-        };
+impl AsyncTool for Tool {
+    const NAME: &'static str = "cargo";
+    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata) within the workspace.";
+    type Args = CargoArgs;
 
-    let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
-    if allow_targets {
-        push_target_filters(&mut cmd_args, &args, allow_bin)?;
+    async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let (base_flags, allow_targets, allow_bin, empty_msg): (&[&str], bool, bool, &str) =
+            match args.action {
+                CargoAction::Check => (
+                    &["check", "--locked", "--all-targets", "--color", "never"],
+                    true,
+                    true,
+                    "cargo check passed with no warnings or errors.",
+                ),
+                CargoAction::Clippy => (
+                    &["clippy", "--locked", "--all-targets", "--color", "never"],
+                    true,
+                    true,
+                    "cargo clippy passed with no warnings or errors.",
+                ),
+                CargoAction::Test => (
+                    &["test", "--locked", "--color", "never"],
+                    true,
+                    true,
+                    "cargo test completed successfully.",
+                ),
+                CargoAction::FmtCheck => (
+                    &["fmt", "--all", "--check"],
+                    false,
+                    false,
+                    "All files are properly formatted.",
+                ),
+                CargoAction::Fmt => (
+                    &["fmt", "--all"],
+                    false,
+                    false,
+                    "Formatted all workspace packages.",
+                ),
+                CargoAction::Doc => (
+                    &["doc", "--locked", "--no-deps", "--color", "never"],
+                    true,
+                    false,
+                    "Documentation built successfully with no warnings or errors.",
+                ),
+                CargoAction::Metadata => (
+                    &["metadata", "--locked", "--no-deps", "--format-version", "1"],
+                    false,
+                    false,
+                    "No metadata output.",
+                ),
+            };
+
+        let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
+        if allow_targets {
+            push_target_filters(&mut cmd_args, &args, allow_bin)?;
+        }
+
+        if matches!(args.action, CargoAction::Test) {
+            if args.no_run {
+                cmd_args.push("--no-run".into());
+            }
+            if let Some(filter) = validate_identifier(&args.test_filter, "test_filter")? {
+                cmd_args.push(filter.into());
+            }
+            if !args.no_run {
+                cmd_args.extend(["--".into(), "--nocapture".into()]);
+            }
+        }
+
+        ctx.run_command_with_timeout("cargo", &cmd_args, empty_msg, CARGO_TIMEOUT_SECS)
+            .await
     }
-
-    if matches!(args.action, CargoAction::Test) {
-        if args.no_run {
-            cmd_args.push("--no-run".into());
-        }
-        if let Some(filter) = validate_identifier(&args.test_filter, "test_filter")? {
-            cmd_args.push(filter.into());
-        }
-        if !args.no_run {
-            cmd_args.extend(["--".into(), "--nocapture".into()]);
-        }
-    }
-
-    run_workspace_command_with_timeout(
-        "cargo",
-        &cmd_args,
-        empty_msg,
-        max_output_size,
-        CARGO_TIMEOUT_SECS,
-    )
-    .await
 }

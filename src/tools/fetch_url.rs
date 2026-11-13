@@ -1,4 +1,4 @@
-use crate::tools::{auto_schema, parse_args};
+use super::{AsyncTool, ToolContext};
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::{Client, Url, redirect::Policy};
@@ -13,20 +13,15 @@ use std::{
 const FETCH_TIMEOUT_SECS: u64 = 20;
 const MAX_REDIRECTS: usize = 5;
 
+pub struct Tool;
+
 #[derive(Deserialize, JsonSchema)]
-struct FetchUrlArgs {
+pub struct FetchUrlArgs {
     /// The HTTP or HTTPS URL to fetch (must resolve to a public IP address).
     url: String,
     /// If true, returns raw HTML source instead of stripping HTML tags and scripts into readable text.
     #[serde(default)]
     raw: bool,
-}
-
-pub fn schema() -> Value {
-    auto_schema::<FetchUrlArgs>(
-        "fetch_url",
-        "Fetches content from a public HTTP/HTTPS URL. Automatically converts HTML pages into readable text and serializes JSON as compact output unless `raw: true` is set.",
-    )
 }
 
 fn is_forbidden_ipv4(ip: Ipv4Addr) -> bool {
@@ -267,112 +262,118 @@ fn html_to_text(raw_html: &str) -> String {
     lines_out.join("\n").trim().to_string()
 }
 
-pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
-    let args: FetchUrlArgs = parse_args(json_args, "fetch_url")?;
-    let mut target_url = Url::parse(args.url.trim())
-        .with_context(|| format!("Invalid URL: '{}'", args.url.trim()))?;
+impl AsyncTool for Tool {
+    const NAME: &'static str = "fetch_url";
+    const DESCRIPTION: &'static str = "Fetches content from a public HTTP/HTTPS URL. Automatically converts HTML pages into readable text and serializes JSON as compact output unless `raw: true` is set.";
+    type Args = FetchUrlArgs;
 
-    let mut resp = None;
-    for hop in 0..=MAX_REDIRECTS {
-        let addrs = validate_public_url(&target_url).await?;
-        let client = build_pinned_client(&target_url, &addrs)?;
+    async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let max_output_size = ctx.max_output_size;
+        let mut target_url = Url::parse(args.url.trim())
+            .with_context(|| format!("Invalid URL: '{}'", args.url.trim()))?;
 
-        let r = client
-            .get(target_url.clone())
-            .header(
-                "Accept",
-                "text/markdown, text/plain, application/json, text/html;q=0.9, */*;q=0.5",
-            )
-            .send()
-            .await
-            .with_context(|| format!("HTTP request failed for '{target_url}'"))?;
+        let mut resp = None;
+        for hop in 0..=MAX_REDIRECTS {
+            let addrs = validate_public_url(&target_url).await?;
+            let client = build_pinned_client(&target_url, &addrs)?;
 
-        if r.status().is_redirection() {
-            if hop == MAX_REDIRECTS {
-                bail!("Exceeded maximum redirect limit ({MAX_REDIRECTS})");
+            let r = client
+                .get(target_url.clone())
+                .header(
+                    "Accept",
+                    "text/markdown, text/plain, application/json, text/html;q=0.9, */*;q=0.5",
+                )
+                .send()
+                .await
+                .with_context(|| format!("HTTP request failed for '{target_url}'"))?;
+
+            if r.status().is_redirection() {
+                if hop == MAX_REDIRECTS {
+                    bail!("Exceeded maximum redirect limit ({MAX_REDIRECTS})");
+                }
+                let loc = r
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .with_context(|| {
+                        format!(
+                            "Redirect response (HTTP {}) missing Location header",
+                            r.status()
+                        )
+                    })?
+                    .to_str()
+                    .context("Invalid non-ASCII Location redirect header")?;
+                target_url = target_url
+                    .join(loc)
+                    .with_context(|| format!("Failed to resolve redirect URL '{loc}'"))?;
+                continue;
             }
-            let loc = r
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .with_context(|| {
-                    format!(
-                        "Redirect response (HTTP {}) missing Location header",
-                        r.status()
-                    )
-                })?
-                .to_str()
-                .context("Invalid non-ASCII Location redirect header")?;
-            target_url = target_url
-                .join(loc)
-                .with_context(|| format!("Failed to resolve redirect URL '{loc}'"))?;
-            continue;
-        }
 
-        resp = Some(r);
-        break;
-    }
-
-    let resp = resp.context("Failed to obtain HTTP response")?;
-    let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_ascii_lowercase();
-
-    if ["image/", "audio/", "video/"]
-        .iter()
-        .any(|p| content_type.starts_with(p))
-        || matches!(
-            content_type.as_str(),
-            "application/octet-stream" | "application/pdf" | "application/zip"
-        )
-    {
-        bail!("Refusing to fetch binary content-type '{content_type}' from {target_url}");
-    }
-
-    let raw_byte_cap = if !args.raw && content_type.contains("html") {
-        max_output_size.saturating_mul(4).max(262_144)
-    } else {
-        max_output_size.saturating_add(1)
-    };
-
-    let mut body_bytes = Vec::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.context("Error reading HTTP response stream")?;
-        let remaining = raw_byte_cap.saturating_sub(body_bytes.len());
-        if remaining == 0 {
+            resp = Some(r);
             break;
         }
-        let take = chunk.len().min(remaining);
-        body_bytes.extend_from_slice(&chunk[..take]);
-        if take < chunk.len() {
-            break;
+
+        let resp = resp.context("Failed to obtain HTTP response")?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_ascii_lowercase();
+
+        if ["image/", "audio/", "video/"]
+            .iter()
+            .any(|p| content_type.starts_with(p))
+            || matches!(
+                content_type.as_str(),
+                "application/octet-stream" | "application/pdf" | "application/zip"
+            )
+        {
+            bail!("Refusing to fetch binary content-type '{content_type}' from {target_url}");
         }
-    }
 
-    let raw_text = String::from_utf8_lossy(&body_bytes).into_owned();
-    let formatted_body = if !args.raw && content_type.contains("html") {
-        html_to_text(&raw_text)
-    } else if !args.raw && content_type.contains("json") {
-        serde_json::from_str::<Value>(&raw_text)
-            .and_then(|v| serde_json::to_string(&v))
-            .unwrap_or(raw_text)
-    } else {
-        raw_text
-    };
+        let raw_byte_cap = if !args.raw && content_type.contains("html") {
+            max_output_size.saturating_mul(4).max(262_144)
+        } else {
+            max_output_size.saturating_add(1)
+        };
 
-    if !status.is_success() {
-        bail!(
-            "HTTP {status} from {target_url}:\n{}",
+        let mut body_bytes = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res.context("Error reading HTTP response stream")?;
+            let remaining = raw_byte_cap.saturating_sub(body_bytes.len());
+            if remaining == 0 {
+                break;
+            }
+            let take = chunk.len().min(remaining);
+            body_bytes.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                break;
+            }
+        }
+
+        let raw_text = String::from_utf8_lossy(&body_bytes).into_owned();
+        let formatted_body = if !args.raw && content_type.contains("html") {
+            html_to_text(&raw_text)
+        } else if !args.raw && content_type.contains("json") {
+            serde_json::from_str::<Value>(&raw_text)
+                .and_then(|v| serde_json::to_string(&v))
+                .unwrap_or(raw_text)
+        } else {
+            raw_text
+        };
+
+        if !status.is_success() {
+            bail!(
+                "HTTP {status} from {target_url}:\n{}",
+                formatted_body.trim()
+            );
+        }
+
+        Ok(format!(
+            "URL: {target_url}\nStatus: {status}\nContent-Type: {content_type}\n\n{}",
             formatted_body.trim()
-        );
+        ))
     }
-
-    Ok(format!(
-        "URL: {target_url}\nStatus: {status}\nContent-Type: {content_type}\n\n{}",
-        formatted_body.trim()
-    ))
 }

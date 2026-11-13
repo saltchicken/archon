@@ -1,31 +1,31 @@
-use crate::tools::{
-    atomic_write_file, auto_schema, ensure_within_workspace, parse_args, resolve_new_path,
-};
+use super::{BlockingTool, ToolContext, atomic_write_file};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 use std::fs;
 
+pub struct Tool;
+
 #[derive(Deserialize, JsonSchema)]
-struct CreateFileArgs {
+pub struct CreateFileArgs {
     file_path: String,
     content: String,
 }
 
-pub fn schema() -> Value {
-    auto_schema::<CreateFileArgs>("create_file", "Create a new file in the workspace.")
-}
+impl BlockingTool for Tool {
+    const NAME: &'static str = "create_file";
+    const DESCRIPTION: &'static str = "Create a new file in the workspace.";
+    type Args = CreateFileArgs;
 
-pub fn execute(json_args: &Value) -> Result<String> {
-    let args: CreateFileArgs = parse_args(json_args, "create_file")?;
-    let (cwd, target_path) = resolve_new_path(&args.file_path)?;
+    fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let target_path = ctx.resolve_new_path(&args.file_path)?;
 
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).context("Error creating parent directories")?;
-        ensure_within_workspace(parent, &cwd, "created path")?;
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).context("Error creating parent directories")?;
+            ctx.ensure_within_workspace(parent, "created path")?;
+        }
+
+        atomic_write_file(&target_path, &args.content).context("Error writing new file")?;
+        Ok(format!("Successfully created {}", args.file_path.trim()))
     }
-
-    atomic_write_file(&target_path, &args.content).context("Error writing new file")?;
-    Ok(format!("Successfully created {}", args.file_path.trim()))
 }

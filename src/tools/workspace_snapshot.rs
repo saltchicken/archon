@@ -1,24 +1,23 @@
-use crate::{
-    core::config::{WorkspaceSnapshotSettings, expand_tilde},
-    tools::utils::{
-        FileOutcome, auto_schema, build_exclude_globset, build_globset, build_workspace_walker,
-        has_git_dir_component, parse_args, read_text_file_inspected, resolve_scan_roots,
-    },
+use super::{
+    BlockingTool, FileOutcome, ToolContext, build_globset, has_git_dir_component,
+    read_text_file_inspected,
 };
+use crate::core::config::expand_tilde;
 use anyhow::Result;
 use globset::GlobSet;
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 use std::{
     collections::HashSet,
     fmt::Write as _,
     path::{Path, PathBuf},
 };
 
+pub struct Tool;
+
 #[derive(Deserialize, JsonSchema)]
-struct WorkspaceSnapshotArgs {
+pub struct WorkspaceSnapshotArgs {
     /// Optional relative subdirectory or file path within the workspace (defaults to workspace root).
     #[serde(default)]
     target_path: String,
@@ -31,13 +30,6 @@ struct WorkspaceSnapshotArgs {
     /// Optional additional glob patterns to exclude for this call.
     #[serde(default)]
     exclude: Vec<String>,
-}
-
-pub fn schema() -> Value {
-    auto_schema::<WorkspaceSnapshotArgs>(
-        "workspace_snapshot",
-        "Generates a full workspace directory tree and dumps complete file contents (including configs like Cargo.toml and non-code files). Use `tree_only: true` to inspect project structure, or scope with `target_path` / `include` for small modules. For navigating medium-to-large codebases without exhausting context, prefer `repo_map`.",
-    )
 }
 
 struct FileEntry {
@@ -130,210 +122,211 @@ fn validate_extra_file(
     ))
 }
 
-pub fn execute(
-    json_args: &Value,
-    settings: &WorkspaceSnapshotSettings,
-    max_output_size: usize,
-) -> Result<String> {
-    let args: WorkspaceSnapshotArgs = parse_args(json_args, "workspace_snapshot")?;
-    let (base_root, scan_root) = resolve_scan_roots(
-        settings.git_root,
-        &args.target_path,
-        "target_path escapes workspace root",
-    )?;
+impl BlockingTool for Tool {
+    const NAME: &'static str = "workspace_snapshot";
+    const DESCRIPTION: &'static str = "Generates a full workspace directory tree and dumps complete file contents (including configs like Cargo.toml and non-code files). Use `tree_only: true` to inspect project structure, or scope with `target_path` / `include` for small modules. For navigating medium-to-large codebases without exhausting context, prefer `repo_map`.";
+    type Args = WorkspaceSnapshotArgs;
 
-    let workspace_name = base_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("workspace");
-    let include_patterns = if !args.include.is_empty() {
-        args.include
-    } else if !settings.include.is_empty() {
-        settings.include.clone()
-    } else {
-        vec!["**/*".into()]
-    };
+    fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let settings = &ctx.snapshot;
+        let max_output_size = ctx.max_output_size;
+        let (base_root, scan_root) =
+            ctx.resolve_scan_roots(&args.target_path, "target_path escapes workspace root")?;
 
-    let include_set = build_globset(&include_patterns, false)?;
-    let exclude_set = build_exclude_globset(&settings.exclude, &args.exclude, false)?;
-    let tree_only_set = build_globset(&settings.include_in_tree, false)?;
-
-    let mut entries = Vec::new();
-    for entry in build_workspace_walker(&scan_root, settings.git_root) {
-        if entries.len() >= settings.max_files {
-            break;
-        }
-        let path = entry.path();
-        if path == base_root || has_git_dir_component(path) {
-            continue;
-        }
-        let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
-        else {
-            continue;
-        };
-
-        let matches_tree = tree_only_set.is_match(&relative);
-        if exclude_set.is_match(&relative) && !matches_tree {
-            continue;
-        }
-
-        let Ok(metadata) = path.metadata() else {
-            continue;
-        };
-        let is_dir = metadata.is_dir();
-        let matches_include = include_set.is_match(&relative);
-        if !is_dir && !matches_include && !matches_tree {
-            continue;
-        }
-
-        entries.push(FileEntry {
-            path: path.to_path_buf(),
-            display_path: relative.to_string_lossy().into_owned(),
-            depth: relative.components().count(),
-            is_dir,
-            include_content: !is_dir && matches_include && !matches_tree,
-        });
-    }
-
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let mut tree_out = String::new();
-    let mut files: Vec<(String, FileOutcome)> = Vec::new();
-
-    for entry in &entries {
-        let indent = "    ".repeat(entry.depth.saturating_sub(1));
-        let name = entry
-            .path
+        let workspace_name = base_root
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(&entry.display_path);
-        let marker = if entry.is_dir {
-            "/"
-        } else if !entry.include_content {
-            " (content excluded)"
+            .unwrap_or("workspace");
+        let include_patterns = if !args.include.is_empty() {
+            args.include
+        } else if !settings.include.is_empty() {
+            settings.include.clone()
         } else {
-            ""
+            vec!["**/*".into()]
         };
-        let _ = writeln!(tree_out, "{indent}{name}{marker}");
-    }
 
-    let mut used_bytes = tree_out.len() + 128;
+        let include_set = build_globset(&include_patterns, false)?;
+        let exclude_set = ctx.build_exclude_globset(&args.exclude, false)?;
+        let tree_only_set = build_globset(&settings.include_in_tree, false)?;
 
-    if !args.tree_only {
-        for entry in entries.iter().filter(|e| e.include_content) {
-            let outcome = read_to_outcome(
-                &entry.path,
-                entry.display_path.len(),
-                settings.max_size,
-                &mut used_bytes,
-                max_output_size,
-            );
-            files.push((entry.display_path.clone(), outcome));
-        }
-    }
+        let mut entries = Vec::new();
+        for entry in ctx.build_walker(&scan_root) {
+            if entries.len() >= settings.max_files {
+                break;
+            }
+            let path = entry.path();
+            if path == base_root || has_git_dir_component(path) {
+                continue;
+            }
+            let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
+            else {
+                continue;
+            };
 
-    if args.target_path.trim().is_empty() {
-        let trusted_global_files: HashSet<PathBuf> = settings
-            .global_files
-            .iter()
-            .flat_map(|f| {
-                let exp = expand_tilde(f);
-                let canon = dunce::canonicalize(&exp).unwrap_or_else(|_| exp.clone());
-                [exp, canon]
-            })
-            .collect();
-        let cfg_dir = archon_config_dir();
-        let mut seen = HashSet::new();
-
-        for raw_file in &settings.file {
-            let expanded = expand_tilde(raw_file);
-            if !seen.insert(expanded.clone()) {
+            let matches_tree = tree_only_set.is_match(&relative);
+            if exclude_set.is_match(&relative) && !matches_tree {
                 continue;
             }
 
-            let mut record_extra = |display: String, marker: &str, outcome: Option<FileOutcome>| {
-                let _ = writeln!(tree_out, "{display}{marker}");
-                if !args.tree_only
-                    && let Some(o) = outcome
-                {
-                    files.push((display, o));
-                }
+            let Ok(metadata) = path.metadata() else {
+                continue;
             };
+            let is_dir = metadata.is_dir();
+            let matches_include = include_set.is_match(&relative);
+            if !is_dir && !matches_include && !matches_tree {
+                continue;
+            }
 
-            match validate_extra_file(
-                raw_file,
-                &expanded,
-                &base_root,
-                &exclude_set,
-                &trusted_global_files,
-                cfg_dir.as_deref(),
-            ) {
-                Ok(valid_path) => {
-                    let display_path = shrink_tilde(&valid_path);
-                    if !valid_path.exists() {
+            entries.push(FileEntry {
+                path: path.to_path_buf(),
+                display_path: relative.to_string_lossy().into_owned(),
+                depth: relative.components().count(),
+                is_dir,
+                include_content: !is_dir && matches_include && !matches_tree,
+            });
+        }
+
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let mut tree_out = String::new();
+        let mut files: Vec<(String, FileOutcome)> = Vec::new();
+
+        for entry in &entries {
+            let indent = "    ".repeat(entry.depth.saturating_sub(1));
+            let name = entry
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&entry.display_path);
+            let marker = if entry.is_dir {
+                "/"
+            } else if !entry.include_content {
+                " (content excluded)"
+            } else {
+                ""
+            };
+            let _ = writeln!(tree_out, "{indent}{name}{marker}");
+        }
+
+        let mut used_bytes = tree_out.len() + 128;
+
+        if !args.tree_only {
+            for entry in entries.iter().filter(|e| e.include_content) {
+                let outcome = read_to_outcome(
+                    &entry.path,
+                    entry.display_path.len(),
+                    settings.max_size,
+                    &mut used_bytes,
+                    max_output_size,
+                );
+                files.push((entry.display_path.clone(), outcome));
+            }
+        }
+
+        if args.target_path.trim().is_empty() {
+            let trusted_global_files: HashSet<PathBuf> = settings
+                .global_files
+                .iter()
+                .flat_map(|f| {
+                    let exp = expand_tilde(f);
+                    let canon = dunce::canonicalize(&exp).unwrap_or_else(|_| exp.clone());
+                    [exp, canon]
+                })
+                .collect();
+            let cfg_dir = archon_config_dir();
+            let mut seen = HashSet::new();
+
+            for raw_file in &settings.file {
+                let expanded = expand_tilde(raw_file);
+                if !seen.insert(expanded.clone()) {
+                    continue;
+                }
+
+                let mut record_extra =
+                    |display: String, marker: &str, outcome: Option<FileOutcome>| {
+                        let _ = writeln!(tree_out, "{display}{marker}");
+                        if !args.tree_only
+                            && let Some(o) = outcome
+                        {
+                            files.push((display, o));
+                        }
+                    };
+
+                match validate_extra_file(
+                    raw_file,
+                    &expanded,
+                    &base_root,
+                    &exclude_set,
+                    &trusted_global_files,
+                    cfg_dir.as_deref(),
+                ) {
+                    Ok(valid_path) => {
+                        let display_path = shrink_tilde(&valid_path);
+                        if !valid_path.exists() {
+                            record_extra(
+                                display_path,
+                                " (not found)",
+                                Some(FileOutcome::Error("File does not exist.".into())),
+                            );
+                        } else if valid_path.is_dir() {
+                            record_extra(display_path, "/", None);
+                        } else {
+                            let outcome = (!args.tree_only).then(|| {
+                                read_to_outcome(
+                                    &valid_path,
+                                    display_path.len(),
+                                    settings.max_size,
+                                    &mut used_bytes,
+                                    max_output_size,
+                                )
+                            });
+                            record_extra(display_path, "", outcome);
+                        }
+                    }
+                    Err(sec_err) => {
                         record_extra(
-                            display_path,
-                            " (not found)",
-                            Some(FileOutcome::Error("File does not exist.".into())),
+                            shrink_tilde(&expanded),
+                            " (blocked)",
+                            Some(FileOutcome::Error(sec_err)),
                         );
-                    } else if valid_path.is_dir() {
-                        record_extra(display_path, "/", None);
-                    } else {
-                        let outcome = (!args.tree_only).then(|| {
-                            read_to_outcome(
-                                &valid_path,
-                                display_path.len(),
-                                settings.max_size,
-                                &mut used_bytes,
-                                max_output_size,
-                            )
-                        });
-                        record_extra(display_path, "", outcome);
                     }
-                }
-                Err(sec_err) => {
-                    record_extra(
-                        shrink_tilde(&expanded),
-                        " (blocked)",
-                        Some(FileOutcome::Error(sec_err)),
-                    );
                 }
             }
         }
-    }
 
-    let mut out = format!(
-        "# Workspace: {workspace_name}\n\n## Directory Structure\n\n```text\n{}\n```\n\n",
-        tree_out.trim_end()
-    );
+        let mut out = format!(
+            "# Workspace: {workspace_name}\n\n## Directory Structure\n\n```text\n{}\n```\n\n",
+            tree_out.trim_end()
+        );
 
-    if !files.is_empty() {
-        out.push_str("## Files\n\n");
-        for (path, outcome) in &files {
-            let _ = writeln!(out, "### File: `{path}`\n");
-            match outcome {
-                FileOutcome::Error(err) => {
-                    let _ = writeln!(out, "**Error:** {err}\n");
-                }
-                FileOutcome::Skipped(skip) => {
-                    let _ = writeln!(out, "**Skipped:** {skip}\n");
-                }
-                FileOutcome::Content(content) => {
-                    let lang = Path::new(path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("text");
-                    let fence = get_fence(content);
-                    let _ = writeln!(out, "{fence}{lang}");
-                    out.push_str(content);
-                    if !content.ends_with('\n') {
-                        out.push('\n');
+        if !files.is_empty() {
+            out.push_str("## Files\n\n");
+            for (path, outcome) in &files {
+                let _ = writeln!(out, "### File: `{path}`\n");
+                match outcome {
+                    FileOutcome::Error(err) => {
+                        let _ = writeln!(out, "**Error:** {err}\n");
                     }
-                    let _ = writeln!(out, "{fence}\n");
+                    FileOutcome::Skipped(skip) => {
+                        let _ = writeln!(out, "**Skipped:** {skip}\n");
+                    }
+                    FileOutcome::Content(content) => {
+                        let lang = Path::new(path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("text");
+                        let fence = get_fence(content);
+                        let _ = writeln!(out, "{fence}{lang}");
+                        out.push_str(content);
+                        if !content.ends_with('\n') {
+                            out.push('\n');
+                        }
+                        let _ = writeln!(out, "{fence}\n");
+                    }
                 }
             }
         }
-    }
 
-    Ok(out.trim_end().to_string())
+        Ok(out.trim_end().to_string())
+    }
 }

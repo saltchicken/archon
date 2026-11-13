@@ -1,13 +1,8 @@
-use crate::{
-    core::{config::WorkspaceSnapshotSettings, session::truncate_str},
-    tools::utils::{
-        auto_schema, parse_args, read_utf8_capped, resolve_scan_roots, walk_workspace_files,
-    },
-};
+use super::{BlockingTool, ToolContext, read_utf8_capped};
+use crate::core::{config::WorkspaceSnapshotSettings, session::truncate_str};
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
@@ -17,6 +12,8 @@ use tree_sitter::{Language, Node, Parser, Tree};
 
 const PAGERANK_ITERATIONS: usize = 25;
 const PAGERANK_DAMPING: f64 = 0.85;
+
+pub struct Tool;
 
 #[derive(Default, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -31,7 +28,7 @@ pub enum RepoMapAction {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct RepoMapArgs {
+pub struct RepoMapArgs {
     /// The AST operation to perform: `map` (default), `definition`, or `references`.
     #[serde(default)]
     action: RepoMapAction,
@@ -63,13 +60,6 @@ struct RepoMapArgs {
 
 fn default_true() -> bool {
     true
-}
-
-pub fn schema() -> Value {
-    auto_schema::<RepoMapArgs>(
-        "repo_map",
-        "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, and Go. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope).",
-    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -841,23 +831,12 @@ fn walk_references(
 
 fn collect_candidate_files(
     args: &RepoMapArgs,
-    settings: &WorkspaceSnapshotSettings,
+    ctx: &ToolContext,
 ) -> Result<Vec<(PathBuf, String, SupportedLang)>> {
-    let (base_root, scan_root) = resolve_scan_roots(
-        settings.git_root,
-        &args.target_path,
-        "target_path escapes workspace root",
-    )?;
+    let (base_root, scan_root) =
+        ctx.resolve_scan_roots(&args.target_path, "target_path escapes workspace root")?;
 
-    let walked = walk_workspace_files(
-        &base_root,
-        &scan_root,
-        settings.git_root,
-        &args.include,
-        &settings.exclude,
-        &args.exclude,
-        settings.max_files,
-    )?;
+    let walked = ctx.walk_workspace_files(&base_root, &scan_root, &args.include, &args.exclude)?;
 
     Ok(walked
         .into_iter()
@@ -1182,27 +1161,30 @@ fn execute_references(
     Ok(out)
 }
 
-pub fn execute(
-    json_args: &Value,
-    settings: &WorkspaceSnapshotSettings,
-    max_output_size: usize,
-) -> Result<String> {
-    let args: RepoMapArgs = parse_args(json_args, "repo_map")?;
-    let candidate_files = collect_candidate_files(&args, settings)?;
-    if candidate_files.is_empty() {
-        return Ok(
-            "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
-                .into(),
-        );
-    }
+impl BlockingTool for Tool {
+    const NAME: &'static str = "repo_map";
+    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, and Go. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope).";
+    type Args = RepoMapArgs;
 
-    match args.action {
-        RepoMapAction::Map => execute_map(args, candidate_files, settings, max_output_size),
-        RepoMapAction::Definition => {
-            execute_definition(&args, candidate_files, settings, max_output_size)
+    fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
+        let candidate_files = collect_candidate_files(&args, ctx)?;
+        if candidate_files.is_empty() {
+            return Ok(
+                "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
+                    .into(),
+            );
         }
-        RepoMapAction::References => {
-            execute_references(&args, candidate_files, settings, max_output_size)
+
+        match args.action {
+            RepoMapAction::Map => {
+                execute_map(args, candidate_files, &ctx.snapshot, ctx.max_output_size)
+            }
+            RepoMapAction::Definition => {
+                execute_definition(&args, candidate_files, &ctx.snapshot, ctx.max_output_size)
+            }
+            RepoMapAction::References => {
+                execute_references(&args, candidate_files, &ctx.snapshot, ctx.max_output_size)
+            }
         }
     }
 }
