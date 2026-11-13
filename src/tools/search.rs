@@ -27,9 +27,6 @@ struct SearchArgs {
     /// If true, treats `pattern` as a literal string instead of a regular expression.
     #[serde(default)]
     fixed_strings: bool,
-    /// If true, restricts matches to symbol definitions (`struct`, `enum`, `trait`, `fn`, `type`, `const`, `mod`, `class`, `interface`, `def`, `func`) whose name matches `pattern`.
-    #[serde(default)]
-    definitions_only: bool,
     /// If true, returns only the list of matching file paths with their match counts (sorted by match count descending) instead of individual lines, avoiding early line-limit truncation on broad queries.
     #[serde(default)]
     files_with_matches: bool,
@@ -47,13 +44,7 @@ struct SearchArgs {
 pub fn schema() -> Value {
     auto_schema::<SearchArgs>(
         "search",
-        "Searches file contents in the workspace using regular expressions or literal strings. Supports `definitions_only` to jump to symbol declarations and `files_with_matches` to survey all matching files and counts across large codebases. Respects .gitignore and outputs 1-based line numbers.",
-    )
-}
-
-fn build_definition_regex(inner_pattern: &str) -> String {
-    format!(
-        r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:export\s+(?:default\s+)?)?(?:async\s+|const\s+|unsafe\s+|extern(?:\s+\x22[^\x22]*\x22)?\s+|abstract\s+|static\s+)*(?:struct|enum|trait|type|fn|mod|const|static|macro_rules!|class|interface|function|def|func(?:\s*\([^)]*\))?|let|var)\s+(?:mut\s+)?(?:{inner_pattern})\b"
+        "Searches file contents in the workspace using regular expressions or literal strings. Use `files_with_matches` to survey all matching files and counts across large codebases. For AST symbol definitions or call sites, prefer `repo_map` (`action: \"definition\"` or `\"references\"`). Respects .gitignore and outputs 1-based line numbers.",
     )
 }
 
@@ -77,15 +68,10 @@ pub fn execute(
     let case_sensitive = args
         .case_sensitive
         .unwrap_or_else(|| args.pattern.chars().any(char::is_uppercase));
-    let base_pattern = if args.fixed_strings {
+    let effective_pattern = if args.fixed_strings {
         regex::escape(&args.pattern)
     } else {
         args.pattern.clone()
-    };
-    let effective_pattern = if args.definitions_only {
-        build_definition_regex(&base_pattern)
-    } else {
-        base_pattern
     };
 
     let matcher = RegexBuilder::new(&effective_pattern)
@@ -157,12 +143,6 @@ pub fn execute(
         candidate_files.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
-    let mode_note = if args.definitions_only {
-        " (definitions_only: true)"
-    } else {
-        ""
-    };
-
     if args.files_with_matches {
         let mut file_hits: Vec<(String, usize, usize)> = Vec::new();
         let mut total_matches = 0usize;
@@ -188,10 +168,7 @@ pub fn execute(
         }
 
         if file_hits.is_empty() {
-            return Ok(format!(
-                "No matches found for pattern '{}'{mode_note}.",
-                args.pattern
-            ));
+            return Ok(format!("No matches found for pattern '{}'.", args.pattern));
         }
 
         file_hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -309,10 +286,7 @@ pub fn execute(
     }
 
     if total_matches == 0 {
-        return Ok(format!(
-            "No matches found for pattern '{}'{mode_note}.",
-            args.pattern
-        ));
+        return Ok(format!("No matches found for pattern '{}'.", args.pattern));
     }
 
     let suffix = if hit_limit {

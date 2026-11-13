@@ -53,7 +53,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" => args
+        "git" | "cargo" | "fs" | "repo_map" => args
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("")
