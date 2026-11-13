@@ -201,8 +201,8 @@ fn wrap_single_line(line: &str, options: &textwrap::Options<'_>) -> Vec<String> 
     }
 }
 
-fn flush_table_buffer<'a>(
-    table_buf: &mut Vec<&'a str>,
+fn flush_table_buffer(
+    table_buf: &mut Vec<&str>,
     out: &mut Vec<String>,
     options: &textwrap::Options<'_>,
 ) {
@@ -351,67 +351,6 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
     out
 }
 
-fn render_message_block(
-    idx: usize,
-    header_label: &str,
-    color: Color,
-    truncated: bool,
-    styled_content: &[Line<'static>],
-    max_folded_lines: usize,
-    state: &mut MsgUiState,
-    lines: &mut Vec<Line<'static>>,
-    ranges: &mut Vec<(usize, usize, usize, bool)>,
-) {
-    let start_visual = lines.len();
-    let max_lines = if state.unfolded {
-        usize::MAX
-    } else {
-        max_folded_lines
-    };
-    let mut header_spans = vec![Span::styled(
-        format!("━━ {header_label} "),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )];
-    if truncated {
-        header_spans.push(Span::styled(
-            "⚠ TRUNCATED",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
-    lines.push(Line::from(header_spans));
-
-    let total_content = styled_content.len();
-    let is_truncated = total_content > max_lines;
-
-    if is_truncated {
-        state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
-        let start = state.scroll;
-        let end = (start + max_lines).min(total_content);
-
-        if start > 0 {
-            lines.push(Line::from(Span::styled(
-                format!("    ... ({start} lines above) ..."),
-                Style::default().fg(Color::Blue),
-            )));
-        }
-        lines.extend_from_slice(&styled_content[start..end]);
-        if end < total_content {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "    ... ({} lines below - Click to unfold) ...",
-                    total_content - end
-                ),
-                Style::default().fg(Color::Blue),
-            )));
-        }
-    } else {
-        lines.extend_from_slice(styled_content);
-    }
-
-    lines.push(Line::from(""));
-    ranges.push((idx, start_visual, lines.len(), is_truncated));
-}
-
 fn is_message_header_line(line: &Line<'_>) -> bool {
     line.spans
         .first()
@@ -419,6 +358,67 @@ fn is_message_header_line(line: &Line<'_>) -> bool {
 }
 
 impl TuiApp {
+    fn render_message_block(
+        &mut self,
+        idx: usize,
+        header_label: &str,
+        color: Color,
+        truncated: bool,
+        styled_content: &[Line<'static>],
+        lines: &mut Vec<Line<'static>>,
+    ) {
+        let start_visual = lines.len();
+        let state = &mut self.msg_states[idx];
+        let max_lines = if state.unfolded {
+            usize::MAX
+        } else {
+            self.config.app.max_msg_lines
+        };
+        let mut header_spans = vec![Span::styled(
+            format!("━━ {header_label} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
+        if truncated {
+            header_spans.push(Span::styled(
+                "⚠ TRUNCATED",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(header_spans));
+
+        let total_content = styled_content.len();
+        let is_truncated = total_content > max_lines;
+
+        if is_truncated {
+            state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
+            let start = state.scroll;
+            let end = (start + max_lines).min(total_content);
+
+            if start > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("    ... ({start} lines above) ..."),
+                    Style::default().fg(Color::Blue),
+                )));
+            }
+            lines.extend_from_slice(&styled_content[start..end]);
+            if end < total_content {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "    ... ({} lines below - Click to unfold) ...",
+                        total_content - end
+                    ),
+                    Style::default().fg(Color::Blue),
+                )));
+            }
+        } else {
+            lines.extend_from_slice(styled_content);
+        }
+
+        lines.push(Line::from(""));
+        self.msg_visual_ranges
+            .push((idx, start_visual, lines.len(), is_truncated));
+    }
+
     pub(super) fn draw(&mut self, f: &mut Frame) {
         let mut root_constraints = vec![Constraint::Min(10), Constraint::Length(1)];
         if self.show_help_bar {
@@ -623,18 +623,12 @@ impl TuiApp {
         }
 
         let mut lines = Vec::new();
-        let max_msg_lines = self.config.app.max_msg_lines;
-
-        for (i, (m, styled_content)) in self
-            .messages
-            .iter()
-            .zip(self.styled_messages.iter())
-            .enumerate()
-        {
-            if m.role == "assistant" && styled_content.is_empty() {
+        for i in 0..self.messages.len() {
+            if self.messages[i].role == "assistant" && self.styled_messages[i].is_empty() {
                 continue;
             }
 
+            let m = &self.messages[i];
             let (header_label, color) = match m.role.as_str() {
                 "user" => {
                     let badge = m
@@ -651,17 +645,16 @@ impl TuiApp {
                 }
                 _ => ("SYS".to_string(), Color::Gray),
             };
+            let truncated = m.truncated;
+            let styled_content = self.styled_messages[i].clone();
 
-            render_message_block(
+            self.render_message_block(
                 i,
                 &header_label,
                 color,
-                m.truncated,
-                styled_content,
-                max_msg_lines,
-                &mut self.msg_states[i],
+                truncated,
+                &styled_content,
                 &mut lines,
-                &mut self.msg_visual_ranges,
             );
         }
 
@@ -679,16 +672,14 @@ impl TuiApp {
                 self.stream_dirty = false;
             }
 
-            render_message_block(
+            let styled_stream = self.styled_stream.clone();
+            self.render_message_block(
                 i,
                 "ARCHON (...)",
                 Color::Yellow,
                 false,
-                &self.styled_stream,
-                max_msg_lines,
-                &mut self.msg_states[i],
+                &styled_stream,
                 &mut lines,
-                &mut self.msg_visual_ranges,
             );
         }
 

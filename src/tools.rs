@@ -10,22 +10,7 @@ pub mod repo_map;
 pub mod search;
 pub mod workspace_snapshot;
 
-pub mod utils {
-    #[path = "paths.rs"]
-    pub mod paths;
-    #[path = "process.rs"]
-    pub mod process;
-    #[path = "schema.rs"]
-    pub mod schema;
-    #[path = "walker.rs"]
-    pub mod walker;
-
-    pub use paths::*;
-    pub use process::*;
-    pub use schema::*;
-    pub use walker::*;
-}
-
+pub mod utils;
 pub use utils::*;
 
 use crate::core::config::Config;

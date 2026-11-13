@@ -59,7 +59,7 @@ pub fn schema() -> Value {
     )
 }
 
-fn validate_git_target<'a>(raw: &'a str, allow_staged: bool) -> Result<Option<&'a str>> {
+fn validate_git_target(raw: &str, allow_staged: bool) -> Result<Option<&str>> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -95,6 +95,11 @@ fn validate_scoped_path(raw: &str, must_exist: bool) -> Result<Option<String>> {
         ensure_path_or_ancestor_within_workspace(&cwd.join(rel), &cwd, trimmed)?;
         Ok(Some(rel.to_string_lossy().into_owned()))
     }
+}
+
+fn require_scoped_path(raw: &str, must_exist: bool) -> Result<String> {
+    validate_scoped_path(raw, must_exist)?
+        .ok_or_else(|| anyhow::anyhow!("'path' is required for this git action (use '.' for all)"))
 }
 
 fn push_optional_path(cmd_args: &mut Vec<String>, raw_path: &str) -> Result<()> {
@@ -143,7 +148,7 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             "No commit output."
         }
         GitAction::Blame => {
-            let path = validate_scoped_path(&args.path, true)?.unwrap();
+            let path = require_scoped_path(&args.path, true)?;
             cmd_args.push("blame".into());
             if let Some(t) = validate_git_target(&args.target, false)? {
                 cmd_args.push(t.into());
@@ -156,16 +161,12 @@ pub async fn execute(json_args: &Value, max_output_size: usize) -> Result<String
             "No branches found."
         }
         GitAction::Add => {
-            let path = validate_scoped_path(&args.path, false)?.ok_or_else(|| {
-                anyhow::anyhow!("'path' is required for git add (use '.' for all)")
-            })?;
+            let path = require_scoped_path(&args.path, false)?;
             cmd_args.extend(["add".into(), "--".into(), path]);
             "Files staged successfully."
         }
         GitAction::Unstage => {
-            let path = validate_scoped_path(&args.path, false)?.ok_or_else(|| {
-                anyhow::anyhow!("'path' is required for git unstage (use '.' for all)")
-            })?;
+            let path = require_scoped_path(&args.path, false)?;
             cmd_args.extend(["restore".into(), "--staged".into(), "--".into(), path]);
             "Files unstaged successfully."
         }

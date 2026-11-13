@@ -137,6 +137,15 @@ fn count_dir_items(dir: &Path) -> (usize, usize, u64) {
     stats
 }
 
+fn resolve_remove_target(raw: &str) -> Result<PathBuf> {
+    let (cwd, target) = resolve_existing_path(raw)?;
+    if target == cwd {
+        bail!("Cannot remove workspace root");
+    }
+    ensure_not_git_metadata(&target, &cwd)?;
+    Ok(target)
+}
+
 pub fn preview_action(json_args: &Value) -> Result<(String, Option<(String, String)>)> {
     let args: FsArgs = parse_args(json_args, "fs")?;
     match args.action {
@@ -161,11 +170,7 @@ pub fn preview_action(json_args: &Value) -> Result<(String, Option<(String, Stri
             ))
         }
         FsAction::Remove => {
-            let (cwd, target) = resolve_existing_path(&args.path)?;
-            if target == cwd {
-                bail!("Cannot remove workspace root");
-            }
-            ensure_not_git_metadata(&target, &cwd)?;
+            let target = resolve_remove_target(&args.path)?;
             let path_str = args.path.trim();
 
             if target.is_dir() {
@@ -322,11 +327,7 @@ pub fn execute(json_args: &Value, max_output_size: usize) -> Result<String> {
             }
         }
         FsAction::Remove => {
-            let (cwd, target) = resolve_existing_path(src_str)?;
-            if target == cwd {
-                bail!("Cannot remove workspace root");
-            }
-            ensure_not_git_metadata(&target, &cwd)?;
+            let target = resolve_remove_target(src_str)?;
 
             if target.is_dir() {
                 if fs::read_dir(&target)?.next().is_some() && !args.recursive {

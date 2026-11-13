@@ -186,52 +186,32 @@ pub fn execute(
         }
         let _ = writeln!(out, "=== {display_path} ===");
 
-        if context_radius == 0 {
-            for &idx in &match_indices {
-                let _ = writeln!(
-                    out,
-                    "{:>4}: {}",
-                    idx + 1,
-                    truncate_long_line(lines[idx], 300)
-                );
-                if out.len() > max_output_size {
-                    hit_limit = true;
-                    break;
-                }
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for &idx in &match_indices {
+            let start = idx.saturating_sub(context_radius);
+            let end = (idx + context_radius).min(lines.len().saturating_sub(1));
+            if let Some(last) = ranges.last_mut().filter(|l| start <= l.1 + 1) {
+                last.1 = last.1.max(end);
+            } else {
+                ranges.push((start, end));
             }
-        } else {
-            let mut ranges: Vec<(usize, usize)> = Vec::new();
-            for &idx in &match_indices {
-                let start = idx.saturating_sub(context_radius);
-                let end = (idx + context_radius).min(lines.len().saturating_sub(1));
-                if let Some(last) = ranges.last_mut().filter(|l| start <= l.1 + 1) {
-                    last.1 = last.1.max(end);
-                } else {
-                    ranges.push((start, end));
-                }
-            }
+        }
 
-            for (r_idx, (start, end)) in ranges.into_iter().enumerate() {
-                if r_idx > 0 {
-                    let _ = writeln!(out, "  --");
-                }
-                for idx in start..=end {
-                    let sep = if match_indices.binary_search(&idx).is_ok() {
-                        ':'
-                    } else {
-                        '-'
-                    };
-                    let _ = writeln!(
-                        out,
-                        "{:>4}{sep} {}",
-                        idx + 1,
-                        truncate_long_line(lines[idx], 300)
-                    );
-                }
-                if out.len() > max_output_size {
-                    hit_limit = true;
-                    break;
-                }
+        for (r_idx, (start, end)) in ranges.into_iter().enumerate() {
+            if context_radius > 0 && r_idx > 0 {
+                let _ = writeln!(out, "  --");
+            }
+            for (idx, &line) in lines.iter().enumerate().take(end + 1).skip(start) {
+                let sep = if match_indices.binary_search(&idx).is_ok() {
+                    ':'
+                } else {
+                    '-'
+                };
+                let _ = writeln!(out, "{:>4}{sep} {}", idx + 1, truncate_long_line(line, 300));
+            }
+            if out.len() > max_output_size {
+                hit_limit = true;
+                break;
             }
         }
     }

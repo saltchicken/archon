@@ -426,55 +426,75 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
     }
 }
 
-fn collect_ast_symbols(
+fn walk_symbol_tree<F>(
     node: Node<'_>,
     source: &str,
     lang: SupportedLang,
+    parent_scope: Option<&str>,
     depth: usize,
-    defs: &mut Vec<SymbolDef>,
-) {
+    visitor: &mut F,
+) where
+    F: FnMut(Node<'_>, &'static str, &str, Option<&str>, usize) -> bool,
+{
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         let kind = child.kind();
         if matches!(kind, "export_statement" | "decorated_definition") {
-            collect_ast_symbols(child, source, lang, depth, defs);
+            walk_symbol_tree(child, source, lang, parent_scope, depth, visitor);
             continue;
         }
 
         if let Some((sym_kind, recurse_into_body)) = classify_symbol_node(child, lang) {
             if let Some(name) = extract_node_name(child, source, lang) {
-                let doc = extract_leading_docs(child, source).or_else(|| {
-                    (lang == SupportedLang::Python)
-                        .then(|| extract_python_docstring(child, source))
-                        .flatten()
-                });
-
-                defs.push(SymbolDef {
-                    name,
-                    kind: sym_kind,
-                    signature: format_node_signature(child, source, lang),
-                    doc,
-                    start_line: child.start_position().row + 1,
-                    end_line: child.end_position().row + 1,
-                    depth,
-                    cross_file_refs: 0,
-                    score: 0.0,
-                });
-
+                if !visitor(child, sym_kind, &name, parent_scope, depth) {
+                    return;
+                }
                 if recurse_into_body && depth < 2 {
-                    let target = child.child_by_field_name("body").unwrap_or(child);
-                    collect_ast_symbols(target, source, lang, depth + 1, defs);
+                    let body = child.child_by_field_name("body").unwrap_or(child);
+                    walk_symbol_tree(body, source, lang, Some(&name), depth + 1, visitor);
                 }
             }
-        } else if depth > 0
-            && matches!(
-                kind,
-                "declaration_list" | "class_body" | "interface_body" | "block"
-            )
-        {
-            collect_ast_symbols(child, source, lang, depth, defs);
+        } else if matches!(
+            kind,
+            "declaration_list" | "class_body" | "interface_body" | "block"
+        ) {
+            walk_symbol_tree(child, source, lang, parent_scope, depth, visitor);
         }
     }
+}
+
+fn collect_ast_symbols(
+    node: Node<'_>,
+    source: &str,
+    lang: SupportedLang,
+    defs: &mut Vec<SymbolDef>,
+) {
+    walk_symbol_tree(
+        node,
+        source,
+        lang,
+        None,
+        0,
+        &mut |child, sym_kind, name, _, depth| {
+            let doc = extract_leading_docs(child, source).or_else(|| {
+                (lang == SupportedLang::Python)
+                    .then(|| extract_python_docstring(child, source))
+                    .flatten()
+            });
+            defs.push(SymbolDef {
+                name: name.to_string(),
+                kind: sym_kind,
+                signature: format_node_signature(child, source, lang),
+                doc,
+                start_line: child.start_position().row + 1,
+                end_line: child.end_position().row + 1,
+                depth,
+                cross_file_refs: 0,
+                score: 0.0,
+            });
+            true
+        },
+    );
 }
 
 fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String, usize>) {
@@ -526,7 +546,7 @@ fn parse_source_file(
     let root = tree.root_node();
 
     let mut defs = Vec::new();
-    collect_ast_symbols(root, &source, lang, 0, &mut defs);
+    collect_ast_symbols(root, &source, lang, &mut defs);
 
     let mut ident_counts = HashMap::new();
     collect_identifiers(root, &source, &mut ident_counts);
@@ -737,117 +757,15 @@ fn matches_symbol_name(
     target_leaf: &str,
 ) -> bool {
     let clean_name = clean_def_symbol_key(def_name);
-    let leaf_matches = clean_name == target_leaf || def_name == target_leaf;
-    if !leaf_matches {
+    if clean_name != target_leaf && def_name != target_leaf {
         return false;
     }
-
-    if let Some(req_parent) = target_parent {
-        let Some(actual_parent) = parent_scope else {
-            return false;
-        };
-        let clean_parent = clean_def_symbol_key(actual_parent);
-        clean_parent.eq_ignore_ascii_case(req_parent)
-            || actual_parent.eq_ignore_ascii_case(req_parent)
-    } else {
-        true
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_definitions(
-    node: Node<'_>,
-    source: &str,
-    lines: &[&str],
-    lang: SupportedLang,
-    display_path: &str,
-    parent_scope: Option<&str>,
-    target_parent: Option<&str>,
-    target_leaf: &str,
-    results: &mut Vec<SymbolMatch>,
-    max_results: usize,
-) {
-    if results.len() >= max_results {
-        return;
-    }
-
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if results.len() >= max_results {
-            break;
-        }
-        let kind = child.kind();
-        if matches!(kind, "export_statement" | "decorated_definition") {
-            walk_definitions(
-                child,
-                source,
-                lines,
-                lang,
-                display_path,
-                parent_scope,
-                target_parent,
-                target_leaf,
-                results,
-                max_results,
-            );
-            continue;
-        }
-
-        if let Some((sym_kind, recurse_into_body)) = classify_symbol_node(child, lang) {
-            if let Some(name) = extract_node_name(child, source, lang) {
-                if matches_symbol_name(&name, parent_scope, target_parent, target_leaf) {
-                    let start_row = expand_start_row_for_docs_and_attrs(child);
-                    let end_row = child.end_position().row;
-                    let qualified_name = match parent_scope {
-                        Some(p) => format!("{p}::{name}"),
-                        None => name.clone(),
-                    };
-
-                    results.push(SymbolMatch {
-                        display_path: display_path.to_string(),
-                        lang,
-                        kind: sym_kind,
-                        qualified_name,
-                        start_line: start_row + 1,
-                        end_line: end_row + 1,
-                        snippet: format_numbered_slice(lines, start_row, end_row),
-                    });
-                }
-
-                if recurse_into_body {
-                    let body = child.child_by_field_name("body").unwrap_or(child);
-                    walk_definitions(
-                        body,
-                        source,
-                        lines,
-                        lang,
-                        display_path,
-                        Some(&name),
-                        target_parent,
-                        target_leaf,
-                        results,
-                        max_results,
-                    );
-                }
-            }
-        } else if matches!(
-            kind,
-            "declaration_list" | "class_body" | "interface_body" | "block"
-        ) {
-            walk_definitions(
-                child,
-                source,
-                lines,
-                lang,
-                display_path,
-                parent_scope,
-                target_parent,
-                target_leaf,
-                results,
-                max_results,
-            );
-        }
-    }
+    target_parent.is_none_or(|req_parent| {
+        parent_scope.is_some_and(|actual| {
+            clean_def_symbol_key(actual).eq_ignore_ascii_case(req_parent)
+                || actual.eq_ignore_ascii_case(req_parent)
+        })
+    })
 }
 
 fn find_enclosing_scope(mut node: Node<'_>, source: &str, lang: SupportedLang) -> String {
@@ -1110,17 +1028,35 @@ fn execute_definition(
         };
 
         let lines: Vec<&str> = source.lines().collect();
-        walk_definitions(
+        walk_symbol_tree(
             tree.root_node(),
             &source,
-            &lines,
             lang,
-            &display_path,
             None,
-            target_parent.as_deref(),
-            &target_leaf,
-            &mut matches,
-            max_results,
+            0,
+            &mut |child, sym_kind, name, parent_scope, _| {
+                if matches.len() >= max_results {
+                    return false;
+                }
+                if matches_symbol_name(name, parent_scope, target_parent.as_deref(), &target_leaf) {
+                    let start_row = expand_start_row_for_docs_and_attrs(child);
+                    let end_row = child.end_position().row;
+                    let qualified_name = match parent_scope {
+                        Some(p) => format!("{p}::{name}"),
+                        None => name.to_string(),
+                    };
+                    matches.push(SymbolMatch {
+                        display_path: display_path.clone(),
+                        lang,
+                        kind: sym_kind,
+                        qualified_name,
+                        start_line: start_row + 1,
+                        end_line: end_row + 1,
+                        snippet: format_numbered_slice(&lines, start_row, end_row),
+                    });
+                }
+                matches.len() < max_results
+            },
         );
     }
 

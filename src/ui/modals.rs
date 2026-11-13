@@ -43,6 +43,20 @@ fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget
     f.render_widget(widget, area);
 }
 
+fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
+    let prefix = if selected { ">> " } else { "   " };
+    let style = if selected {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+    (prefix, style)
+}
+
 fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
     let mut section_color = Color::White;
     let mut in_diff = false;
@@ -133,26 +147,15 @@ impl TuiApp {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let prefix = if i == self.model_idx { ">> " } else { "   " };
-                let active = if m.name == self.model {
-                    " [active]"
-                } else {
-                    ""
-                };
-                let tool_kb = m.max_tool_output_size / 1024;
-                let style = if i == self.model_idx {
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD)
-                } else if m.name == self.model {
-                    Style::default().fg(Color::Cyan)
-                } else {
-                    Style::default()
-                };
+                let is_active = m.name == self.model;
+                let (prefix, style) = selection_style(i == self.model_idx, is_active);
+                let active = if is_active { " [active]" } else { "" };
                 ListItem::new(Line::from(Span::styled(
                     format!(
                         "{prefix}{} (ctx: {}, tool max: {}KB){active}",
-                        m.name, m.context, tool_kb
+                        m.name,
+                        m.context,
+                        m.max_tool_output_size / 1024
                     ),
                     style,
                 )))
@@ -192,16 +195,7 @@ impl TuiApp {
 
         for (i, (val, label)) in CTX_PRESETS.iter().enumerate() {
             let selected = i == self.ctx_preset_idx && self.ctx_input.is_empty();
-            let prefix = if selected { ">> " } else { "   " };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD)
-            } else if *val == self.num_ctx {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default()
-            };
+            let (prefix, style) = selection_style(selected, *val == self.num_ctx);
             lines.push(Line::from(Span::styled(
                 format!("{prefix}{val:>9} tokens ({label})"),
                 style,

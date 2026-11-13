@@ -83,13 +83,12 @@ fn extract_string_enum_variants(items: &[Value]) -> Option<Vec<Value>> {
         let obj = item.as_object()?;
         if let Some(c) = obj.get("const").and_then(Value::as_str) {
             variants.push(Value::String(c.to_string()));
-        } else if let Some(arr) = obj.get("enum").and_then(Value::as_array) {
+        } else {
+            let arr = obj.get("enum").and_then(Value::as_array)?;
             if !arr.iter().all(Value::is_string) {
                 return None;
             }
             variants.extend_from_slice(arr);
-        } else {
-            return None;
         }
     }
     (!variants.is_empty()).then_some(variants)

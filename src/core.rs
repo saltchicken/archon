@@ -101,10 +101,8 @@ pub struct CoreEngine {
     attachments: Arc<ImageStaging>,
     sessions: Arc<SessionManager>,
     session_id: String,
-    active_system_prompt: String,
-    active_num_ctx: u32,
+    turn: TurnConfig,
     active_max_tool_output_size: usize,
-    active_enable_tools: bool,
     session_auto_approve: HashSet<String>,
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
@@ -138,7 +136,7 @@ impl CoreEngine {
         let attachments = Arc::new(ImageStaging::new()?);
         let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
         let client = provider.build_client(&config)?;
-        let active_num_ctx = config.context_for_model(&model);
+        let num_ctx = config.context_for_model(&model);
         let active_max_tool_output_size = config.max_tool_output_for_model(&model);
 
         Ok(Self {
@@ -149,10 +147,12 @@ impl CoreEngine {
             attachments,
             sessions,
             session_id: SessionManager::new_id(),
-            active_system_prompt: String::new(),
-            active_num_ctx,
+            turn: TurnConfig {
+                system_prompt: String::new(),
+                num_ctx,
+                enable_tools: true,
+            },
             active_max_tool_output_size,
-            active_enable_tools: true,
             session_auto_approve: HashSet::new(),
             messages: Vec::new(),
             sent_images: HashSet::new(),
@@ -185,24 +185,10 @@ impl CoreEngine {
         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(vec![]));
     }
 
-    fn apply_turn_config(&mut self, turn: &TurnConfig) {
-        self.active_system_prompt = turn.system_prompt.clone();
-        self.active_num_ctx = turn.num_ctx;
-        self.active_enable_tools = turn.enable_tools;
-    }
-
-    fn active_turn_config(&self) -> TurnConfig {
-        TurnConfig {
-            system_prompt: self.active_system_prompt.clone(),
-            num_ctx: self.active_num_ctx,
-            enable_tools: self.active_enable_tools,
-        }
-    }
-
     fn emit_model_config(&self) {
         let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
             model: self.model.clone(),
-            num_ctx: self.active_num_ctx,
+            num_ctx: self.turn.num_ctx,
             max_tool_output_size: self.active_max_tool_output_size,
         });
     }
@@ -270,7 +256,7 @@ impl CoreEngine {
             self.save_and_emit_chat().await;
         }
 
-        let turn = self.active_turn_config();
+        let turn = self.turn.clone();
         self.spawn_model_turn(&turn, internal_tx.clone()).await;
     }
 
@@ -396,7 +382,7 @@ impl CoreEngine {
                     ));
                 }
 
-                self.apply_turn_config(&turn);
+                self.turn = turn.clone();
                 let image_paths = self.collect_unsent_images().await;
 
                 self.messages.push(ChatMessage {
@@ -431,7 +417,7 @@ impl CoreEngine {
                 feedback,
                 turn,
             } => {
-                self.apply_turn_config(&turn);
+                self.turn = turn;
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
                 };
@@ -519,7 +505,7 @@ impl CoreEngine {
                         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
                         self.session_id = data.id;
-                        self.active_system_prompt = data.system_prompt;
+                        self.turn.system_prompt = data.system_prompt;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -530,7 +516,7 @@ impl CoreEngine {
                             }
                         }
 
-                        self.active_num_ctx = if data.num_ctx > 0 {
+                        self.turn.num_ctx = if data.num_ctx > 0 {
                             data.num_ctx
                         } else {
                             self.config.context_for_model(&self.model)
@@ -575,7 +561,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
-                self.active_num_ctx = self.config.context_for_model(&self.model);
+                self.turn.num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
                 self.emit_model_config();
@@ -616,7 +602,7 @@ impl CoreEngine {
                 self.model = model;
                 self.provider = new_provider;
                 self.client = new_client;
-                self.active_num_ctx = num_ctx.max(512);
+                self.turn.num_ctx = num_ctx.max(512);
                 self.active_max_tool_output_size = max_tool_output_size.max(1024);
 
                 self.save_session_bg().await;
@@ -625,7 +611,7 @@ impl CoreEngine {
                     format!(
                         "Switched to {} (Ctx: {}, Tool Max: {}KB)",
                         self.model,
-                        self.active_num_ctx,
+                        self.turn.num_ctx,
                         self.active_max_tool_output_size / 1024
                     ),
                     false,
@@ -634,7 +620,7 @@ impl CoreEngine {
             EngineCommand::SetContextWindow(new_ctx) => {
                 let clamped = new_ctx.max(512);
                 info!("Updating context window to {}", clamped);
-                self.active_num_ctx = clamped;
+                self.turn.num_ctx = clamped;
                 self.save_session_bg().await;
                 self.emit_model_config();
                 self.notify(format!("Context window set to {} tokens.", clamped), false);
@@ -662,7 +648,7 @@ impl CoreEngine {
                 self.active_task = None;
                 let final_text = std::mem::take(&mut self.stream_buffer);
                 let total_used = prompt_tokens + eval_tokens;
-                let ctx_limit = self.active_num_ctx as u64;
+                let ctx_limit = self.turn.num_ctx as u64;
                 let usage_pct = (total_used as f64 / ctx_limit.max(1) as f64) * 100.0;
                 let hit_length = done_reason.as_deref() == Some("length");
                 let is_near_limit = hit_length
@@ -731,8 +717,8 @@ impl CoreEngine {
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
         let model = self.model.clone();
-        let sys = self.active_system_prompt.clone();
-        let ctx = self.active_num_ctx;
+        let sys = self.turn.system_prompt.clone();
+        let ctx = self.turn.num_ctx;
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
@@ -748,7 +734,6 @@ impl CoreEngine {
         internal_tx: UnboundedSender<EngineEvent>,
     ) {
         self.stream_buffer.clear();
-        let tools_schema = turn.enable_tools.then(tools::schemas);
         let asset_dir = self.sessions.asset_dir(&self.session_id);
 
         // Clone lightweight messages (without Base64 payloads) and hydrate Base64
@@ -788,15 +773,7 @@ impl CoreEngine {
 
         self.active_task = Some(tokio::spawn(async move {
             provider
-                .stream_turn(
-                    client,
-                    model,
-                    config,
-                    hydrated_msgs,
-                    turn_cfg,
-                    tools_schema,
-                    internal_tx,
-                )
+                .stream_turn(client, model, config, hydrated_msgs, turn_cfg, internal_tx)
                 .await;
         }));
     }
@@ -809,8 +786,8 @@ impl CoreEngine {
             .collect();
         let _ = self.tx.send(EngineEvent::ChatUpdated {
             messages,
-            num_ctx: self.active_num_ctx,
-            system_prompt: self.active_system_prompt.clone(),
+            num_ctx: self.turn.num_ctx,
+            system_prompt: self.turn.system_prompt.clone(),
         });
     }
 

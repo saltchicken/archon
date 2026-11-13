@@ -326,12 +326,10 @@ impl TuiApp {
                 }
                 self.messages = messages;
                 self.styled_messages.clear();
-                self.styled_stream.clear();
-                self.stream_dirty = false;
+                self.finish_stream();
+                self.streaming_text.clear();
                 self.num_ctx = num_ctx;
                 self.sync_system_prompt(&system_prompt);
-                self.is_streaming = false;
-                self.streaming_text.clear();
                 self.msg_states.clear();
                 self.msg_states
                     .resize(self.messages.len() + 1, MsgUiState::default());
@@ -363,16 +361,10 @@ impl TuiApp {
                 eval_tokens,
                 ..
             } => {
-                self.is_streaming = false;
-                self.styled_stream.clear();
-                self.stream_dirty = false;
+                self.finish_stream();
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
-            EngineEvent::StreamError(_) => {
-                self.is_streaming = false;
-                self.styled_stream.clear();
-                self.stream_dirty = false;
-            }
+            EngineEvent::StreamError(_) => self.finish_stream(),
             EngineEvent::ToolApprovalRequested {
                 formatted_preview,
                 index,
@@ -400,6 +392,12 @@ impl TuiApp {
                 }
             }
         }
+    }
+
+    fn finish_stream(&mut self) {
+        self.is_streaming = false;
+        self.styled_stream.clear();
+        self.stream_dirty = false;
     }
 
     fn sync_system_prompt(&mut self, system_prompt: &str) {

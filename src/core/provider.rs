@@ -1,13 +1,15 @@
-use crate::core::{
-    EngineEvent, TurnConfig,
-    config::{Config, EndpointSettings},
-    gemini, ollama,
-    session::ChatMessage,
+use crate::{
+    core::{
+        EngineEvent, TurnConfig,
+        config::{Config, EndpointSettings},
+        gemini, ollama,
+        session::ChatMessage,
+    },
+    tools,
 };
 use anyhow::Result;
 use futures_util::{Stream, TryStreamExt};
 use reqwest::{Client, RequestBuilder};
-use serde_json::Value;
 use std::{io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::{
@@ -104,9 +106,9 @@ impl Provider {
         config: Config,
         messages: Vec<ChatMessage>,
         turn: TurnConfig,
-        tools_schema: Option<Vec<Value>>,
         tx: UnboundedSender<EngineEvent>,
     ) {
+        let tools_schema = turn.enable_tools.then(tools::schemas);
         match self {
             Self::Ollama => {
                 let payload = ollama::build_payload(

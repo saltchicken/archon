@@ -1,7 +1,7 @@
 use crate::{
     core::config::{WorkspaceSnapshotSettings, expand_tilde},
     tools::utils::{
-        ReadFileOutcome, auto_schema, build_exclude_globset, build_globset, build_workspace_walker,
+        FileOutcome, auto_schema, build_exclude_globset, build_globset, build_workspace_walker,
         has_git_dir_component, parse_args, read_text_file_inspected, resolve_scan_roots,
     },
 };
@@ -48,12 +48,6 @@ struct FileEntry {
     include_content: bool,
 }
 
-enum FileOutcome {
-    Content(String),
-    Skipped(&'static str),
-    Error(String),
-}
-
 fn shrink_tilde(path: &Path) -> String {
     let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(home) = dirs::home_dir()
@@ -79,22 +73,13 @@ fn read_to_outcome(
     if *used_bytes > max_output_size {
         return FileOutcome::Skipped("Workspace snapshot output size limit reached.");
     }
-
-    match read_text_file_inspected(path, max_file_size) {
-        ReadFileOutcome::Empty => FileOutcome::Content(String::new()),
-        ReadFileOutcome::Content(content) => {
-            *used_bytes = used_bytes.saturating_add(content.len() + display_len + 32);
-            FileOutcome::Content(content)
-        }
-        ReadFileOutcome::ExceedsMaxSize => {
-            FileOutcome::Error("File exceeds maximum size limit.".into())
-        }
-        ReadFileOutcome::Binary => FileOutcome::Skipped("Binary file detected."),
-        ReadFileOutcome::InvalidUtf8 => {
-            FileOutcome::Skipped("Non-UTF-8 text / binary file detected.")
-        }
-        ReadFileOutcome::IoError(e) => FileOutcome::Error(format!("Error reading file: {e}")),
+    let outcome = read_text_file_inspected(path, max_file_size);
+    if let FileOutcome::Content(ref content) = outcome
+        && !content.is_empty()
+    {
+        *used_bytes = used_bytes.saturating_add(content.len() + display_len + 32);
     }
+    outcome
 }
 
 fn get_fence(content: &str) -> String {
@@ -266,6 +251,15 @@ pub fn execute(
                 continue;
             }
 
+            let mut record_extra = |display: String, marker: &str, outcome: Option<FileOutcome>| {
+                let _ = writeln!(tree_out, "{display}{marker}");
+                if !args.tree_only
+                    && let Some(o) = outcome
+                {
+                    files.push((display, o));
+                }
+            };
+
             match validate_extra_file(
                 raw_file,
                 &expanded,
@@ -277,35 +271,32 @@ pub fn execute(
                 Ok(valid_path) => {
                     let display_path = shrink_tilde(&valid_path);
                     if !valid_path.exists() {
-                        let _ = writeln!(tree_out, "{display_path} (not found)");
-                        if !args.tree_only {
-                            files.push((
-                                display_path,
-                                FileOutcome::Error("File does not exist.".into()),
-                            ));
-                        }
+                        record_extra(
+                            display_path,
+                            " (not found)",
+                            Some(FileOutcome::Error("File does not exist.".into())),
+                        );
                     } else if valid_path.is_dir() {
-                        let _ = writeln!(tree_out, "{display_path}/");
+                        record_extra(display_path, "/", None);
                     } else {
-                        let _ = writeln!(tree_out, "{display_path}");
-                        if !args.tree_only {
-                            let outcome = read_to_outcome(
+                        let outcome = (!args.tree_only).then(|| {
+                            read_to_outcome(
                                 &valid_path,
                                 display_path.len(),
                                 settings.max_size,
                                 &mut used_bytes,
                                 max_output_size,
-                            );
-                            files.push((display_path, outcome));
-                        }
+                            )
+                        });
+                        record_extra(display_path, "", outcome);
                     }
                 }
                 Err(sec_err) => {
-                    let display_path = shrink_tilde(&expanded);
-                    let _ = writeln!(tree_out, "{display_path} (blocked)");
-                    if !args.tree_only {
-                        files.push((display_path, FileOutcome::Error(sec_err)));
-                    }
+                    record_extra(
+                        shrink_tilde(&expanded),
+                        " (blocked)",
+                        Some(FileOutcome::Error(sec_err)),
+                    );
                 }
             }
         }
