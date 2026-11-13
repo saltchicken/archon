@@ -223,7 +223,7 @@ impl TuiApp {
         let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
 
         match key.code {
-            KeyCode::Esc if self.is_streaming => {
+            KeyCode::Esc if self.is_streaming || self.active_tool_status.is_some() => {
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
             KeyCode::PageUp => self.scroll_chat(-page_step),

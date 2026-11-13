@@ -79,6 +79,7 @@ pub struct TuiApp {
     pub(super) last_wrap_width: usize,
     pub(super) streaming_text: String,
     pub(super) is_streaming: bool,
+    pub(super) active_tool_status: Option<String>,
     pub(super) status_bar: (String, bool),
 
     pub(super) model_idx: usize,
@@ -151,6 +152,7 @@ impl TuiApp {
             last_wrap_width: 0,
             streaming_text: String::new(),
             is_streaming: false,
+            active_tool_status: None,
             status_bar: (
                 "Ready. Press ⏎ to send prompt (⇧⏎ newline), ? to toggle help.".into(),
                 false,
@@ -343,11 +345,15 @@ impl TuiApp {
             }
             EngineEvent::StreamStarted => {
                 self.is_streaming = true;
+                self.active_tool_status = None;
                 self.streaming_text.clear();
                 self.styled_stream.clear();
                 self.stream_dirty = true;
                 self.status_bar = (
-                    format!("Streaming response from {}... (Esc to cancel)", self.model),
+                    format!(
+                        "Streaming response from {}... (⏎ to interject, Esc to cancel)",
+                        self.model
+                    ),
                     false,
                 );
                 self.scroll_to_bottom();
@@ -365,6 +371,22 @@ impl TuiApp {
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
             EngineEvent::StreamError(_) => self.finish_stream(),
+            EngineEvent::ToolStarted {
+                summary,
+                index,
+                total,
+            } => {
+                let status = format!("⚙ Running tool ({index}/{total}): {summary}...");
+                self.active_tool_status = Some(status.clone());
+                self.status_bar = (
+                    format!("{status} (⏎ to queue interjection, Esc to cancel)"),
+                    false,
+                );
+                self.scroll_to_bottom();
+            }
+            EngineEvent::ToolCompleted { .. } => {
+                self.active_tool_status = None;
+            }
             EngineEvent::ToolApprovalRequested {
                 formatted_preview,
                 index,
@@ -396,6 +418,7 @@ impl TuiApp {
 
     fn finish_stream(&mut self) {
         self.is_streaming = false;
+        self.active_tool_status = None;
         self.styled_stream.clear();
         self.stream_dirty = false;
     }
@@ -438,9 +461,6 @@ impl TuiApp {
     }
 
     pub(super) fn submit_prompt(&mut self) {
-        if self.is_streaming {
-            return;
-        }
         let prompt = self.text_area.lines().join("\n").trim().to_string();
         if prompt.is_empty() {
             self.status_bar = ("Prompt cannot be empty.".into(), true);

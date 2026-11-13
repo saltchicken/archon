@@ -80,6 +80,15 @@ pub enum EngineEvent {
         thoughts: Vec<ThoughtPart>,
     },
     StreamError(String),
+    ToolStarted {
+        summary: String,
+        index: usize,
+        total: usize,
+    },
+    ToolCompleted {
+        output: String,
+        truncated: bool,
+    },
     ToolApprovalRequested {
         formatted_preview: String,
         index: usize,
@@ -91,6 +100,12 @@ pub enum EngineEvent {
         num_ctx: u32,
         max_tool_output_size: usize,
     },
+}
+
+struct QueuedInterjection {
+    msg: ChatMessage,
+    new_images: Vec<(String, Vec<u8>)>,
+    turn: TurnConfig,
 }
 
 pub struct CoreEngine {
@@ -108,6 +123,8 @@ pub struct CoreEngine {
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
     active_task: Option<JoinHandle<()>>,
+    executing_tool: bool,
+    queued_interjections: Vec<QueuedInterjection>,
     save_task: Option<JoinHandle<()>>,
     pending_tools: VecDeque<ToolCall>,
     tx: UnboundedSender<EngineEvent>,
@@ -145,6 +162,8 @@ impl CoreEngine {
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
             active_task: None,
+            executing_tool: false,
+            queued_interjections: Vec::new(),
             save_task: None,
             pending_tools: VecDeque::new(),
             tx,
@@ -155,9 +174,35 @@ impl CoreEngine {
         if let Some(h) = self.active_task.take() {
             h.abort();
         }
+        self.executing_tool = false;
+        self.queued_interjections.clear();
         self.pending_tools.clear();
         self.sent_images.clear();
         self.stream_buffer.clear();
+    }
+
+    fn unresolved_tool_call_count(&self) -> usize {
+        let mut resolved = 0usize;
+        for m in self.messages.iter().rev() {
+            match m.role.as_str() {
+                "tool" => resolved += 1,
+                "assistant" => {
+                    let total = m.tool_calls.as_ref().map_or(0, Vec::len);
+                    return total.saturating_sub(resolved);
+                }
+                _ => break,
+            }
+        }
+        0
+    }
+
+    fn close_unresolved_tool_calls(&mut self, message: &str) -> usize {
+        let unresolved = self.unresolved_tool_call_count();
+        self.pending_tools.clear();
+        for _ in 0..unresolved {
+            self.messages.push(ChatMessage::new("tool", message));
+        }
+        unresolved
     }
 
     async fn flush_save_task(&mut self) {
@@ -191,10 +236,7 @@ impl CoreEngine {
         tools::is_auto_approved(call, all_rules)
     }
 
-    fn prompt_next_tool(&mut self) {
-        let Some(call) = self.pending_tools.front() else {
-            return;
-        };
+    fn tool_batch_progress(&self) -> (usize, usize) {
         let total = self
             .messages
             .iter()
@@ -202,7 +244,15 @@ impl CoreEngine {
             .find_map(|m| m.tool_calls.as_ref().map(Vec::len))
             .unwrap_or(self.pending_tools.len())
             .max(self.pending_tools.len());
-        let index = total - self.pending_tools.len() + 1;
+        let index = total.saturating_sub(self.pending_tools.len()) + 1;
+        (index, total)
+    }
+
+    fn prompt_next_tool(&mut self) {
+        let Some(call) = self.pending_tools.front() else {
+            return;
+        };
+        let (index, total) = self.tool_batch_progress();
         let _ = self.tx.send(EngineEvent::ToolApprovalRequested {
             formatted_preview: tools::format_approval(call),
             index,
@@ -210,8 +260,56 @@ impl CoreEngine {
         });
     }
 
+    fn spawn_tool_execution(
+        &mut self,
+        call: ToolCall,
+        index: usize,
+        total: usize,
+        feedback: Option<String>,
+        internal_tx: &UnboundedSender<EngineEvent>,
+    ) {
+        let sig = tools::call_signature(&call);
+        self.executing_tool = true;
+        let _ = self.tx.send(EngineEvent::ToolStarted {
+            summary: sig,
+            index,
+            total,
+        });
+
+        let cfg = self.config.clone();
+        let max_out = self.active_max_tool_output_size;
+        let tx = internal_tx.clone();
+
+        self.active_task = Some(tokio::spawn(async move {
+            let (mut output, truncated) = tools::execute(&call, &cfg, max_out).await;
+            if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
+                output.push_str(&format!("\n\n[User attached a message]: {fb}"));
+            }
+            let _ = tx.send(EngineEvent::ToolCompleted { output, truncated });
+        }));
+    }
+
     async fn process_pending_tools(&mut self, internal_tx: &UnboundedSender<EngineEvent>) {
-        let mut auto_executed = false;
+        if !self.queued_interjections.is_empty() {
+            let skipped = self.close_unresolved_tool_calls(
+                "Skipped remaining tool call to process user interjection.",
+            );
+            if skipped > 0 {
+                info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
+            }
+            let mut new_images = Vec::new();
+            for item in self.queued_interjections.drain(..) {
+                self.turn = item.turn;
+                self.messages.push(item.msg);
+                new_images.extend(item.new_images);
+            }
+            self.save_and_emit_chat(new_images).await;
+            let turn = self.turn.clone();
+            self.spawn_model_turn(&turn, internal_tx.clone()).await;
+            return;
+        }
+
+        let mut modified = false;
 
         while let Some(call) = self.pending_tools.front() {
             if !tools::is_tool_enabled(&call.function.name, &self.config) {
@@ -224,36 +322,34 @@ impl CoreEngine {
                     "tool",
                     format!("Error: Unknown tool: '{}'", call.function.name),
                 ));
-                auto_executed = true;
+                modified = true;
                 continue;
             }
 
             if !self.is_call_auto_approved(call) {
-                if auto_executed {
+                if modified {
                     self.save_and_emit_chat(Vec::new()).await;
                 }
                 self.prompt_next_tool();
                 return;
             }
 
+            let (index, total) = self.tool_batch_progress();
             let call = self.pending_tools.pop_front().unwrap();
             let sig = tools::call_signature(&call);
             info!(
-                "Auto-approving tool call '{}' (max_tool_output_size: {})",
+                "Auto-approving tool call '{}' ({index}/{total}, max_tool_output_size: {})",
                 sig, self.active_max_tool_output_size
             );
 
-            let (internal_out, truncated) =
-                tools::execute(&call, &self.config, self.active_max_tool_output_size).await;
-
-            self.messages.push(ChatMessage {
-                truncated,
-                ..ChatMessage::new("tool", internal_out)
-            });
-            auto_executed = true;
+            if modified {
+                self.save_and_emit_chat(Vec::new()).await;
+            }
+            self.spawn_tool_execution(call, index, total, None, internal_tx);
+            return;
         }
 
-        if auto_executed {
+        if modified {
             self.save_and_emit_chat(Vec::new()).await;
         }
 
@@ -367,49 +463,113 @@ impl CoreEngine {
                 info!("User submitted prompt. Enable tools: {}", turn.enable_tools);
                 debug!("Prompt content: {}", prompt.replace('\n', " "));
 
-                if let Some(h) = self.active_task.take() {
-                    h.abort();
-                }
-
-                for call in self.pending_tools.drain(..) {
-                    warn!(
-                        "Auto-declining unresolved tool call '{}' before new prompt",
-                        call.function.name
-                    );
-                    self.messages.push(ChatMessage::new(
-                        "tool",
-                        "The user skipped this tool call and sent a new message.",
-                    ));
-                }
-
-                self.turn = turn.clone();
                 let (image_names, new_image_blobs) = self.collect_unsent_images().await;
-
-                self.messages.push(ChatMessage {
+                let user_msg = ChatMessage {
                     images: None,
                     image_names,
                     ..ChatMessage::new("user", prompt)
-                });
+                };
+
+                // If a tool is currently executing, queue the interjection so the running
+                // tool can finish cleanly, then skip any remaining queued tools and send it.
+                if self.executing_tool {
+                    let remaining = self.pending_tools.len();
+                    info!(
+                        "Queuing user interjection while tool is executing ({remaining} remaining tool(s) will be skipped)"
+                    );
+                    self.queued_interjections.push(QueuedInterjection {
+                        msg: user_msg,
+                        new_images: new_image_blobs,
+                        turn,
+                    });
+                    let queued_total = self.queued_interjections.len();
+                    self.notify(
+                        format!(
+                            "Interjection queued ({queued_total}). Will apply as soon as current tool finishes (Esc to abort tool now)."
+                        ),
+                        false,
+                    );
+                    return;
+                }
+
+                if let Some(h) = self.active_task.take() {
+                    h.abort();
+                    let text = std::mem::take(&mut self.stream_buffer);
+                    if !text.trim().is_empty() {
+                        self.messages.push(ChatMessage::new(
+                            "assistant",
+                            format!("{text}\n\n*[Interrupted by user]*"),
+                        ));
+                    }
+                }
+
+                let skipped = self.close_unresolved_tool_calls(
+                    "The user skipped this tool call and sent a new message.",
+                );
+                if skipped > 0 {
+                    warn!("Auto-declined {skipped} unresolved tool call(s) before new prompt");
+                }
+
+                self.turn = turn.clone();
+                self.messages.push(user_msg);
 
                 self.save_and_emit_chat(new_image_blobs).await;
                 self.spawn_model_turn(&turn, internal_tx.clone()).await;
             }
             EngineCommand::CancelStream => {
-                info!("User cancelled stream");
-                let Some(handle) = self.active_task.take() else {
-                    return;
+                let was_tool = self.executing_tool;
+                let had_task = if let Some(handle) = self.active_task.take() {
+                    handle.abort();
+                    true
+                } else {
+                    false
                 };
-                handle.abort();
+                self.executing_tool = false;
+
+                if !had_task
+                    && self.pending_tools.is_empty()
+                    && self.queued_interjections.is_empty()
+                {
+                    return;
+                }
+
+                info!("User interrupted active turn (was_tool: {was_tool})");
+                let mut changed = false;
+
                 let text = std::mem::take(&mut self.stream_buffer);
                 if !text.trim().is_empty() {
                     self.messages.push(ChatMessage::new(
                         "assistant",
                         format!("{text}\n\n*[Generation cancelled]*"),
                     ));
-                    self.save_session_bg(Vec::new()).await;
+                    changed = true;
+                }
+
+                let closed = self.close_unresolved_tool_calls("Cancelled by user.");
+                if closed > 0 {
+                    changed = true;
+                }
+
+                let mut extra_images = Vec::new();
+                for item in self.queued_interjections.drain(..) {
+                    self.turn = item.turn;
+                    self.messages.push(item.msg);
+                    extra_images.extend(item.new_images);
+                    changed = true;
+                }
+
+                if changed {
+                    self.save_session_bg(extra_images).await;
                 }
                 self.emit_chat();
-                self.notify("Stream cancelled.", false);
+                self.notify(
+                    if was_tool {
+                        "Tool execution cancelled."
+                    } else {
+                        "Stream cancelled."
+                    },
+                    false,
+                );
             }
             EngineCommand::ResolveTool {
                 approved,
@@ -418,6 +578,7 @@ impl CoreEngine {
                 turn,
             } => {
                 self.turn = turn;
+                let (index, total) = self.tool_batch_progress();
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
                 };
@@ -437,30 +598,29 @@ impl CoreEngine {
                     sig, approved, always_approve, self.active_max_tool_output_size
                 );
 
-                let (mut internal_out, truncated) = if approved {
-                    tools::execute(&call, &self.config, self.active_max_tool_output_size).await
+                let trimmed_fb = feedback.trim().to_string();
+                if approved {
+                    self.spawn_tool_execution(
+                        call,
+                        index,
+                        total,
+                        (!trimmed_fb.is_empty()).then_some(trimmed_fb),
+                        internal_tx,
+                    );
                 } else {
-                    ("The user declined to run this command.".into(), false)
-                };
-
-                let trimmed_fb = feedback.trim();
-                if !trimmed_fb.is_empty() {
-                    let prefix = if approved {
-                        "\n\n[User attached a message]:"
-                    } else {
-                        " User provided this reason/message:"
-                    };
-                    internal_out.push_str(&format!("{prefix} {trimmed_fb}"));
+                    let mut internal_out = String::from("The user declined to run this command.");
+                    if !trimmed_fb.is_empty() {
+                        internal_out
+                            .push_str(&format!(" User provided this reason/message: {trimmed_fb}"));
+                    }
+                    self.messages.push(ChatMessage {
+                        truncated: false,
+                        ..ChatMessage::new("tool", internal_out)
+                    });
+                    self.save_and_emit_chat(Vec::new()).await;
+                    info!("Tool declination recorded to chat history.");
+                    self.process_pending_tools(internal_tx).await;
                 }
-
-                self.messages.push(ChatMessage {
-                    truncated,
-                    ..ChatMessage::new("tool", internal_out)
-                });
-                self.save_and_emit_chat(Vec::new()).await;
-                info!("Tool execution resolved and recorded to chat history.");
-
-                self.process_pending_tools(internal_tx).await;
             }
             EngineCommand::RefreshSessions => {
                 info!("Refreshing sessions list");
@@ -688,9 +848,21 @@ impl CoreEngine {
             }
             EngineEvent::StreamError(ref err) => {
                 self.active_task = None;
+                self.executing_tool = false;
                 self.stream_buffer.clear();
                 self.notify(format!("API Error: {err}"), true);
                 let _ = self.tx.send(ev);
+            }
+            EngineEvent::ToolCompleted { output, truncated } => {
+                self.active_task = None;
+                self.executing_tool = false;
+                self.messages.push(ChatMessage {
+                    truncated,
+                    ..ChatMessage::new("tool", output)
+                });
+                self.save_and_emit_chat(Vec::new()).await;
+                info!("Tool execution completed and recorded to chat history.");
+                self.process_pending_tools(internal_tx).await;
             }
             other => {
                 let _ = self.tx.send(other);

@@ -681,6 +681,18 @@ impl TuiApp {
                 &styled_stream,
                 &mut lines,
             );
+        } else if let Some(ref tool_status) = self.active_tool_status {
+            let i = self.messages.len();
+            self.msg_states[i].unfolded = true;
+            let styled_tool = style_lines(&wrap_text(&sanitize_line(tool_status), &options));
+            self.render_message_block(
+                i,
+                "ARCHON (TOOL)",
+                Color::Yellow,
+                false,
+                &styled_tool,
+                &mut lines,
+            );
         }
 
         self.total_chat_lines = lines.len();
