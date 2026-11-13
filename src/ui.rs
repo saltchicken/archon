@@ -343,7 +343,13 @@ impl TuiApp {
                     MsgUiState::default(),
                 );
 
-                // Unfold the latest assistant response while keeping separate `tool` blocks folded.
+                for (i, m) in self.messages.iter().enumerate() {
+                    if m.role == "tool" {
+                        self.msg_states[i].collapsed = true;
+                    }
+                }
+
+                // Unfold the latest assistant response while keeping `tool` blocks collapsed.
                 if let Some(last_assistant_idx) =
                     self.messages.iter().rposition(|m| m.role == "assistant")
                 {

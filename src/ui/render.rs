@@ -390,7 +390,7 @@ impl TuiApp {
             header_spans.push(Span::styled(
                 format!("[+ {total_content} lines collapsed]"),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
             ));
         }
