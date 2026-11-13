@@ -139,6 +139,11 @@ impl Default for AppSettings {
                 "cargo:clippy",
                 "cargo:fmt_check",
                 "cargo:metadata",
+                "system:*",
+                "dotfiles:list",
+                "dotfiles:read",
+                "dotfiles:search",
+                "dotfiles:validate",
             ]
             .map(String::from)
             .into(),
@@ -214,6 +219,10 @@ impl Default for Config {
                 preset(
                     "Codebase Architect",
                     "You are an expert software architect working inside Archon. Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and verify changes with `cargo` (`check`, `clippy`, `test`).",
+                ),
+                preset(
+                    "CachyOS Optimizer",
+                    "You are a CachyOS & Arch Linux system optimization and dotfiles architect running inside Archon.\n1. System Telemetry (`system`): Start with `system` (`action: \"overview\"`) to inspect the CachyOS kernel, sched-ext (`scx`) scheduler, CPU governor/EPP, PSI resource pressure, ZRAM, and thermals. Use `action: \"journal\"` and `action: \"services\"` (`failed`, `blame`, `timers`) to diagnose errors and boot bottlenecks. Use `action: \"btrfs\"` for mount options/compression/usage, `action: \"packages\"` for `paru`/`pacman` orphans/foreign packages/modified configs, `action: \"hyprland\"` for compositor state, and `action: \"fish\"` (`recent`, `frequent`, `abbreviations`) to optimize shell workflows.\n2. Dotfiles Management (`dotfiles`): Use `dotfiles` (`list`, `read`, `search`) to inspect `~/.config` (`hypr/`, `fish/`, `waybar/`, etc.). Apply targeted atomic edits with `dotfiles` (`action: \"edit\"` or `\"create\"`) and verify syntax with `action: \"validate\"`.",
                 ),
                 preset(
                     "JSON Only",

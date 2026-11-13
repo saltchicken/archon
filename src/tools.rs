@@ -1,5 +1,6 @@
 mod cargo;
 mod create_file;
+mod dotfiles;
 mod edit_file;
 mod execute_command;
 mod fetch_url;
@@ -8,6 +9,7 @@ mod git;
 mod read_file;
 mod repo_map;
 mod search;
+mod system;
 mod workspace_snapshot;
 
 use crate::core::config::{Config, WorkspaceSnapshotSettings};
@@ -540,7 +542,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" => args
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" => args
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("")
@@ -656,6 +658,39 @@ fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -
     out.trim_end().to_string()
 }
 
+fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
+    for (k, v) in obj
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "edits" | "content"))
+    {
+        out.push_str(&format_kv(k, v));
+    }
+
+    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) {
+        match parsed.action {
+            dotfiles::DotfilesAction::Edit => match dotfiles::preview_edit(&parsed) {
+                Ok((_, display, original, updated, hunk_count)) => {
+                    out.push_str(&format!("  hunks: {hunk_count}\n"));
+                    append_unified_diff(&mut out, &display, &original, &updated);
+                }
+                Err(e) => {
+                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+                }
+            },
+            dotfiles::DotfilesAction::Create => match dotfiles::preview_create(&parsed) {
+                Ok((_, display)) => {
+                    append_unified_diff(&mut out, &display, "", &parsed.content);
+                }
+                Err(e) => {
+                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+                }
+            },
+            _ => {}
+        }
+    }
+    out.trim_end().to_string()
+}
+
 pub fn format_approval(call: &ToolCall) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -674,6 +709,9 @@ pub fn format_approval(call: &ToolCall) -> String {
     }
     if name == "fs" {
         return format_fs_approval(out, args, obj);
+    }
+    if name == "dotfiles" {
+        return format_dotfiles_approval(out, args, obj);
     }
 
     let mut multiline_blocks = Vec::new();
@@ -698,6 +736,7 @@ pub fn schemas() -> Vec<Value> {
     vec![
         async_schema::<cargo::Tool>(),
         blocking_schema::<create_file::Tool>(),
+        blocking_schema::<dotfiles::Tool>(),
         blocking_schema::<edit_file::Tool>(),
         async_schema::<execute_command::Tool>(),
         async_schema::<fetch_url::Tool>(),
@@ -706,6 +745,7 @@ pub fn schemas() -> Vec<Value> {
         blocking_schema::<read_file::Tool>(),
         blocking_schema::<repo_map::Tool>(),
         blocking_schema::<search::Tool>(),
+        async_schema::<system::Tool>(),
         blocking_schema::<workspace_snapshot::Tool>(),
     ]
 }
@@ -720,6 +760,7 @@ async fn dispatch_tool(
     match name {
         cargo::Tool::NAME => run_async::<cargo::Tool>(args, &ctx).await,
         create_file::Tool::NAME => run_blocking::<create_file::Tool>(args, ctx).await,
+        dotfiles::Tool::NAME => run_blocking::<dotfiles::Tool>(args, ctx).await,
         edit_file::Tool::NAME => run_blocking::<edit_file::Tool>(args, ctx).await,
         execute_command::Tool::NAME => run_async::<execute_command::Tool>(args, &ctx).await,
         fetch_url::Tool::NAME => run_async::<fetch_url::Tool>(args, &ctx).await,
@@ -728,6 +769,7 @@ async fn dispatch_tool(
         read_file::Tool::NAME => run_blocking::<read_file::Tool>(args, ctx).await,
         repo_map::Tool::NAME => run_blocking::<repo_map::Tool>(args, ctx).await,
         search::Tool::NAME => run_blocking::<search::Tool>(args, ctx).await,
+        system::Tool::NAME => run_async::<system::Tool>(args, &ctx).await,
         workspace_snapshot::Tool::NAME => run_blocking::<workspace_snapshot::Tool>(args, ctx).await,
         _ => bail!("Unknown tool: '{name}'"),
     }
