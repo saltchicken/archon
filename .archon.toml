@@ -9,6 +9,7 @@ enabled_tools = [
     "read_file",
     "repo_map",
     "search",
+    "web_search",
     "workspace_snapshot",
 ]
 

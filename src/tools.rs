@@ -10,6 +10,7 @@ mod read_file;
 mod repo_map;
 mod search;
 mod system;
+mod web_search;
 mod workspace_snapshot;
 
 use crate::core::config::{Config, WorkspaceSnapshotSettings};
@@ -745,6 +746,7 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     repo_map::Tool::NAME,
     search::Tool::NAME,
     system::Tool::NAME,
+    web_search::Tool::NAME,
     workspace_snapshot::Tool::NAME,
 ];
 
@@ -777,6 +779,7 @@ pub fn schemas(config: &Config) -> Vec<Value> {
         (repo_map::Tool::NAME, blocking_schema::<repo_map::Tool>()),
         (search::Tool::NAME, blocking_schema::<search::Tool>()),
         (system::Tool::NAME, async_schema::<system::Tool>()),
+        (web_search::Tool::NAME, async_schema::<web_search::Tool>()),
         (
             workspace_snapshot::Tool::NAME,
             blocking_schema::<workspace_snapshot::Tool>(),
@@ -812,6 +815,7 @@ async fn dispatch_tool(
         repo_map::Tool::NAME => run_blocking::<repo_map::Tool>(args, ctx).await,
         search::Tool::NAME => run_blocking::<search::Tool>(args, ctx).await,
         system::Tool::NAME => run_async::<system::Tool>(args, &ctx).await,
+        web_search::Tool::NAME => run_async::<web_search::Tool>(args, &ctx).await,
         workspace_snapshot::Tool::NAME => run_blocking::<workspace_snapshot::Tool>(args, ctx).await,
         _ => bail!("Unknown tool: '{name}'"),
     }

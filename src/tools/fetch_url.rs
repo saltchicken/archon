@@ -59,7 +59,7 @@ fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
+pub(super) async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!(
             "Security violation: unsupported URL scheme '{}'. Only 'http' and 'https' are allowed.",
@@ -105,7 +105,7 @@ async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
     Ok(resolved)
 }
 
-fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<Client> {
+pub(super) fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<Client> {
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
         .redirect(Policy::none())
@@ -155,7 +155,7 @@ fn remove_html_comments(mut html: String) -> String {
     html
 }
 
-fn decode_entities(s: &str) -> String {
+pub(super) fn decode_entities(s: &str) -> String {
     // Using `\x26` for `&` prevents browsers/clipboards from decoding HTML entities when copying code
     const ENTITIES: &[(&str, &str)] = &[
         ("\x26nbsp;", " "),
@@ -165,6 +165,8 @@ fn decode_entities(s: &str) -> String {
         ("\x26gt;", ">"),
         ("\x26quot;", "\""),
         ("\x26#39;", "'"),
+        ("\x26#x27;", "'"),
+        ("\x26#x2F;", "/"),
         ("\x26apos;", "'"),
         ("\x26mdash;", "—"),
         ("\x26ndash;", "–"),
