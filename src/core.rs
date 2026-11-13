@@ -260,6 +260,31 @@ impl CoreEngine {
         });
     }
 
+    async fn flush_queued_interjections(
+        &mut self,
+        internal_tx: &UnboundedSender<EngineEvent>,
+    ) -> bool {
+        if self.queued_interjections.is_empty() {
+            return false;
+        }
+        let skipped = self.close_unresolved_tool_calls(
+            "Skipped remaining tool call to process user interjection.",
+        );
+        if skipped > 0 {
+            info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
+        }
+        let mut new_images = Vec::new();
+        for item in self.queued_interjections.drain(..) {
+            self.turn = item.turn;
+            self.messages.push(item.msg);
+            new_images.extend(item.new_images);
+        }
+        self.save_and_emit_chat(new_images).await;
+        let turn = self.turn.clone();
+        self.spawn_model_turn(&turn, internal_tx.clone()).await;
+        true
+    }
+
     fn spawn_tool_execution(
         &mut self,
         call: ToolCall,
@@ -290,22 +315,7 @@ impl CoreEngine {
     }
 
     async fn process_pending_tools(&mut self, internal_tx: &UnboundedSender<EngineEvent>) {
-        if !self.queued_interjections.is_empty() {
-            let skipped = self.close_unresolved_tool_calls(
-                "Skipped remaining tool call to process user interjection.",
-            );
-            if skipped > 0 {
-                info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
-            }
-            let mut new_images = Vec::new();
-            for item in self.queued_interjections.drain(..) {
-                self.turn = item.turn;
-                self.messages.push(item.msg);
-                new_images.extend(item.new_images);
-            }
-            self.save_and_emit_chat(new_images).await;
-            let turn = self.turn.clone();
-            self.spawn_model_turn(&turn, internal_tx.clone()).await;
+        if self.flush_queued_interjections(internal_tx).await {
             return;
         }
 
@@ -470,12 +480,12 @@ impl CoreEngine {
                     ..ChatMessage::new("user", prompt)
                 };
 
-                // If a tool is currently executing, queue the interjection so the running
-                // tool can finish cleanly, then skip any remaining queued tools and send it.
-                if self.executing_tool {
-                    let remaining = self.pending_tools.len();
+                // If a model stream or a tool execution is currently in flight, queue the
+                // interjection so the active process finishes cleanly before reading it.
+                if self.active_task.is_some() || self.executing_tool {
                     info!(
-                        "Queuing user interjection while tool is executing ({remaining} remaining tool(s) will be skipped)"
+                        "Queuing user interjection while process is active (executing_tool: {})",
+                        self.executing_tool
                     );
                     self.queued_interjections.push(QueuedInterjection {
                         msg: user_msg,
@@ -485,22 +495,11 @@ impl CoreEngine {
                     let queued_total = self.queued_interjections.len();
                     self.notify(
                         format!(
-                            "Interjection queued ({queued_total}). Will apply as soon as current tool finishes (Esc to abort tool now)."
+                            "Interjection queued ({queued_total}). Will send as soon as current step finishes (Esc to cancel now)."
                         ),
                         false,
                     );
                     return;
-                }
-
-                if let Some(h) = self.active_task.take() {
-                    h.abort();
-                    let text = std::mem::take(&mut self.stream_buffer);
-                    if !text.trim().is_empty() {
-                        self.messages.push(ChatMessage::new(
-                            "assistant",
-                            format!("{text}\n\n*[Interrupted by user]*"),
-                        ));
-                    }
                 }
 
                 let skipped = self.close_unresolved_tool_calls(
@@ -844,6 +843,8 @@ impl CoreEngine {
                 if !tool_calls.is_empty() {
                     self.pending_tools = VecDeque::from(tool_calls.clone());
                     self.process_pending_tools(internal_tx).await;
+                } else {
+                    self.flush_queued_interjections(internal_tx).await;
                 }
             }
             EngineEvent::StreamError(ref err) => {
@@ -852,6 +853,7 @@ impl CoreEngine {
                 self.stream_buffer.clear();
                 self.notify(format!("API Error: {err}"), true);
                 let _ = self.tx.send(ev);
+                self.flush_queued_interjections(internal_tx).await;
             }
             EngineEvent::ToolCompleted { output, truncated } => {
                 self.active_task = None;

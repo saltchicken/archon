@@ -351,7 +351,7 @@ impl TuiApp {
                 self.stream_dirty = true;
                 self.status_bar = (
                     format!(
-                        "Streaming response from {}... (⏎ to interject, Esc to cancel)",
+                        "Streaming response from {}... (⏎ to queue interjection, Esc to cancel)",
                         self.model
                     ),
                     false,
