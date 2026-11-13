@@ -1,8 +1,9 @@
 use super::{
     BlockingTool, ToolContext, atomic_write_file, build_globset,
     edit_file::{EditHunk, apply_hunks_to_str},
-    has_git_dir_component,
+    ensure_parent_dir, has_git_dir_component,
     read_file::read_file_contents,
+    render_directory_listing,
     search::{SearchExecutionParams, search_candidate_files},
 };
 use crate::core::config::expand_tilde;
@@ -266,115 +267,34 @@ fn resolve_new_config_path(raw: &str) -> Result<(PathBuf, PathBuf, String)> {
     Ok((root, target, display))
 }
 
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn list_config_dir(
-    dir: &Path,
-    root: &Path,
-    blocked: &GlobSet,
-    current_depth: usize,
-    max_depth: usize,
-    out: &mut String,
-    max_output_size: usize,
-    count: &mut usize,
-) -> Result<()> {
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory {}", dir.display()))?
-        .flatten()
-        .collect();
-
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().is_ok_and(|t| t.is_dir());
-        let b_dir = b.file_type().is_ok_and(|t| t.is_dir());
-        b_dir
-            .cmp(&a_dir)
-            .then_with(|| a.file_name().cmp(&b.file_name()))
-    });
-
-    let indent = "  ".repeat(current_depth);
-    for entry in entries {
-        if out.len() > max_output_size {
-            break;
-        }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
-            continue;
-        }
-        let Some(rel) = diff_paths(&path, root) else {
-            continue;
-        };
-        if check_not_blocked(&rel, blocked).is_err() {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        *count += 1;
-
-        if meta.is_dir() {
-            let child_count = fs::read_dir(&path).map_or(0, Iterator::count);
-            let _ = writeln!(out, "{indent}{name}/ ({child_count} items)");
-            if current_depth < max_depth
-                && let Ok(canon) = dunce::canonicalize(&path)
-                && canon.starts_with(root)
-            {
-                list_config_dir(
-                    &canon,
-                    root,
-                    blocked,
-                    current_depth + 1,
-                    max_depth,
-                    out,
-                    max_output_size,
-                    count,
-                )?;
-            }
-        } else {
-            let _ = writeln!(out, "{indent}{name} ({})", format_size(meta.len()));
-        }
-    }
-    Ok(())
-}
-
 fn validate_written_file(path: &Path) -> Option<String> {
     if path.extension().and_then(|e| e.to_str()) == Some("fish") {
-        match Command::new("fish").arg("-n").arg(path).output() {
-            Ok(out) if out.status.success() => Some("[Syntax check: `fish -n` passed]".into()),
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                Some(format!(
-                    "[WARNING: `fish -n` reported syntax errors:\n{}]",
-                    stderr.trim()
-                ))
-            }
-            Err(_) => None,
-        }
-    } else if path.components().any(|c| c.as_os_str() == "hypr")
+        let out = Command::new("fish").arg("-n").arg(path).output().ok()?;
+        return Some(if out.status.success() {
+            "[Syntax check: `fish -n` passed]".into()
+        } else {
+            format!(
+                "[WARNING: `fish -n` reported syntax errors:\n{}]",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        });
+    }
+    if path.components().any(|c| c.as_os_str() == "hypr")
         && path.extension().and_then(|e| e.to_str()) == Some("conf")
     {
-        match Command::new("hyprctl").arg("configerrors").output() {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let trimmed = stdout.trim();
-                if trimmed.is_empty() {
-                    Some("[Hyprland check: no config errors]".into())
-                } else {
-                    Some(format!("[Hyprland `hyprctl configerrors`: {trimmed}]"))
-                }
-            }
-            _ => None,
-        }
-    } else {
-        None
+        let out = Command::new("hyprctl")
+            .arg("configerrors")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let trimmed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return Some(if trimmed.is_empty() {
+            "[Hyprland check: no config errors]".into()
+        } else {
+            format!("[Hyprland `hyprctl configerrors`: {trimmed}]")
+        });
     }
+    None
 }
 
 fn run_validate(raw_path: &str) -> Result<String> {
@@ -484,32 +404,19 @@ impl BlockingTool for Tool {
         match args.action {
             DotfilesAction::List => {
                 let (root, target, display) = resolve_existing_config_path(&args.path, true)?;
-                if target.is_file() {
-                    return Ok(format!(
-                        "{display} (file, {})",
-                        format_size(target.metadata()?.len())
-                    ));
-                }
                 let blocked = blocked_globset(&[])?;
                 let max_depth = args.max_depth.unwrap_or(2).clamp(1, 5);
-                let mut out =
-                    format!("Directory listing for '{display}' (max_depth: {max_depth}):\n");
-                let mut count = 0usize;
-                list_config_dir(
+                render_directory_listing(
                     &target,
                     &root,
-                    &blocked,
-                    1,
+                    &display,
                     max_depth,
-                    &mut out,
                     ctx.max_output_size,
-                    &mut count,
-                )?;
-                if count == 0 {
-                    Ok(format!("Directory '{display}' is empty."))
-                } else {
-                    Ok(out.trim_end().to_string())
-                }
+                    |path| {
+                        diff_paths(path, &root)
+                            .is_some_and(|rel| check_not_blocked(&rel, &blocked).is_ok())
+                    },
+                )
             }
             DotfilesAction::Read => {
                 let (_, target_path, display) = resolve_existing_config_path(&args.path, false)?;
@@ -601,13 +508,7 @@ impl BlockingTool for Tool {
             }
             DotfilesAction::Create => {
                 let (root, target_path, display) = resolve_new_config_path(&args.path)?;
-                if let Some(parent) = target_path.parent() {
-                    fs::create_dir_all(parent).context("Error creating parent directories")?;
-                    let canon_parent = dunce::canonicalize(parent)?;
-                    if !canon_parent.starts_with(&root) {
-                        bail!("Security violation: created parent directory escapes ~/.config");
-                    }
-                }
+                ensure_parent_dir(&target_path, &root, "created parent directory")?;
                 atomic_write_file(&target_path, &args.content)
                     .context("Error writing new config file")?;
                 let mut msg = format!("Successfully created {display}");

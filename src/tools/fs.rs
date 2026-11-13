@@ -1,10 +1,12 @@
-use super::{BlockingTool, ToolContext, has_git_dir_component};
+use super::{
+    BlockingTool, ToolContext, ensure_parent_dir, format_size, has_git_dir_component,
+    render_directory_listing,
+};
 use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
-    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
@@ -50,16 +52,6 @@ fn ensure_not_git_metadata(path: &Path, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes} B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
 fn validate_transfer_paths(
     args: &FsArgs,
     ctx: &ToolContext,
@@ -77,14 +69,6 @@ fn validate_transfer_paths(
         bail!("Cannot {verb} a directory into a subdirectory of itself");
     }
     Ok((src, dst))
-}
-
-fn ensure_dst_parent(dst: &Path, ctx: &ToolContext) -> Result<()> {
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).context("Error creating destination parent directories")?;
-        ctx.ensure_within_workspace(parent, "destination parent")?;
-    }
-    Ok(())
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path, ctx: &ToolContext) -> Result<usize> {
@@ -201,62 +185,6 @@ pub fn preview_action(
     }
 }
 
-fn list_dir_recursive(
-    dir: &Path,
-    base_root: &Path,
-    current_depth: usize,
-    max_depth: usize,
-    out: &mut String,
-    max_output_size: usize,
-    count: &mut usize,
-) -> Result<()> {
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory {}", dir.display()))?
-        .flatten()
-        .collect();
-
-    entries.sort_by(|a, b| {
-        let a_dir = a.file_type().is_ok_and(|t| t.is_dir());
-        let b_dir = b.file_type().is_ok_and(|t| t.is_dir());
-        b_dir
-            .cmp(&a_dir)
-            .then_with(|| a.file_name().cmp(&b.file_name()))
-    });
-
-    let indent = "  ".repeat(current_depth);
-    for entry in entries {
-        if out.len() > max_output_size {
-            break;
-        }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == ".git" {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        *count += 1;
-
-        if meta.is_dir() {
-            let child_count = fs::read_dir(&path).map_or(0, Iterator::count);
-            let _ = writeln!(out, "{indent}{name}/ ({child_count} items)");
-            if current_depth < max_depth && path.starts_with(base_root) {
-                list_dir_recursive(
-                    &path,
-                    base_root,
-                    current_depth + 1,
-                    max_depth,
-                    out,
-                    max_output_size,
-                    count,
-                )?;
-            }
-        } else {
-            let _ = writeln!(out, "{indent}{name} ({})", format_size(meta.len()));
-        }
-    }
-    Ok(())
-}
-
 impl BlockingTool for Tool {
     const NAME: &'static str = "fs";
     const DESCRIPTION: &'static str = "Performs workspace filesystem operations: list directory contents, rename/move paths, copy files/directories, or remove files/directories.";
@@ -269,48 +197,29 @@ impl BlockingTool for Tool {
         match args.action {
             FsAction::List => {
                 let target = ctx.resolve_existing_under_root(src_str, "path escapes workspace")?;
-
                 let rel_display = diff_paths(&target, &ctx.root)
                     .filter(|p| !p.as_os_str().is_empty())
                     .map_or_else(|| ".".into(), |p| p.to_string_lossy().into_owned());
-
-                if target.is_file() {
-                    return Ok(format!(
-                        "{rel_display} (file, {})",
-                        format_size(target.metadata()?.len())
-                    ));
-                }
-
                 let max_depth = args.max_depth.unwrap_or(1).clamp(1, 5);
-                let mut out =
-                    format!("Directory listing for '{rel_display}' (max_depth: {max_depth}):\n");
-                let mut count = 0usize;
-                list_dir_recursive(
+                render_directory_listing(
                     &target,
                     &ctx.root,
-                    1,
+                    &rel_display,
                     max_depth,
-                    &mut out,
                     ctx.max_output_size,
-                    &mut count,
-                )?;
-
-                if count == 0 {
-                    Ok(format!("Directory '{rel_display}' is empty."))
-                } else {
-                    Ok(out.trim_end().to_string())
-                }
+                    |_| true,
+                )
             }
             FsAction::Rename => {
                 let (src, dst) = validate_transfer_paths(&args, ctx, "move")?;
-                ensure_dst_parent(&dst, ctx)?;
+                ensure_parent_dir(&dst, &ctx.root, "destination parent")?;
                 fs::rename(&src, &dst)
                     .with_context(|| format!("Failed to rename '{src_str}' to '{dst_str}'"))?;
                 Ok(format!("Successfully moved '{src_str}' to '{dst_str}'"))
             }
             FsAction::Copy => {
                 let (src, dst) = validate_transfer_paths(&args, ctx, "copy")?;
-                ensure_dst_parent(&dst, ctx)?;
+                ensure_parent_dir(&dst, &ctx.root, "destination parent")?;
                 if src.is_dir() {
                     let count = copy_dir_recursive(&src, &dst, ctx)?;
                     Ok(format!(

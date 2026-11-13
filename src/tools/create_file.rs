@@ -1,8 +1,7 @@
-use super::{BlockingTool, ToolContext, atomic_write_file};
+use super::{BlockingTool, ToolContext, atomic_write_file, ensure_parent_dir};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::fs;
 
 pub struct Tool;
 
@@ -19,12 +18,7 @@ impl BlockingTool for Tool {
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let target_path = ctx.resolve_new_path(&args.file_path)?;
-
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent).context("Error creating parent directories")?;
-            ctx.ensure_within_workspace(parent, "created path")?;
-        }
-
+        ensure_parent_dir(&target_path, &ctx.root, "created path")?;
         atomic_write_file(&target_path, &args.content).context("Error writing new file")?;
         Ok(format!("Successfully created {}", args.file_path.trim()))
     }

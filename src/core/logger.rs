@@ -32,7 +32,6 @@ impl BoundedFileWriter {
         if let Ok(file) = OpenOptions::new()
             .create(true)
             .read(true)
-            .write(true)
             .append(true)
             .open(&self.path)
         {
@@ -57,17 +56,13 @@ impl BoundedFileWriter {
             return Ok(());
         }
 
-        let seek_pos = len - RETAIN_LOG_BYTES;
-        file.seek(SeekFrom::Start(seek_pos))?;
+        file.seek(SeekFrom::Start(len - RETAIN_LOG_BYTES))?;
 
         let mut tail = Vec::with_capacity(RETAIN_LOG_BYTES as usize);
         file.read_to_end(&mut tail)?;
 
         // Align to the first newline so we don't leave a partial log line at the top
-        let start_offset = tail
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(0, |pos| pos + 1);
+        let start_offset = tail.iter().position(|&b| b == b'\n').map_or(0, |p| p + 1);
         let kept = &tail[start_offset..];
 
         file.set_len(0)?;

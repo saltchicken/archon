@@ -5,12 +5,7 @@ use chrono::{DateTime, Local, TimeZone};
 use regex::RegexBuilder;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    fmt::Write as _,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fmt::Write as _, fs, path::Path};
 
 pub struct Tool;
 
@@ -368,43 +363,42 @@ pub(super) fn parse_fish_history_str(content: &str) -> Vec<FishHistoryEntry> {
     let mut current_cmd: Option<String> = None;
     let mut current_when: Option<i64> = None;
 
-    for line in content.lines() {
-        if let Some(cmd_raw) = line.strip_prefix("- cmd: ") {
-            if let Some(prev_cmd) = current_cmd.take()
-                && !is_sensitive_command(&prev_cmd)
+    let flush =
+        |entries: &mut Vec<FishHistoryEntry>, cmd: &mut Option<String>, when: &mut Option<i64>| {
+            if let Some(c) = cmd.take()
+                && !is_sensitive_command(&c)
             {
                 entries.push(FishHistoryEntry {
-                    cmd: prev_cmd,
-                    when: current_when.take(),
+                    cmd: c,
+                    when: when.take(),
                 });
             }
+        };
+
+    for line in content.lines() {
+        if let Some(cmd_raw) = line.strip_prefix("- cmd: ") {
+            flush(&mut entries, &mut current_cmd, &mut current_when);
             current_cmd = Some(cmd_raw.replace("\\n", "\n").replace("\\\\", "\\"));
             current_when = None;
         } else if let Some(when_raw) = line.strip_prefix("  when: ") {
             current_when = when_raw.trim().parse::<i64>().ok();
         }
     }
-
-    if let Some(last_cmd) = current_cmd
-        && !is_sensitive_command(&last_cmd)
-    {
-        entries.push(FishHistoryEntry {
-            cmd: last_cmd,
-            when: current_when,
-        });
-    }
-
+    flush(&mut entries, &mut current_cmd, &mut current_when);
     entries
 }
 
-fn fish_history_path() -> PathBuf {
-    if let Some(data_dir) = dirs::data_local_dir() {
-        let candidate = data_dir.join("fish/fish_history");
-        if candidate.exists() {
-            return candidate;
-        }
+fn load_fish_history() -> Result<Vec<FishHistoryEntry>> {
+    let path = dirs::data_local_dir()
+        .map(|d| d.join("fish/fish_history"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| expand_tilde("~/.local/share/fish/fish_history"));
+    if !path.exists() {
+        bail!("Fish history file not found at {}", path.display());
     }
-    expand_tilde("~/.local/share/fish/fish_history")
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(parse_fish_history_str(&content))
 }
 
 async fn run_fish(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
@@ -415,25 +409,17 @@ async fn run_fish(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
 
     match query {
         "recent" => {
-            let path = fish_history_path();
-            if !path.exists() {
-                bail!("Fish history file not found at {}", path.display());
-            }
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let entries = parse_fish_history_str(&content);
+            let entries = load_fish_history()?;
             let limit = args.limit.unwrap_or(50).clamp(1, 300);
 
-            let matcher = if !args.target.trim().is_empty() {
-                Some(
+            let matcher = (!args.target.trim().is_empty())
+                .then(|| {
                     RegexBuilder::new(args.target.trim())
                         .case_insensitive(true)
                         .build()
-                        .with_context(|| format!("Invalid regex in target: '{}'", args.target))?,
-                )
-            } else {
-                None
-            };
+                        .with_context(|| format!("Invalid regex in target: '{}'", args.target))
+                })
+                .transpose()?;
 
             let filtered: Vec<&FishHistoryEntry> = entries
                 .iter()
@@ -463,13 +449,7 @@ async fn run_fish(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
             Ok(out.trim_end().to_string())
         }
         "frequent" => {
-            let path = fish_history_path();
-            if !path.exists() {
-                bail!("Fish history file not found at {}", path.display());
-            }
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let entries = parse_fish_history_str(&content);
+            let entries = load_fish_history()?;
             let limit = args.limit.unwrap_or(30).clamp(5, 100);
 
             let mut full_counts: HashMap<&str, usize> = HashMap::new();
@@ -691,32 +671,24 @@ async fn run_packages(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
 
     match query {
         "stats" => {
-            let total = ctx
-                .run_command("pacman", ["-Qq"], "")
-                .await
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            let explicit = ctx
-                .run_command("pacman", ["-Qeq"], "")
-                .await
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            let foreign = ctx
-                .run_command("pacman", ["-Qmq"], "")
-                .await
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            let orphans = ctx
-                .run_command("pacman", ["-Qdtq"], "")
-                .await
-                .map(|s| {
-                    if s.starts_with('[') || s.trim().is_empty() {
-                        0
-                    } else {
-                        s.lines().count()
-                    }
-                })
-                .unwrap_or(0);
+            let count_pkgs = |flag: &'static str| async move {
+                ctx.run_command("pacman", [flag], "")
+                    .await
+                    .map(|s| {
+                        if s.starts_with('[') || s.trim().is_empty() {
+                            0
+                        } else {
+                            s.lines().count()
+                        }
+                    })
+                    .unwrap_or(0)
+            };
+            let (total, explicit, foreign, orphans) = tokio::join!(
+                count_pkgs("-Qq"),
+                count_pkgs("-Qeq"),
+                count_pkgs("-Qmq"),
+                count_pkgs("-Qdtq"),
+            );
 
             let (pkg_files, pkg_bytes) = dir_size_bytes(Path::new("/var/cache/pacman/pkg"));
             let paru_cache = dirs::cache_dir()
@@ -735,41 +707,27 @@ async fn run_packages(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
                 pkg_bytes as f64 / (1024.0 * 1024.0)
             ))
         }
-        "orphans" => {
-            ctx.run_command("pacman", ["-Qdt"], "No orphaned packages found.")
-                .await
+        "orphans" | "foreign" | "explicit" => {
+            let (flag, empty_msg) = match query {
+                "orphans" => ("-Qdt", "No orphaned packages found."),
+                "foreign" => ("-Qm", "No foreign/AUR packages found."),
+                _ => ("-Qe", "No explicit packages found."),
+            };
+            ctx.run_command("pacman", [flag], empty_msg).await
         }
-        "foreign" => {
-            ctx.run_command("pacman", ["-Qm"], "No foreign/AUR packages found.")
-                .await
-        }
-        "explicit" => {
-            ctx.run_command("pacman", ["-Qe"], "No explicit packages found.")
-                .await
-        }
-        "search" => {
-            let pattern = validate_safe_arg(&args.target, "target (search query)")?;
-            ctx.run_command(
-                "pacman",
-                ["-Qs", pattern],
-                "No matching installed packages.",
-            )
-            .await
-        }
-        "info" => {
-            let pkg = validate_safe_arg(&args.target, "target (package name)")?;
-            ctx.run_command("pacman", ["-Qi", pkg], "Package not found.")
-                .await
-        }
-        "files" => {
-            let pkg = validate_safe_arg(&args.target, "target (package name)")?;
-            ctx.run_command("pacman", ["-Ql", pkg], "No files found.")
-                .await
-        }
-        "owns" => {
-            let path = validate_safe_arg(&args.target, "target (file path)")?;
-            ctx.run_command("pacman", ["-Qo", path], "No owner found.")
-                .await
+        "search" | "info" | "files" | "owns" => {
+            let (flag, label, empty_msg) = match query {
+                "search" => (
+                    "-Qs",
+                    "target (search query)",
+                    "No matching installed packages.",
+                ),
+                "info" => ("-Qi", "target (package name)", "Package not found."),
+                "files" => ("-Ql", "target (package name)", "No files found."),
+                _ => ("-Qo", "target (file path)", "No owner found."),
+            };
+            let target = validate_safe_arg(&args.target, label)?;
+            ctx.run_command("pacman", [flag, target], empty_msg).await
         }
         "modified" => {
             let out = ctx.run_command("pacman", ["-Qii"], "").await?;

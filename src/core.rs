@@ -174,19 +174,19 @@ impl CoreEngine {
         })
     }
 
-    fn abort_active_task(&mut self) -> bool {
+    fn finish_active_task(&mut self) -> (bool, bool) {
         self.internal_rx = None;
-        if let Some(h) = self.active_task.take() {
-            h.abort();
-            true
-        } else {
-            false
-        }
+        let was_tool = std::mem::replace(&mut self.executing_tool, false);
+        let had_task = self.active_task.take().inspect(|h| h.abort()).is_some();
+        (had_task, was_tool)
+    }
+
+    fn is_turn_active(&self) -> bool {
+        self.active_task.is_some() || self.executing_tool
     }
 
     fn abort_active_state(&mut self) {
-        self.abort_active_task();
-        self.executing_tool = false;
+        self.finish_active_task();
         self.queued_interjections.clear();
         self.pending_tools.clear();
         self.sent_images.clear();
@@ -449,15 +449,13 @@ impl CoreEngine {
                 } => match maybe_ev {
                     Some(ev) => self.handle_internal_event(ev).await,
                     None => {
-                        self.active_task = None;
-                        self.internal_rx = None;
-                        self.executing_tool = false;
+                        self.finish_active_task();
                     }
                 },
             }
         }
 
-        self.abort_active_task();
+        self.finish_active_task();
 
         info!("Shutting down CoreEngine, awaiting pending session save...");
         self.flush_save_task().await;
@@ -495,7 +493,7 @@ impl CoreEngine {
 
                 // If a model stream or a tool execution is currently in flight, queue the
                 // interjection so the active process finishes cleanly before reading it.
-                if self.active_task.is_some() || self.executing_tool {
+                if self.is_turn_active() {
                     info!(
                         "Queuing user interjection while process is active (executing_tool: {})",
                         self.executing_tool
@@ -530,10 +528,7 @@ impl CoreEngine {
                 self.spawn_model_turn(&turn).await;
             }
             EngineCommand::CancelStream => {
-                let was_tool = self.executing_tool;
-                let had_task = self.abort_active_task();
-                self.executing_tool = false;
-
+                let (had_task, was_tool) = self.finish_active_task();
                 if !had_task
                     && self.pending_tools.is_empty()
                     && self.queued_interjections.is_empty()
@@ -542,35 +537,18 @@ impl CoreEngine {
                 }
 
                 info!("User interrupted active turn (was_tool: {was_tool})");
-                let mut changed = false;
-
                 let text = std::mem::take(&mut self.stream_buffer);
-                if !text.trim().is_empty() {
+                let had_text = !text.trim().is_empty();
+                if had_text {
                     self.messages.push(ChatMessage::new(
                         "assistant",
                         format!("{text}\n\n*[Generation cancelled]*"),
                     ));
-                    changed = true;
                 }
 
                 let closed = self.close_unresolved_tool_calls("Cancelled by user.");
-                if closed > 0 {
-                    changed = true;
-                }
 
-                let had_interjections = !self.queued_interjections.is_empty();
-                let mut extra_images = Vec::new();
-                for item in self.queued_interjections.drain(..) {
-                    self.turn = item.turn;
-                    self.messages.push(item.msg);
-                    extra_images.extend(item.new_images);
-                    changed = true;
-                }
-
-                if had_interjections {
-                    self.save_and_emit_chat(extra_images).await;
-                    let turn = self.turn.clone();
-                    self.spawn_model_turn(&turn).await;
+                if self.flush_queued_interjections().await {
                     self.notify(
                         "Interrupted active step — sending queued interjection...",
                         false,
@@ -578,8 +556,8 @@ impl CoreEngine {
                     return;
                 }
 
-                if changed {
-                    self.save_session_bg(extra_images).await;
+                if had_text || closed > 0 {
+                    self.save_session_bg(Vec::new()).await;
                 }
                 self.emit_chat();
                 self.notify(
@@ -745,8 +723,7 @@ impl CoreEngine {
                 num_ctx,
                 max_tool_output_size,
             } => {
-                if self.active_task.is_some()
-                    || self.executing_tool
+                if self.is_turn_active()
                     || !self.pending_tools.is_empty()
                     || !self.queued_interjections.is_empty()
                 {
@@ -816,8 +793,7 @@ impl CoreEngine {
                 ref tool_calls,
                 ref thoughts,
             } => {
-                self.active_task = None;
-                self.internal_rx = None;
+                self.finish_active_task();
                 let final_text = std::mem::take(&mut self.stream_buffer);
                 let total_used = prompt_tokens + eval_tokens;
                 let ctx_limit = self.turn.num_ctx as u64;
@@ -869,18 +845,14 @@ impl CoreEngine {
                 }
             }
             EngineEvent::StreamError(ref err) => {
-                self.active_task = None;
-                self.internal_rx = None;
-                self.executing_tool = false;
+                self.finish_active_task();
                 self.stream_buffer.clear();
                 self.notify(format!("API Error: {err}"), true);
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
             }
             EngineEvent::ToolCompleted { output, truncated } => {
-                self.active_task = None;
-                self.internal_rx = None;
-                self.executing_tool = false;
+                self.finish_active_task();
                 self.messages.push(ChatMessage {
                     truncated,
                     ..ChatMessage::new("tool", output)

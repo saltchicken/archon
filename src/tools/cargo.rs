@@ -58,20 +58,6 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
     Ok(Some(trimmed))
 }
 
-fn push_target_filters(
-    cmd_args: &mut Vec<String>,
-    args: &CargoArgs,
-    allow_bin: bool,
-) -> Result<()> {
-    if let Some(pkg) = validate_identifier(&args.package, "package")? {
-        cmd_args.extend(["--package".into(), pkg.into()]);
-    }
-    if allow_bin && let Some(bin) = validate_identifier(&args.bin, "bin")? {
-        cmd_args.extend(["--bin".into(), bin.into()]);
-    }
-    Ok(())
-}
-
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
     const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata) within the workspace.";
@@ -126,7 +112,12 @@ impl AsyncTool for Tool {
 
         let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
         if allow_targets {
-            push_target_filters(&mut cmd_args, &args, allow_bin)?;
+            if let Some(pkg) = validate_identifier(&args.package, "package")? {
+                cmd_args.extend(["--package".into(), pkg.into()]);
+            }
+            if allow_bin && let Some(bin) = validate_identifier(&args.bin, "bin")? {
+                cmd_args.extend(["--bin".into(), bin.into()]);
+            }
         }
 
         if matches!(args.action, CargoAction::Test) {

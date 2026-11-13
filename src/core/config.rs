@@ -242,6 +242,10 @@ impl Default for Config {
 }
 
 impl Config {
+    fn find_model(&self, model: &str) -> Option<&ModelPreset> {
+        self.models.iter().find(|m| m.name == model)
+    }
+
     pub fn startup_model(&self) -> String {
         let def = self.app.default_model.trim();
         if !def.is_empty() {
@@ -253,17 +257,13 @@ impl Config {
     }
 
     pub fn context_for_model(&self, model: &str) -> u32 {
-        self.models
-            .iter()
-            .find(|m| m.name == model)
+        self.find_model(model)
             .map_or_else(|| Provider::from_model(model).fallback_ctx(), |m| m.context)
             .max(512)
     }
 
     pub fn max_tool_output_for_model(&self, model: &str) -> usize {
-        self.models
-            .iter()
-            .find(|m| m.name == model)
+        self.find_model(model)
             .map_or_else(
                 || Provider::from_model(model).fallback_max_tool_output(),
                 |m| m.max_tool_output_size,

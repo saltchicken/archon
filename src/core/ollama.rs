@@ -119,11 +119,13 @@ pub async fn stream_chat(
     let mut done_reason = None;
 
     while let Some(line_res) = lines.next().await {
-        let Ok(line) = line_res else {
-            let e = line_res.unwrap_err();
-            error!("Stream reading error: {e}");
-            let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
-            return;
+        let line = match line_res {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Stream reading error: {e}");
+                let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
+                return;
+            }
         };
 
         if line.trim().is_empty() {

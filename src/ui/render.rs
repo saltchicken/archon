@@ -357,6 +357,12 @@ fn is_message_header_line(line: &Line<'_>) -> bool {
         .is_some_and(|s| s.content.starts_with("━━ "))
 }
 
+fn image_badge(m: &ChatMessage) -> String {
+    m.images
+        .as_ref()
+        .map_or_else(String::new, |v| format!(" [+{} img]", v.len()))
+}
+
 impl TuiApp {
     fn render_message_block(
         &mut self,
@@ -643,13 +649,7 @@ impl TuiApp {
 
             let m = &self.messages[i];
             let (header_label, color) = match m.role.as_str() {
-                "user" => {
-                    let badge = m
-                        .images
-                        .as_ref()
-                        .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
-                    (format!("USER{badge}"), Color::Cyan)
-                }
+                "user" => (format!("USER{}", image_badge(m)), Color::Cyan),
                 "assistant" => ("ARCHON".to_string(), Color::Green),
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
@@ -712,11 +712,7 @@ impl TuiApp {
             let block_idx = self.messages.len() + 1 + q_idx;
             self.msg_states[block_idx].unfolded = true;
             let qm = &self.queued_messages[q_idx];
-            let badge = qm
-                .images
-                .as_ref()
-                .map_or_else(String::new, |v| format!(" [+{} img]", v.len()));
-            let header = format!("USER{badge} (QUEUED — Esc to send now)");
+            let header = format!("USER{} (QUEUED — Esc to send now)", image_badge(qm));
             let styled_queued = style_lines(&wrap_text(&sanitize_line(&qm.content), &options));
             self.render_message_block(
                 block_idx,

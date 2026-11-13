@@ -160,17 +160,13 @@ impl TuiApp {
             KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
             KeyCode::Enter => {
                 if let Some(s) = self.sessions.get(self.session_idx) {
-                    let _ = self
-                        .cmd_tx
-                        .send(EngineCommand::LoadSession(s.id.clone()));
+                    let _ = self.cmd_tx.send(EngineCommand::LoadSession(s.id.clone()));
                     self.modal = ActiveModal::None;
                 }
             }
             KeyCode::Char('d') | KeyCode::Delete => {
                 if let Some(s) = self.sessions.get(self.session_idx) {
-                    let _ = self
-                        .cmd_tx
-                        .send(EngineCommand::DeleteSession(s.id.clone()));
+                    let _ = self.cmd_tx.send(EngineCommand::DeleteSession(s.id.clone()));
                 }
             }
             _ => {}

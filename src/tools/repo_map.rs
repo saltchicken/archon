@@ -487,15 +487,19 @@ fn collect_ast_symbols(
     );
 }
 
-fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String, usize>) {
-    if matches!(
+fn is_identifier_node(node: Node<'_>) -> bool {
+    matches!(
         node.kind(),
         "identifier"
             | "type_identifier"
             | "field_identifier"
             | "property_identifier"
             | "shorthand_property_identifier"
-    ) {
+    )
+}
+
+fn collect_identifiers(node: Node<'_>, source: &str, counts: &mut HashMap<String, usize>) {
+    if is_identifier_node(node) {
         let ident = source[node.byte_range()].trim();
         if !is_noise_identifier(ident) {
             *counts.entry(ident.to_string()).or_insert(0) += 1;
@@ -793,14 +797,7 @@ fn walk_references(
         return;
     }
 
-    if matches!(
-        node.kind(),
-        "identifier"
-            | "type_identifier"
-            | "field_identifier"
-            | "property_identifier"
-            | "shorthand_property_identifier"
-    ) {
+    if is_identifier_node(node) {
         let ident = source[node.byte_range()].trim();
         if ident == target_leaf {
             let row = node.start_position().row;

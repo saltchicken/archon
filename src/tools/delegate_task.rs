@@ -1,11 +1,5 @@
 use super::{AsyncTool, ToolCall, ToolContext};
-use crate::core::{
-    EngineEvent,
-    config::Config,
-    ollama,
-    provider::Provider,
-    session::ChatMessage,
-};
+use crate::core::{EngineEvent, config::Config, ollama, provider::Provider, session::ChatMessage};
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -145,9 +139,7 @@ impl AsyncTool for Tool {
 
         let model = resolve_sub_agent_model(&args.model, &ctx.config);
         if Provider::from_model(&model) != Provider::Ollama {
-            bail!(
-                "Sub-agent model '{model}' must be a local Ollama model (not a cloud provider)."
-            );
+            bail!("Sub-agent model '{model}' must be a local Ollama model (not a cloud provider).");
         }
 
         ollama::run_preflight(&model, &ctx.config).await?;
@@ -166,12 +158,7 @@ impl AsyncTool for Tool {
         let sub_tools = filter_sub_agent_tools(&args.tools, &ctx.config);
         let allowed_tool_names: Vec<String> = sub_tools
             .iter()
-            .filter_map(|s| {
-                s.get("function")?
-                    .get("name")?
-                    .as_str()
-                    .map(String::from)
-            })
+            .filter_map(|s| s.get("function")?.get("name")?.as_str().map(String::from))
             .collect();
 
         info!(
@@ -219,16 +206,22 @@ impl AsyncTool for Tool {
                     || !allowed_tool_names.contains(&call.function.name)
                 {
                     warn!("Sub-agent attempted disallowed tool call: {sig}");
-                    execution_log.push(format!("[Step {step}] {sig} -> [Blocked: tool not allowed]"));
+                    execution_log.push(format!(
+                        "[Step {step}] {sig} -> [Blocked: tool not allowed]"
+                    ));
                     messages.push(ChatMessage::new(
                         "tool",
-                        format!("Error: Tool '{}' is not permitted in sub-agent.", call.function.name),
+                        format!(
+                            "Error: Tool '{}' is not permitted in sub-agent.",
+                            call.function.name
+                        ),
                     ));
                     continue;
                 }
 
                 info!("Sub-agent ({model}) step {step}/{max_steps} executing: {sig}");
-                let (output, truncated) = Box::pin(super::execute(&call, &ctx.config, max_tool_out)).await;
+                let (output, truncated) =
+                    Box::pin(super::execute(&call, &ctx.config, max_tool_out)).await;
                 let first_line = output.lines().next().unwrap_or("(no output)").trim();
                 execution_log.push(format!(
                     "[Step {step}] {sig} -> {}{}",

@@ -133,11 +133,16 @@ fn unwrap_ddg_url(raw_href: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
-fn parse_ddg_html(html: &str, max_results: usize) -> Vec<SearchResult> {
+fn parse_ddg_results(
+    html: &str,
+    max_results: usize,
+    link_re: &Regex,
+    snippet_re: &Regex,
+) -> Vec<SearchResult> {
     let mut results = Vec::new();
     let mut seen_urls = HashSet::new();
 
-    let links: Vec<(usize, String, String)> = DDG_HTML_LINK_RE
+    let links: Vec<(usize, String, String)> = link_re
         .captures_iter(html)
         .filter_map(|cap| {
             let m = cap.get(0)?;
@@ -158,51 +163,8 @@ fn parse_ddg_html(html: &str, max_results: usize) -> Vec<SearchResult> {
         }
 
         let next_link_pos = links.get(idx + 1).map_or(html.len(), |(pos, _, _)| *pos);
-        let search_window = &html[*link_end..next_link_pos];
-        let snippet = DDG_HTML_SNIPPET_RE
-            .captures(search_window)
-            .and_then(|c| c.get(1))
-            .map(|m| clean_inline_html(m.as_str()))
-            .unwrap_or_default();
-
-        results.push(SearchResult {
-            title: title.clone(),
-            url: url.clone(),
-            snippet,
-        });
-    }
-
-    results
-}
-
-fn parse_ddg_lite(html: &str, max_results: usize) -> Vec<SearchResult> {
-    let mut results = Vec::new();
-    let mut seen_urls = HashSet::new();
-
-    let links: Vec<(usize, String, String)> = DDG_LITE_LINK_RE
-        .captures_iter(html)
-        .filter_map(|cap| {
-            let m = cap.get(0)?;
-            let raw_url = cap.get(1).or_else(|| cap.get(3))?.as_str();
-            let raw_title = cap.get(2).or_else(|| cap.get(4))?.as_str();
-            let url = unwrap_ddg_url(raw_url)?;
-            let title = clean_inline_html(raw_title);
-            (!title.is_empty()).then_some((m.end(), url, title))
-        })
-        .collect();
-
-    for (idx, (link_end, url, title)) in links.iter().enumerate() {
-        if results.len() >= max_results {
-            break;
-        }
-        if !seen_urls.insert(url.clone()) {
-            continue;
-        }
-
-        let next_link_pos = links.get(idx + 1).map_or(html.len(), |(pos, _, _)| *pos);
-        let search_window = &html[*link_end..next_link_pos];
-        let snippet = DDG_LITE_SNIPPET_RE
-            .captures(search_window)
+        let snippet = snippet_re
+            .captures(&html[*link_end..next_link_pos])
             .and_then(|c| c.get(1))
             .map(|m| clean_inline_html(m.as_str()))
             .unwrap_or_default();
@@ -312,35 +274,29 @@ impl AsyncTool for Tool {
             .unwrap_or("wt-wt");
 
         let mut last_err = None;
+        let endpoints = [
+            (DDG_HTML_URL, &*DDG_HTML_LINK_RE, &*DDG_HTML_SNIPPET_RE),
+            (DDG_LITE_URL, &*DDG_LITE_LINK_RE, &*DDG_LITE_SNIPPET_RE),
+        ];
 
-        match fetch_search_endpoint(DDG_HTML_URL, query, region, args.time_range).await {
-            Ok(html) => {
-                let results = parse_ddg_html(&html, max_results);
-                if !results.is_empty() {
-                    return Ok(format_results(query, &results, ctx.max_output_size));
+        for (endpoint, link_re, snippet_re) in endpoints {
+            match fetch_search_endpoint(endpoint, query, region, args.time_range).await {
+                Ok(body) => {
+                    let results = parse_ddg_results(&body, max_results, link_re, snippet_re);
+                    if !results.is_empty() {
+                        return Ok(format_results(query, &results, ctx.max_output_size));
+                    }
+                    last_err = None;
                 }
-            }
-            Err(e) => last_err = Some(e),
-        }
-
-        match fetch_search_endpoint(DDG_LITE_URL, query, region, args.time_range).await {
-            Ok(lite_html) => {
-                let results = parse_ddg_lite(&lite_html, max_results);
-                if !results.is_empty() || last_err.is_none() {
-                    return Ok(format_results(query, &results, ctx.max_output_size));
-                }
-            }
-            Err(e) => {
-                if last_err.is_none() {
-                    last_err = Some(e);
+                Err(e) => {
+                    last_err.get_or_insert(e);
                 }
             }
         }
 
-        if let Some(err) = last_err {
-            Err(err)
-        } else {
-            Ok(format_results(query, &[], ctx.max_output_size))
+        match last_err {
+            Some(err) => Err(err),
+            None => Ok(format_results(query, &[], ctx.max_output_size)),
         }
     }
 }
@@ -396,7 +352,7 @@ mod tests {
         </div>
         "#;
 
-        let results = parse_ddg_html(sample_html, 10);
+        let results = parse_ddg_results(sample_html, 10, &DDG_HTML_LINK_RE, &DDG_HTML_SNIPPET_RE);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].title, "Rust Programming Language");
         assert_eq!(results[0].url, "https://www.rust-lang.org/");
@@ -431,7 +387,7 @@ mod tests {
         </table>
         "#;
 
-        let results = parse_ddg_lite(sample_lite, 5);
+        let results = parse_ddg_results(sample_lite, 5, &DDG_LITE_LINK_RE, &DDG_LITE_SNIPPET_RE);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Docs.rs");
         assert_eq!(results[0].url, "https://docs.rs/");

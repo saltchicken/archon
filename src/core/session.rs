@@ -52,13 +52,6 @@ impl ChatMessage {
         }
     }
 
-    pub fn without_images(&self) -> Self {
-        Self {
-            images: None,
-            ..self.clone()
-        }
-    }
-
     pub fn with_ui_image_placeholders(&self) -> Self {
         let count = self
             .images
@@ -67,7 +60,7 @@ impl ChatMessage {
             .max(self.image_names.as_ref().map_or(0, Vec::len));
         Self {
             images: (count > 0).then(|| vec![String::new(); count]),
-            ..self.without_images()
+            ..self.clone()
         }
     }
 }
@@ -161,8 +154,13 @@ impl SessionManager {
             return Ok(());
         }
 
-        let clean_msgs: Vec<ChatMessage> =
-            messages.iter().map(ChatMessage::without_images).collect();
+        let clean_msgs: Vec<ChatMessage> = messages
+            .iter()
+            .map(|m| ChatMessage {
+                images: None,
+                ..m.clone()
+            })
+            .collect();
         let title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
@@ -221,31 +219,23 @@ impl SessionManager {
             return Vec::new();
         };
 
-        let rows = stmt.query_map([], |row| {
+        stmt.query_map([], |row| {
             Ok(SessionSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 updated_at: row.get(2)?,
                 messages: row.get::<_, i64>(3)?.max(0) as usize,
             })
-        });
-
-        match rows {
-            Ok(iter) => iter.flatten().collect(),
-            Err(_) => Vec::new(),
-        }
+        })
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
     }
 
     pub fn load(&self, id: &str) -> Result<SessionData> {
         let conn = self.lock_conn();
-        let (title, model, updated_at, system_prompt, num_ctx, messages_json): (
-            String,
-            String,
-            String,
-            String,
-            u32,
-            String,
-        ) = conn
+        let (mut session, messages_json) = conn
             .query_row(
                 "SELECT title, model, updated_at, system_prompt, num_ctx, messages_json
                  FROM sessions
@@ -253,29 +243,24 @@ impl SessionManager {
                 params![id],
                 |row| {
                     Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
+                        SessionData {
+                            id: id.to_string(),
+                            title: row.get(0)?,
+                            model: row.get(1)?,
+                            updated_at: row.get(2)?,
+                            system_prompt: row.get(3)?,
+                            num_ctx: row.get(4)?,
+                            messages: Vec::new(),
+                        },
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
             .with_context(|| format!("Session '{id}' not found in database"))?;
 
-        let messages: Vec<ChatMessage> = serde_json::from_str(&messages_json)
+        session.messages = serde_json::from_str(&messages_json)
             .with_context(|| format!("Failed to parse messages JSON for session '{id}'"))?;
-
-        Ok(SessionData {
-            id: id.to_string(),
-            title,
-            model,
-            updated_at,
-            system_prompt,
-            num_ctx,
-            messages,
-        })
+        Ok(session)
     }
 
     pub fn load_images(&self, session_id: &str, names: &[String]) -> Vec<(String, Vec<u8>)> {
@@ -283,8 +268,8 @@ impl SessionManager {
             return Vec::new();
         }
         let conn = self.lock_conn();
-        let Ok(mut stmt) = conn
-            .prepare("SELECT data FROM session_images WHERE session_id = ?1 AND name = ?2")
+        let Ok(mut stmt) =
+            conn.prepare("SELECT data FROM session_images WHERE session_id = ?1 AND name = ?2")
         else {
             return Vec::new();
         };
@@ -358,6 +343,9 @@ mod tests {
 
         mgr.delete("sess_1").unwrap();
         assert!(mgr.list().is_empty());
-        assert!(mgr.load_images("sess_1", &["paste_123.png".into()]).is_empty());
+        assert!(
+            mgr.load_images("sess_1", &["paste_123.png".into()])
+                .is_empty()
+        );
     }
 }

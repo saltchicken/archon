@@ -67,33 +67,28 @@ fn validate_git_target(raw: &str, allow_staged: bool) -> Result<Option<&str>> {
     Ok(Some(trimmed))
 }
 
-fn validate_scoped_path(raw: &str, must_exist: bool, ctx: &ToolContext) -> Result<Option<String>> {
+fn require_scoped_path(raw: &str, must_exist: bool, ctx: &ToolContext) -> Result<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        if must_exist {
-            bail!("'path' is required for this git action");
-        }
-        return Ok(None);
+        bail!("'path' is required for this git action (use '.' for all)");
     }
-
     if must_exist {
         let canon = ctx.resolve_existing_path(trimmed)?;
-        let rel = pathdiff::diff_paths(&canon, &ctx.root).unwrap_or(canon);
-        Ok(Some(rel.to_string_lossy().into_owned()))
+        Ok(pathdiff::diff_paths(&canon, &ctx.root)
+            .unwrap_or(canon)
+            .to_string_lossy()
+            .into_owned())
     } else {
-        let rel = ctx.validate_scoped_relative_path(trimmed)?;
-        Ok(Some(rel.to_string_lossy().into_owned()))
+        Ok(ctx
+            .validate_scoped_relative_path(trimmed)?
+            .to_string_lossy()
+            .into_owned())
     }
-}
-
-fn require_scoped_path(raw: &str, must_exist: bool, ctx: &ToolContext) -> Result<String> {
-    validate_scoped_path(raw, must_exist, ctx)?
-        .ok_or_else(|| anyhow::anyhow!("'path' is required for this git action (use '.' for all)"))
 }
 
 fn push_optional_path(cmd_args: &mut Vec<String>, raw_path: &str, ctx: &ToolContext) -> Result<()> {
-    if let Some(p) = validate_scoped_path(raw_path, false, ctx)? {
-        cmd_args.extend(["--".into(), p]);
+    if !raw_path.trim().is_empty() {
+        cmd_args.extend(["--".into(), require_scoped_path(raw_path, false, ctx)?]);
     }
     Ok(())
 }

@@ -152,34 +152,38 @@ fn sanitize_schema_node(val: &mut Value) {
             }
 
             for key in ["oneOf", "anyOf"] {
-                if let Some(Value::Array(variants)) = obj.get(key).cloned() {
-                    let orig_len = variants.len();
-                    let non_null: Vec<Value> = variants
-                        .into_iter()
-                        .filter(|i| {
-                            i.get("type").and_then(Value::as_str) != Some("null")
-                                && i.get("const") != Some(&Value::Null)
-                        })
-                        .collect();
-                    let had_null = non_null.len() < orig_len;
+                let Some(Value::Array(variants)) = obj.get(key).cloned() else {
+                    continue;
+                };
+                let orig_len = variants.len();
+                let non_null: Vec<Value> = variants
+                    .into_iter()
+                    .filter(|i| {
+                        i.get("type").and_then(Value::as_str) != Some("null")
+                            && i.get("const") != Some(&Value::Null)
+                    })
+                    .collect();
+                let had_null = non_null.len() < orig_len;
 
-                    if let Some(enum_vals) = extract_string_enum_variants(&non_null) {
-                        obj.remove(key);
-                        obj.insert("type".into(), json!("string"));
-                        obj.insert("enum".into(), Value::Array(enum_vals));
-                        if had_null {
-                            obj.insert("nullable".into(), Value::Bool(true));
-                        }
-                    } else if non_null.len() == 1
-                        && let Some(Value::Object(inner)) = non_null.into_iter().next()
-                    {
-                        obj.remove(key);
-                        for (k, v) in inner {
-                            obj.entry(k).or_insert(v);
-                        }
-                        if had_null {
-                            obj.insert("nullable".into(), Value::Bool(true));
-                        }
+                let replaced = if let Some(enum_vals) = extract_string_enum_variants(&non_null) {
+                    obj.insert("type".into(), json!("string"));
+                    obj.insert("enum".into(), Value::Array(enum_vals));
+                    true
+                } else if non_null.len() == 1
+                    && let Some(Value::Object(inner)) = non_null.into_iter().next()
+                {
+                    for (k, v) in inner {
+                        obj.entry(k).or_insert(v);
+                    }
+                    true
+                } else {
+                    false
+                };
+
+                if replaced {
+                    obj.remove(key);
+                    if had_null {
+                        obj.insert("nullable".into(), Value::Bool(true));
                     }
                 }
             }
@@ -415,11 +419,13 @@ pub async fn stream_chat(
     let mut done_reason = None;
 
     while let Some(line_res) = lines.next().await {
-        let Ok(line) = line_res else {
-            let e = line_res.unwrap_err();
-            error!("Gemini stream reading error: {e}");
-            let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
-            return;
+        let line = match line_res {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Gemini stream reading error: {e}");
+                let _ = tx.send(EngineEvent::StreamError(format!("Stream interrupted: {e}")));
+                return;
+            }
         };
 
         let Some(data_str) = line.trim().strip_prefix("data:").map(str::trim) else {

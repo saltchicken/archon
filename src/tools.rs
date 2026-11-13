@@ -26,6 +26,7 @@ use similar::TextDiff;
 use std::{
     env,
     ffi::OsStr,
+    fmt::Write as _,
     fs::{self as stdfs, File, OpenOptions},
     io::{Read as _, Write as _},
     path::{Component, Path, PathBuf},
@@ -334,14 +335,6 @@ fn auto_schema<T: JsonSchema>(name: &str, description: &str) -> Value {
     })
 }
 
-fn blocking_schema<T: BlockingTool>() -> Value {
-    auto_schema::<T::Args>(T::NAME, T::DESCRIPTION)
-}
-
-fn async_schema<T: AsyncTool>() -> Value {
-    auto_schema::<T::Args>(T::NAME, T::DESCRIPTION)
-}
-
 async fn run_blocking<T: BlockingTool>(json_args: &Value, ctx: ToolContext) -> Result<String> {
     let args: T::Args = parse_args(json_args, T::NAME)?;
     tokio::task::spawn_blocking(move || T::execute(args, &ctx))
@@ -358,12 +351,131 @@ fn workspace_root() -> Result<PathBuf> {
     Ok(dunce::canonicalize(env::current_dir()?)?)
 }
 
-fn ensure_within_root(path: &Path, root: &Path, label: &str) -> Result<PathBuf> {
+pub(super) fn ensure_within_root(path: &Path, root: &Path, label: &str) -> Result<PathBuf> {
     let canon = dunce::canonicalize(path)?;
     if !canon.starts_with(root) {
         bail!("Security violation: '{label}' escapes workspace");
     }
     Ok(canon)
+}
+
+pub(super) fn ensure_parent_dir(target: &Path, root: &Path, label: &str) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        stdfs::create_dir_all(parent).context("Error creating parent directories")?;
+        ensure_within_root(parent, root, label)?;
+    }
+    Ok(())
+}
+
+pub(super) fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+pub(super) fn render_directory_listing<F>(
+    target: &Path,
+    root: &Path,
+    display: &str,
+    max_depth: usize,
+    max_output_size: usize,
+    mut allow_entry: F,
+) -> Result<String>
+where
+    F: FnMut(&Path) -> bool,
+{
+    if target.is_file() {
+        return Ok(format!(
+            "{display} (file, {})",
+            format_size(target.metadata()?.len())
+        ));
+    }
+
+    let mut out = format!("Directory listing for '{display}' (max_depth: {max_depth}):\n");
+    let mut count = 0usize;
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk<F: FnMut(&Path) -> bool>(
+        dir: &Path,
+        root: &Path,
+        depth: usize,
+        max_depth: usize,
+        out: &mut String,
+        max_output_size: usize,
+        count: &mut usize,
+        allow_entry: &mut F,
+    ) -> Result<()> {
+        let mut entries: Vec<stdfs::DirEntry> = stdfs::read_dir(dir)
+            .with_context(|| format!("Failed to read directory {}", dir.display()))?
+            .flatten()
+            .collect();
+
+        entries.sort_by(|a, b| {
+            let a_dir = a.file_type().is_ok_and(|t| t.is_dir());
+            let b_dir = b.file_type().is_ok_and(|t| t.is_dir());
+            b_dir
+                .cmp(&a_dir)
+                .then_with(|| a.file_name().cmp(&b.file_name()))
+        });
+
+        let indent = "  ".repeat(depth);
+        for entry in entries {
+            if out.len() > max_output_size {
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == ".git" || !allow_entry(&path) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            *count += 1;
+
+            if meta.is_dir() {
+                let child_count = stdfs::read_dir(&path).map_or(0, Iterator::count);
+                let _ = writeln!(out, "{indent}{name}/ ({child_count} items)");
+                if depth < max_depth
+                    && let Ok(canon) = dunce::canonicalize(&path)
+                    && canon.starts_with(root)
+                {
+                    walk(
+                        &canon,
+                        root,
+                        depth + 1,
+                        max_depth,
+                        out,
+                        max_output_size,
+                        count,
+                        allow_entry,
+                    )?;
+                }
+            } else {
+                let _ = writeln!(out, "{indent}{name} ({})", format_size(meta.len()));
+            }
+        }
+        Ok(())
+    }
+
+    walk(
+        target,
+        root,
+        1,
+        max_depth,
+        &mut out,
+        max_output_size,
+        &mut count,
+        &mut allow_entry,
+    )?;
+
+    if count == 0 {
+        Ok(format!("Directory '{display}' is empty."))
+    } else {
+        Ok(out.trim_end().to_string())
+    }
 }
 
 fn validate_relative_path(raw: &str) -> Result<&Path> {
@@ -709,14 +821,11 @@ pub fn format_approval(call: &ToolCall) -> String {
     };
 
     let mut out = format!("Tool: {name} (Rule: {sig})\n");
-    if name == "edit_file" {
-        return format_edit_approval(out, args, obj);
-    }
-    if name == "fs" {
-        return format_fs_approval(out, args, obj);
-    }
-    if name == "dotfiles" {
-        return format_dotfiles_approval(out, args, obj);
+    match name.as_str() {
+        "edit_file" => return format_edit_approval(out, args, obj),
+        "fs" => return format_fs_approval(out, args, obj),
+        "dotfiles" => return format_dotfiles_approval(out, args, obj),
+        _ => {}
     }
 
     let mut multiline_blocks = Vec::new();
@@ -737,24 +846,6 @@ pub fn format_approval(call: &ToolCall) -> String {
     out.trim_end().to_string()
 }
 
-pub const ALL_TOOL_NAMES: &[&str] = &[
-    cargo::Tool::NAME,
-    create_file::Tool::NAME,
-    delegate_task::Tool::NAME,
-    dotfiles::Tool::NAME,
-    edit_file::Tool::NAME,
-    execute_command::Tool::NAME,
-    fetch_url::Tool::NAME,
-    fs::Tool::NAME,
-    git::Tool::NAME,
-    read_file::Tool::NAME,
-    repo_map::Tool::NAME,
-    search::Tool::NAME,
-    system::Tool::NAME,
-    web_search::Tool::NAME,
-    workspace_snapshot::Tool::NAME,
-];
-
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
     config
         .app
@@ -764,71 +855,63 @@ pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
         .any(|t| t == "*" || t == name)
 }
 
-pub fn schemas(config: &Config) -> Vec<Value> {
-    let all = [
-        (cargo::Tool::NAME, async_schema::<cargo::Tool>()),
-        (
-            create_file::Tool::NAME,
-            blocking_schema::<create_file::Tool>(),
-        ),
-        (
-            delegate_task::Tool::NAME,
-            async_schema::<delegate_task::Tool>(),
-        ),
-        (dotfiles::Tool::NAME, blocking_schema::<dotfiles::Tool>()),
-        (edit_file::Tool::NAME, blocking_schema::<edit_file::Tool>()),
-        (
-            execute_command::Tool::NAME,
-            async_schema::<execute_command::Tool>(),
-        ),
-        (fetch_url::Tool::NAME, async_schema::<fetch_url::Tool>()),
-        (fs::Tool::NAME, blocking_schema::<fs::Tool>()),
-        (git::Tool::NAME, async_schema::<git::Tool>()),
-        (read_file::Tool::NAME, blocking_schema::<read_file::Tool>()),
-        (repo_map::Tool::NAME, blocking_schema::<repo_map::Tool>()),
-        (search::Tool::NAME, blocking_schema::<search::Tool>()),
-        (system::Tool::NAME, async_schema::<system::Tool>()),
-        (web_search::Tool::NAME, async_schema::<web_search::Tool>()),
-        (
-            workspace_snapshot::Tool::NAME,
-            blocking_schema::<workspace_snapshot::Tool>(),
-        ),
-    ];
+macro_rules! register_tools {
+    ($( $kind:ident : $mod:ident ),* $(,)?) => {
+        pub const ALL_TOOL_NAMES: &[&str] = &[ $( $mod::Tool::NAME ),* ];
 
-    all.into_iter()
-        .filter_map(|(name, schema)| is_tool_enabled(name, config).then_some(schema))
-        .collect()
+        pub fn schemas(config: &Config) -> Vec<Value> {
+            [ $( ( $mod::Tool::NAME, register_tools!(@schema $kind, $mod), ) ),* ]
+                .into_iter()
+                .filter_map(|(name, schema)| is_tool_enabled(name, config).then_some(schema))
+                .collect()
+        }
+
+        async fn dispatch_tool(
+            name: &str,
+            args: &Value,
+            config: &Config,
+            max_output_size: usize,
+        ) -> Result<String> {
+            if !is_tool_enabled(name, config) {
+                bail!("Unknown tool: '{name}'");
+            }
+            let ctx = ToolContext::new(config, max_output_size)?;
+            match name {
+                $( $mod::Tool::NAME => register_tools!(@run $kind, $mod::Tool, args, ctx), )*
+                _ => bail!("Unknown tool: '{name}'"),
+            }
+        }
+    };
+    (@schema blocking, $mod:ident) => {
+        auto_schema::<<$mod::Tool as BlockingTool>::Args>($mod::Tool::NAME, $mod::Tool::DESCRIPTION)
+    };
+    (@schema async, $mod:ident) => {
+        auto_schema::<<$mod::Tool as AsyncTool>::Args>($mod::Tool::NAME, $mod::Tool::DESCRIPTION)
+    };
+    (@run blocking, $tool:ty, $args:ident, $ctx:ident) => {
+        run_blocking::<$tool>($args, $ctx).await
+    };
+    (@run async, $tool:ty, $args:ident, $ctx:ident) => {
+        run_async::<$tool>($args, &$ctx).await
+    };
 }
 
-async fn dispatch_tool(
-    name: &str,
-    args: &Value,
-    config: &Config,
-    max_output_size: usize,
-) -> Result<String> {
-    if !is_tool_enabled(name, config) {
-        bail!("Unknown tool: '{name}'");
-    }
-
-    let ctx = ToolContext::new(config, max_output_size)?;
-    match name {
-        cargo::Tool::NAME => run_async::<cargo::Tool>(args, &ctx).await,
-        create_file::Tool::NAME => run_blocking::<create_file::Tool>(args, ctx).await,
-        delegate_task::Tool::NAME => run_async::<delegate_task::Tool>(args, &ctx).await,
-        dotfiles::Tool::NAME => run_blocking::<dotfiles::Tool>(args, ctx).await,
-        edit_file::Tool::NAME => run_blocking::<edit_file::Tool>(args, ctx).await,
-        execute_command::Tool::NAME => run_async::<execute_command::Tool>(args, &ctx).await,
-        fetch_url::Tool::NAME => run_async::<fetch_url::Tool>(args, &ctx).await,
-        fs::Tool::NAME => run_blocking::<fs::Tool>(args, ctx).await,
-        git::Tool::NAME => run_async::<git::Tool>(args, &ctx).await,
-        read_file::Tool::NAME => run_blocking::<read_file::Tool>(args, ctx).await,
-        repo_map::Tool::NAME => run_blocking::<repo_map::Tool>(args, ctx).await,
-        search::Tool::NAME => run_blocking::<search::Tool>(args, ctx).await,
-        system::Tool::NAME => run_async::<system::Tool>(args, &ctx).await,
-        web_search::Tool::NAME => run_async::<web_search::Tool>(args, &ctx).await,
-        workspace_snapshot::Tool::NAME => run_blocking::<workspace_snapshot::Tool>(args, ctx).await,
-        _ => bail!("Unknown tool: '{name}'"),
-    }
+register_tools! {
+    async: cargo,
+    blocking: create_file,
+    async: delegate_task,
+    blocking: dotfiles,
+    blocking: edit_file,
+    async: execute_command,
+    async: fetch_url,
+    blocking: fs,
+    async: git,
+    blocking: read_file,
+    blocking: repo_map,
+    blocking: search,
+    async: system,
+    async: web_search,
+    blocking: workspace_snapshot,
 }
 
 pub async fn execute(call: &ToolCall, config: &Config, max_size: usize) -> (String, bool) {
