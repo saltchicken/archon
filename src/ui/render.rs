@@ -369,49 +369,60 @@ impl TuiApp {
     ) {
         let start_visual = lines.len();
         let state = &mut self.msg_states[idx];
+        let total_content = styled_content.len();
         let max_lines = if state.unfolded {
             usize::MAX
         } else {
             self.config.app.max_msg_lines
         };
+
         let mut header_spans = vec![Span::styled(
             format!("━━ {header_label} "),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )];
         if truncated {
             header_spans.push(Span::styled(
-                "⚠ TRUNCATED",
+                "⚠ TRUNCATED ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if state.collapsed {
+            header_spans.push(Span::styled(
+                format!("[+ {total_content} lines collapsed]"),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
             ));
         }
         lines.push(Line::from(header_spans));
 
-        let total_content = styled_content.len();
-        let is_truncated = total_content > max_lines;
+        let is_truncated = !state.collapsed && total_content > max_lines;
 
-        if is_truncated {
-            state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
-            let start = state.scroll;
-            let end = (start + max_lines).min(total_content);
+        if !state.collapsed {
+            if is_truncated {
+                state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
+                let start = state.scroll;
+                let end = (start + max_lines).min(total_content);
 
-            if start > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("    ... ({start} lines above) ..."),
-                    Style::default().fg(Color::Blue),
-                )));
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... ({start} lines above) ..."),
+                        Style::default().fg(Color::Blue),
+                    )));
+                }
+                lines.extend_from_slice(&styled_content[start..end]);
+                if end < total_content {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "    ... ({} lines below - Click to unfold) ...",
+                            total_content - end
+                        ),
+                        Style::default().fg(Color::Blue),
+                    )));
+                }
+            } else {
+                lines.extend_from_slice(styled_content);
             }
-            lines.extend_from_slice(&styled_content[start..end]);
-            if end < total_content {
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "    ... ({} lines below - Click to unfold) ...",
-                        total_content - end
-                    ),
-                    Style::default().fg(Color::Blue),
-                )));
-            }
-        } else {
-            lines.extend_from_slice(styled_content);
         }
 
         lines.push(Line::from(""));

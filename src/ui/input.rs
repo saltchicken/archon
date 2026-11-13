@@ -5,11 +5,32 @@ use ratatui::layout::Position;
 use std::path::PathBuf;
 
 impl TuiApp {
-    fn find_msg_at(&self, visual_y: usize) -> Option<(usize, bool)> {
+    fn find_msg_at(&self, visual_y: usize) -> Option<(usize, usize, bool)> {
         self.msg_visual_ranges
             .iter()
             .find(|(_, start, end, _)| (*start..*end).contains(&visual_y))
-            .map(|&(i, _, _, truncated)| (i, truncated))
+            .map(|&(i, start, _, truncated)| (i, start, truncated))
+    }
+
+    fn find_sticky_header_msg(&self) -> Option<usize> {
+        if self.chat_scroll == 0 {
+            return None;
+        }
+        let first_is_body = self
+            .msg_visual_ranges
+            .iter()
+            .find(|(_, start, end, _)| (*start..*end).contains(&self.chat_scroll))
+            .is_some_and(|&(_, start, end, _)| {
+                self.chat_scroll > start && self.chat_scroll + 1 < end
+            });
+        if !first_is_body {
+            return None;
+        }
+        self.msg_visual_ranges
+            .iter()
+            .rev()
+            .find(|(_, start, _, _)| *start < self.chat_scroll)
+            .map(|&(i, _, _, _)| i)
     }
 
     fn scroll_chat(&mut self, delta: isize) {
@@ -48,7 +69,7 @@ impl TuiApp {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
                 if !is_on_scrollbar
-                    && let Some((i, true)) = self.find_msg_at(visual_y)
+                    && let Some((i, _, true)) = self.find_msg_at(visual_y)
                     && let Some(state) = self.msg_states.get_mut(i)
                 {
                     state.scroll = if is_up {
@@ -73,10 +94,19 @@ impl TuiApp {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((i, _)) = self.find_msg_at(visual_y)
+                if inner_y == 0
+                    && let Some(sticky_idx) = self.find_sticky_header_msg()
+                    && let Some(state) = self.msg_states.get_mut(sticky_idx)
+                {
+                    state.collapsed = !state.collapsed;
+                } else if let Some((i, start_y, _)) = self.find_msg_at(visual_y)
                     && let Some(state) = self.msg_states.get_mut(i)
                 {
-                    state.unfolded = !state.unfolded;
+                    if visual_y == start_y {
+                        state.collapsed = !state.collapsed;
+                    } else if !state.collapsed {
+                        state.unfolded = !state.unfolded;
+                    }
                 }
             }
             _ => {}

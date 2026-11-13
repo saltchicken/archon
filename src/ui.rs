@@ -64,6 +64,7 @@ pub(super) enum ActiveModal {
 pub(super) struct MsgUiState {
     pub scroll: usize,
     pub unfolded: bool,
+    pub collapsed: bool,
 }
 
 pub struct TuiApp {
