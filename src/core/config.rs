@@ -1,4 +1,5 @@
 use crate::core::{provider::Provider, skills::SkillDefinition};
+use anyhow::{Context, Result};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
@@ -6,6 +7,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -55,6 +57,8 @@ pub struct Config {
     pub system_presets: Vec<Preset>,
     #[serde(skip)]
     pub skills: Vec<SkillDefinition>,
+    #[serde(skip)]
+    pub workspace_skills_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,8 +239,69 @@ impl Default for Config {
                 ),
             ],
             skills: Vec::new(),
+            workspace_skills_dir: None,
         }
     }
+}
+
+pub fn archon_config_root() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+        .join("archon")
+}
+
+pub fn workspace_config_dir_for(workspace: &Path) -> PathBuf {
+    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let name = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("root");
+    archon_config_root().join("workspaces").join(name)
+}
+
+pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
+    let ws_dir = workspace_config_dir_for(workspace);
+    let cfg_path = ws_dir.join("config.toml");
+    if cfg_path.exists() {
+        return Ok(Some(ws_dir));
+    }
+
+    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    println!(
+        "No Archon workspace configuration found for '{}'.",
+        canon.display()
+    );
+    println!("Expected config at: {}", cfg_path.display());
+    print!("Would you like to create a workspace configuration here? [y/N]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer != "y" && answer != "yes" {
+        return Ok(None);
+    }
+
+    let skills_dir = ws_dir.join("skills");
+    fs::create_dir_all(&skills_dir)
+        .with_context(|| format!("Failed to create directory {}", skills_dir.display()))?;
+
+    let default_ws_toml = concat!(
+        "# Archon workspace configuration\n",
+        "# Overrides ~/.config/archon/config.toml for this directory.\n\n",
+        "[app]\n",
+        "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"web_search\", \"workspace_snapshot\"]\n\n",
+        "[workspace_snapshot]\n",
+        "# git_root = true\n",
+        "# include = [\"**/*\"]\n",
+        "# exclude = [\"target/**\", \" node_modules/**\", \"Cargo.lock\"]\n",
+    );
+
+    fs::write(&cfg_path, default_ws_toml)
+        .with_context(|| format!("Failed to write workspace config to {}", cfg_path.display()))?;
+
+    Ok(Some(ws_dir))
 }
 
 impl Config {
@@ -271,7 +336,7 @@ impl Config {
 
     pub fn load(
         base_path: impl AsRef<Path>,
-        local_path: impl AsRef<Path>,
+        workspace_config_dir: impl AsRef<Path>,
     ) -> (Self, Option<String>) {
         let base_path = base_path.as_ref();
         if !base_path.exists() {
@@ -283,6 +348,10 @@ impl Config {
             }
         }
 
+        let ws_dir = workspace_config_dir.as_ref();
+        let local_config_path = ws_dir.join("config.toml");
+        let ws_skills_dir = ws_dir.join("skills");
+
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
         let global_files = base_figment
@@ -292,18 +361,26 @@ impl Config {
             .unwrap_or_default();
 
         match base_figment
-            .merge(Toml::file(local_path.as_ref()))
+            .merge(Toml::file(&local_config_path))
             .merge(Env::prefixed("ARCHON_"))
             .extract::<Self>()
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
-                cfg.skills = crate::core::skills::discover_skills(&cfg.app.skills_dir);
+                cfg.skills = crate::core::skills::discover_skills(
+                    &cfg.app.skills_dir,
+                    Some(ws_skills_dir.as_path()),
+                );
+                cfg.workspace_skills_dir = Some(ws_skills_dir);
                 (cfg, None)
             }
             Err(e) => {
                 let mut def = Self::default();
-                def.skills = crate::core::skills::discover_skills(&def.app.skills_dir);
+                def.skills = crate::core::skills::discover_skills(
+                    &def.app.skills_dir,
+                    Some(ws_skills_dir.as_path()),
+                );
+                def.workspace_skills_dir = Some(ws_skills_dir);
                 (def, Some(format!("Config error (using defaults): {e}")))
             }
         }

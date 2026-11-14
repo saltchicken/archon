@@ -45,7 +45,6 @@ const COMMAND_TIMEOUT_SECS: u64 = 30;
 
 const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "**/.git/**",
-    "**/.archon/skills/**",
     "**/*.venv/**",
     "**/node_modules/**",
     "**/target/**",
@@ -159,10 +158,15 @@ impl ToolContext {
 
         let global_skills_root = expand_tilde(&self.config.app.skills_dir);
         let canon_global = dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
-        let local_skills_root = self.root.join(".archon/skills");
-        let canon_local = dunce::canonicalize(&local_skills_root).unwrap_or(local_skills_root);
+        let canon_ws = self
+            .config
+            .workspace_skills_dir
+            .as_ref()
+            .map(|d| dunce::canonicalize(d).unwrap_or_else(|_| d.clone()));
 
-        if canon.starts_with(&canon_global) || canon.starts_with(&canon_local) {
+        if canon.starts_with(&canon_global)
+            || canon_ws.as_ref().is_some_and(|ws| canon.starts_with(ws))
+        {
             let allowed = self
                 .active_skill
                 .as_deref()

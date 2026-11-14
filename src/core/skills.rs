@@ -127,7 +127,10 @@ fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefinition> {
     skills
 }
 
-pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
+pub fn discover_skills(
+    skills_dir: &str,
+    workspace_skills_dir: Option<&Path>,
+) -> Vec<SkillDefinition> {
     let mut merged = Vec::new();
     let upsert = |list: &mut Vec<SkillDefinition>, incoming: SkillDefinition| {
         if let Some(existing) = list
@@ -148,9 +151,10 @@ pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
         upsert(&mut merged, skill);
     }
 
-    let local_dir = Path::new(".archon/skills");
-    for skill in scan_skills_dir(local_dir, false) {
-        upsert(&mut merged, skill);
+    if let Some(ws_dir) = workspace_skills_dir {
+        for skill in scan_skills_dir(ws_dir, true) {
+            upsert(&mut merged, skill);
+        }
     }
 
     merged

@@ -5,7 +5,7 @@ mod ui;
 use anyhow::Result;
 use core::{
     CoreEngine, EngineEvent,
-    config::{Config, load_dotenv},
+    config::{Config, archon_config_root, ensure_workspace_config, load_dotenv},
     provider::Provider,
 };
 use std::env;
@@ -21,14 +21,19 @@ async fn main() -> Result<()> {
         original_hook(panic_info);
     }));
 
-    // Load .env from the working directory before reading config or environment variables
+    let cwd = env::current_dir()?;
+    let Some(ws_config_dir) = ensure_workspace_config(&cwd)? else {
+        println!("Exiting Archon.");
+        std::process::exit(0);
+    };
+
+    // Load .env from the workspace config directory or working directory before reading config
+    load_dotenv(ws_config_dir.join(".env"));
     load_dotenv(".env");
 
-    let base_config_path = dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
-        .join("archon/config.toml");
+    let base_config_path = archon_config_root().join("config.toml");
 
-    let (config, config_err) = Config::load(&base_config_path, ".archon/config.toml");
+    let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
