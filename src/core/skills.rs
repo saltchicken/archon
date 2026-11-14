@@ -186,10 +186,7 @@ pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, S
         return None;
     }
 
-    let skill = config.skills.iter().find(|s| {
-        (!s.command.is_empty() && s.command.eq_ignore_ascii_case(cmd_token))
-            || s.name.eq_ignore_ascii_case(cmd_token)
-    })?;
+    let skill = find_skill(config, cmd_token)?;
 
     let user_prompt = if args_str.is_empty() {
         trimmed.to_string()
@@ -198,6 +195,20 @@ pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, S
     };
 
     Some((skill.name.clone(), user_prompt))
+}
+
+pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
+    let mut missing = Vec::new();
+    for raw in &skill.tools {
+        let name = raw.trim();
+        if name.is_empty() || name == "*" {
+            continue;
+        }
+        if !crate::tools::is_tool_enabled(name, config) && !missing.iter().any(|m| m == name) {
+            missing.push(name.to_string());
+        }
+    }
+    missing
 }
 
 pub(crate) fn format_skill_path_for_read(path: &Path) -> String {

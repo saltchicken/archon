@@ -591,6 +591,31 @@ impl TuiApp {
         let prompt = if let Some((skill_name, user_prompt)) =
             crate::core::skills::expand_at_command(&raw_prompt, &self.config)
         {
+            if let Some(skill) = crate::core::skills::find_skill(&self.config, &skill_name) {
+                if !skill.tools.is_empty() && !self.enable_tools {
+                    self.status_bar = (
+                        format!(
+                            "Skill '{}' cannot proceed: tools are disabled (^T). Required: {}",
+                            skill.name,
+                            skill.tools.join(", ")
+                        ),
+                        true,
+                    );
+                    return false;
+                }
+                let missing = crate::core::skills::missing_skill_tools(skill, &self.config);
+                if !missing.is_empty() {
+                    self.status_bar = (
+                        format!(
+                            "Skill '{}' cannot proceed: required tool(s) not enabled in config: {}",
+                            skill.name,
+                            missing.join(", ")
+                        ),
+                        true,
+                    );
+                    return false;
+                }
+            }
             self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
             turn.active_skill = Some(skill_name);
             user_prompt

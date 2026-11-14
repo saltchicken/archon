@@ -520,6 +520,36 @@ impl CoreEngine {
                 self.notify("Cleared attached images.", false);
             }
             EngineCommand::SendPrompt { prompt, turn } => {
+                if let Some(ref skill_name) = turn.active_skill {
+                    let Some(skill) = skills::find_skill(&self.config, skill_name) else {
+                        self.notify(format!("Skill '{skill_name}' not found."), true);
+                        return;
+                    };
+                    if !skill.tools.is_empty() && !turn.enable_tools {
+                        self.notify(
+                            format!(
+                                "Skill '{}' requires tools ({}), but tools are currently disabled (^T).",
+                                skill.name,
+                                skill.tools.join(", ")
+                            ),
+                            true,
+                        );
+                        return;
+                    }
+                    let missing = skills::missing_skill_tools(skill, &self.config);
+                    if !missing.is_empty() {
+                        self.notify(
+                            format!(
+                                "Skill '{}' cannot proceed: required tool(s) not enabled in config: {}",
+                                skill.name,
+                                missing.join(", ")
+                            ),
+                            true,
+                        );
+                        return;
+                    }
+                }
+
                 info!(
                     "User submitted prompt. Enable tools: {}, Active skill: {:?}",
                     turn.enable_tools, turn.active_skill

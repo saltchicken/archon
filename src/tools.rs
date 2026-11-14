@@ -692,18 +692,20 @@ pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
 }
 
 pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skill: Option<&str>) -> bool {
-    if is_tool_enabled(name, config) {
+    if !is_tool_enabled(name, config) {
+        return false;
+    }
+    let Some(skill) = active_skill.and_then(|s| crate::core::skills::find_skill(config, s)) else {
+        return true;
+    };
+    if skill.tools.is_empty() {
         return true;
     }
-    active_skill
-        .and_then(|s| crate::core::skills::find_skill(config, s))
-        .is_some_and(|skill| {
-            skill
-                .tools
-                .iter()
-                .map(|t| t.trim())
-                .any(|t| t == "*" || t == name)
-        })
+    skill
+        .tools
+        .iter()
+        .map(|t| t.trim())
+        .any(|t| t == "*" || t == name)
 }
 
 macro_rules! register_tools {
