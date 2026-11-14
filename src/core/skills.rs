@@ -85,6 +85,7 @@ fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
         tools: fm.tools,
         auto_approve: fm.auto_approve,
         prompt,
+        dir_path: Some(dir_path.to_path_buf()),
     })
 }
 
@@ -189,6 +190,41 @@ pub fn expand_slash_command(
     Some((skill.name.clone(), expanded, auto_skill))
 }
 
+fn format_skill_path_for_read(path: &Path) -> String {
+    if path.is_relative() {
+        return path.to_string_lossy().into_owned();
+    }
+    if let Some(home) = dirs::home_dir()
+        && let Ok(stripped) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", stripped.to_string_lossy());
+    }
+    path.to_string_lossy().into_owned()
+}
+
+pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
+    let Some(dir) = skill.dir_path.as_deref().filter(|d| d.is_dir()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    fn walk(cur: &Path, out: &mut Vec<String>) {
+        let Ok(rd) = fs::read_dir(cur) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+                out.push(format_skill_path_for_read(&p));
+            }
+        }
+    }
+    walk(dir, &mut out);
+    out.sort();
+    out
+}
+
 pub fn compose_system_prompt(
     base_system_prompt: &str,
     active_skills: &[String],
@@ -204,12 +240,16 @@ pub fn compose_system_prompt(
         if let Some(skill) = find_skill(config, skill_name)
             && !skill.prompt.trim().is_empty()
         {
-            let _ = writeln!(
-                active_blocks,
-                "### Skill: {}\n{}\n",
-                skill.name,
-                skill.prompt.trim()
-            );
+            let _ = writeln!(active_blocks, "### Skill: {}", skill.name);
+            let refs = list_skill_reference_paths(skill);
+            if !refs.is_empty() {
+                let _ = writeln!(
+                    active_blocks,
+                    "Reference files (read via `read_file`): {}",
+                    refs.join(", ")
+                );
+            }
+            let _ = writeln!(active_blocks, "{}\n", skill.prompt.trim());
         }
     }
     if !active_blocks.is_empty() {
@@ -244,6 +284,7 @@ mod tests {
             tools: vec!["git".into()],
             auto_approve: vec![],
             prompt: "Run on {{args}}".into(),
+            dir_path: None,
         });
 
         let (name, expanded, auto_skill) = expand_slash_command("/t src/main.rs", &cfg).unwrap();

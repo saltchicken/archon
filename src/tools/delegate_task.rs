@@ -188,15 +188,27 @@ impl AsyncTool for Tool {
         };
 
         let (skill_tools, active_skill_names, sub_system_prompt) = match &resolved_skill {
-            Some(s) => (
-                s.tools.clone(),
-                vec![s.name.clone()],
-                format!(
-                    "{SUB_AGENT_SYSTEM_PROMPT}\n\n<active_skill name=\"{}\">\n{}\n</active_skill>",
-                    s.name,
-                    s.prompt.trim()
-                ),
-            ),
+            Some(s) => {
+                let refs = crate::core::skills::list_skill_reference_paths(s);
+                let refs_line = if refs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "Reference files (read via `read_file`): {}\n",
+                        refs.join(", ")
+                    )
+                };
+                (
+                    s.tools.clone(),
+                    vec![s.name.clone()],
+                    format!(
+                        "{SUB_AGENT_SYSTEM_PROMPT}\n\n<active_skill name=\"{}\">\n{}{}\n</active_skill>",
+                        s.name,
+                        refs_line,
+                        s.prompt.trim()
+                    ),
+                )
+            }
             None => (Vec::new(), Vec::new(), SUB_AGENT_SYSTEM_PROMPT.to_string()),
         };
 

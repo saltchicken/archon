@@ -14,7 +14,7 @@ mod system;
 mod web_search;
 mod workspace_snapshot;
 
-use crate::core::config::{Config, WorkspaceSnapshotSettings};
+use crate::core::config::{Config, WorkspaceSnapshotSettings, expand_tilde};
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -138,6 +138,24 @@ impl ToolContext {
             bail!("Target path does not exist: '{trimmed}'");
         }
         self.ensure_within_workspace(&target, trimmed)
+    }
+
+    pub fn resolve_readable_path(&self, raw: &str) -> Result<PathBuf> {
+        let trimmed = raw.trim();
+        let expanded = expand_tilde(trimmed);
+        let skills_root = expand_tilde(&self.config.app.skills_dir);
+
+        if expanded.is_absolute() && skills_root.exists() {
+            let canon_skills = dunce::canonicalize(&skills_root).unwrap_or(skills_root);
+            if expanded.starts_with(&canon_skills) {
+                if !expanded.exists() {
+                    bail!("Target path does not exist: '{trimmed}'");
+                }
+                return ensure_within_root(&expanded, &canon_skills, trimmed);
+            }
+        }
+
+        self.resolve_existing_path(trimmed)
     }
 
     pub fn resolve_new_path(&self, raw: &str) -> Result<PathBuf> {
