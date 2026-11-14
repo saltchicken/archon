@@ -59,6 +59,7 @@ pub struct Config {
     pub skills: Vec<SkillDefinition>,
     #[serde(skip)]
     pub workspace_skills_dir: Option<PathBuf>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +241,7 @@ impl Default for Config {
             ],
             skills: Vec::new(),
             workspace_skills_dir: None,
+            workspace: None,
         }
     }
 }
@@ -250,24 +252,69 @@ pub fn archon_config_root() -> PathBuf {
         .join("archon")
 }
 
+fn read_bound_workspace(cfg_path: &Path) -> Option<PathBuf> {
+    let raw = fs::read_to_string(cfg_path).ok()?;
+    let val: toml::Value = toml::from_str(&raw).ok()?;
+    let ws = val.get("workspace")?.as_str()?;
+    let expanded = expand_tilde(ws);
+    Some(dunce::canonicalize(&expanded).unwrap_or(expanded))
+}
+
 pub fn workspace_config_dir_for(workspace: &Path) -> PathBuf {
     let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let base_root = archon_config_root().join("workspaces");
+
     let name = canon
         .file_name()
         .and_then(|n| n.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("root");
-    archon_config_root().join("workspaces").join(name)
+
+    let primary = base_root.join(name);
+    let primary_cfg = primary.join("config.toml");
+    if !primary_cfg.exists() {
+        return primary;
+    }
+    if read_bound_workspace(&primary_cfg).is_none_or(|bound| bound == canon) {
+        return primary;
+    }
+
+    if let Some(parent) = canon
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+    {
+        let disambiguated = base_root.join(format!("{parent}-{name}"));
+        let disambiguated_cfg = disambiguated.join("config.toml");
+        if !disambiguated_cfg.exists()
+            || read_bound_workspace(&disambiguated_cfg).is_none_or(|bound| bound == canon)
+        {
+            return disambiguated;
+        }
+    }
+
+    for idx in 2..1000 {
+        let candidate = base_root.join(format!("{name}-{idx}"));
+        let candidate_cfg = candidate.join("config.toml");
+        if !candidate_cfg.exists()
+            || read_bound_workspace(&candidate_cfg).is_none_or(|bound| bound == canon)
+        {
+            return candidate;
+        }
+    }
+
+    primary
 }
 
 pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
-    let ws_dir = workspace_config_dir_for(workspace);
+    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let ws_dir = workspace_config_dir_for(&canon);
     let cfg_path = ws_dir.join("config.toml");
     if cfg_path.exists() {
         return Ok(Some(ws_dir));
     }
 
-    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     println!(
         "No Archon workspace configuration found for '{}'.",
         canon.display()
@@ -287,15 +334,20 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
     fs::create_dir_all(&skills_dir)
         .with_context(|| format!("Failed to create directory {}", skills_dir.display()))?;
 
-    let default_ws_toml = concat!(
-        "# Archon workspace configuration\n",
-        "# Overrides ~/.config/archon/config.toml for this directory.\n\n",
-        "[app]\n",
-        "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"web_search\", \"workspace_snapshot\"]\n\n",
-        "[workspace_snapshot]\n",
-        "# git_root = true\n",
-        "# include = [\"**/*\"]\n",
-        "# exclude = [\"target/**\", \" node_modules/**\", \"Cargo.lock\"]\n",
+    let escaped_ws = canon.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let default_ws_toml = format!(
+        concat!(
+            "# Archon workspace configuration\n",
+            "# Overrides ~/.config/archon/config.toml for this directory.\n",
+            "workspace = \"{escaped_ws}\"\n\n",
+            "[app]\n",
+            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"web_search\", \"workspace_snapshot\"]\n\n",
+            "[workspace_snapshot]\n",
+            "# git_root = true\n",
+            "# include = [\"**/*\"]\n",
+            "# exclude = [\"target/**\", \"node_modules/**\", \"Cargo.lock\"]\n",
+        ),
+        escaped_ws = escaped_ws
     );
 
     fs::write(&cfg_path, default_ws_toml)
