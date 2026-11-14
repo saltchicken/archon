@@ -469,6 +469,7 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
+            ActiveModal::PersonalIntelligence => self.draw_personal_intelligence_modal(f),
             ActiveModal::None => {}
         }
     }
@@ -520,6 +521,7 @@ impl TuiApp {
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
             ("^Y", "SysMsg"),
+            ("^P", "Intel"),
             ("^Q", "Quit"),
         ];
 
@@ -538,7 +540,7 @@ impl TuiApp {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(9), Constraint::Min(6)])
+            .constraints([Constraint::Length(10), Constraint::Min(6)])
             .split(area);
 
         let (pct, ctx_color) = self.ctx_usage(Color::Cyan);
@@ -562,6 +564,7 @@ impl TuiApp {
             )),
             Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
+            Line::from(format!("Intel:   {} (^P)", self.current_pi_label())),
         ];
         f.render_widget(
             Paragraph::new(settings_text).block(titled_block(" Config ")),
@@ -785,28 +788,32 @@ impl TuiApp {
         {
             let matches = SlashCommand::matching_triggers(cmd_prefix);
             (!matches.is_empty()).then(|| format!(" Prompt — Commands: {} ", matches.join(" │ ")))
-        } else if let Some(cmd_prefix) = first_trimmed.strip_prefix('@')
-            && !cmd_prefix.contains(char::is_whitespace)
-        {
-            let matches: Vec<String> = self
-                .config
-                .skills
-                .iter()
-                .filter(|s| {
-                    (!s.command.is_empty() && s.command.starts_with(cmd_prefix))
-                        || s.name.starts_with(cmd_prefix)
-                })
-                .map(|s| {
-                    let trigger = if s.command.is_empty() {
-                        &s.name
-                    } else {
-                        &s.command
-                    };
-                    format!("@{trigger}")
-                })
-                .take(4)
-                .collect();
-            (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+        } else if let Some(rest) = first_trimmed.strip_prefix('@') {
+            if let Some(ws_idx) = rest.find(char::is_whitespace) {
+                let cmd_token = &rest[..ws_idx];
+                crate::core::skills::find_skill(&self.config, cmd_token)
+                    .map(|s| format!(" Prompt — Skill: @{} [+<prompt>] ", s.name))
+            } else {
+                let matches: Vec<String> = self
+                    .config
+                    .skills
+                    .iter()
+                    .filter(|s| {
+                        (!s.command.is_empty() && s.command.starts_with(rest))
+                            || s.name.starts_with(rest)
+                    })
+                    .map(|s| {
+                        let trigger = if s.command.is_empty() {
+                            &s.name
+                        } else {
+                            &s.command
+                        };
+                        format!("@{trigger}")
+                    })
+                    .take(4)
+                    .collect();
+                (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+            }
         } else if first_trimmed.starts_with('!') {
             Some(" Prompt — Shell Escape: !<command> (runs in workspace root) ".into())
         } else {

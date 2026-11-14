@@ -249,6 +249,7 @@ pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
 pub fn compose_system_prompt(
     base_system_prompt: &str,
     active_skill: Option<&str>,
+    skill_args: Option<&str>,
     config: &Config,
 ) -> String {
     let mut sections = Vec::new();
@@ -256,12 +257,17 @@ pub fn compose_system_prompt(
         sections.push(base_system_prompt.trim().to_string());
     }
 
+    if let Some(pi_block) = config.personal_intelligence.format_for_prompt() {
+        sections.push(pi_block);
+    }
+
     if let Some(skill_name) = active_skill
         && let Some(skill) = find_skill(config, skill_name)
     {
         let refs = list_skill_reference_paths(skill);
-        let prompt_body = skill.prompt.replace("{{args}}", "").trim().to_string();
-        if !refs.is_empty() || !prompt_body.is_empty() {
+        let args = skill_args.unwrap_or("").trim();
+        let prompt_body = skill.prompt.replace("{{args}}", args).trim().to_string();
+        if !refs.is_empty() || !prompt_body.is_empty() || !args.is_empty() {
             let mut block = String::new();
             if !refs.is_empty() {
                 let _ = writeln!(
@@ -272,6 +278,9 @@ pub fn compose_system_prompt(
             }
             if !prompt_body.is_empty() {
                 let _ = writeln!(block, "{prompt_body}");
+            }
+            if !args.is_empty() && !skill.prompt.contains("{{args}}") {
+                let _ = writeln!(block, "\nUser arguments / instructions: {args}");
             }
             sections.push(format!(
                 "<skill name=\"{}\">\n{}\n</skill>",

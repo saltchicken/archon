@@ -1,5 +1,5 @@
 use super::{ActiveModal, TuiApp};
-use crate::core::EngineCommand;
+use crate::core::{EngineCommand, config::PersonalIntelligence};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 use std::path::PathBuf;
@@ -126,6 +126,9 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
+            ActiveModal::PersonalIntelligence => {
+                self.handle_personal_intelligence_key(key, ctrl, shift)
+            }
             ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
         false
@@ -253,6 +256,38 @@ impl TuiApp {
         }
     }
 
+    fn handle_personal_intelligence_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
+        match key.code {
+            KeyCode::Esc => self.modal = ActiveModal::None,
+            KeyCode::Char('e') if ctrl => {
+                self.pi_enabled_draft = !self.pi_enabled_draft;
+            }
+            KeyCode::Char('x') if ctrl => {
+                self.pi_area = super::create_pi_area("");
+            }
+            KeyCode::Enter if shift => {
+                self.pi_area.insert_newline();
+            }
+            KeyCode::Enter => {
+                let raw_text = self.pi_area.lines().join("\n");
+                let pi = PersonalIntelligence::from_editor_text(&raw_text, self.pi_enabled_draft);
+                self.config.personal_intelligence = pi.clone();
+                self.modal = ActiveModal::None;
+                let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
+                self.status_bar = (
+                    format!(
+                        "Personal Intelligence saved ({}).",
+                        self.current_pi_label()
+                    ),
+                    false,
+                );
+            }
+            _ => {
+                self.pi_area.input(key);
+            }
+        }
+    }
+
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -308,6 +343,9 @@ impl TuiApp {
                 let sys_text = self.current_system_prompt_text();
                 self.sys_prompt_area = super::create_sys_prompt_area(&sys_text);
                 self.modal = ActiveModal::SystemPrompt;
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.open_personal_intelligence_modal();
             }
             _ => {
                 self.text_area.input(key);

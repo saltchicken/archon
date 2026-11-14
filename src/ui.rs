@@ -5,7 +5,7 @@ mod render;
 use crate::core::{
     EngineCommand, EngineEvent, TurnConfig,
     attachments::ImageAttachment,
-    config::{Config, Preset},
+    config::{Config, PersonalIntelligence, Preset, clean_pi_item},
     session::{ChatMessage, SessionSummary},
 };
 use anyhow::Result;
@@ -58,11 +58,13 @@ pub(super) enum ActiveModal {
     ToolApproval,
     ModelSelect,
     SystemPrompt,
+    PersonalIntelligence,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
     Exit,
+    Intel,
     Reset,
     Run,
 }
@@ -70,6 +72,7 @@ pub(super) enum SlashCommand {
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
         ("exit", Self::Exit),
+        ("intel", Self::Intel),
         ("reset", Self::Reset),
         ("run", Self::Run),
     ];
@@ -77,6 +80,7 @@ impl SlashCommand {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exit => "exit",
+            Self::Intel => "intel",
             Self::Reset => "reset",
             Self::Run => "run",
         }
@@ -127,6 +131,8 @@ pub struct TuiApp {
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) sys_prompt_area: TextArea<'static>,
+    pub(super) pi_area: TextArea<'static>,
+    pub(super) pi_enabled_draft: bool,
     pub(super) enable_tools: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
@@ -170,6 +176,16 @@ pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
     ta
 }
 
+pub(super) fn create_pi_area(initial: &str) -> TextArea<'static> {
+    let mut ta = TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>());
+    ta.set_block(
+        titled_block(" Persistent Facts / Environment Context (One per line) ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    ta.set_cursor_line_style(Style::default());
+    ta
+}
+
 pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     Block::default().borders(Borders::ALL).title(title)
 }
@@ -187,6 +203,8 @@ impl TuiApp {
             .iter()
             .position(|m| m.name == model)
             .unwrap_or(0);
+        let pi_initial = config.personal_intelligence.to_editor_text();
+        let pi_enabled_draft = config.personal_intelligence.enabled;
 
         Self {
             model,
@@ -210,6 +228,8 @@ impl TuiApp {
             sys_preset_idx: 0,
             custom_system_prompt: None,
             sys_prompt_area: create_sys_prompt_area(""),
+            pi_area: create_pi_area(&pi_initial),
+            pi_enabled_draft,
             enable_tools: true,
             num_ctx,
             max_tool_output_size,
@@ -270,6 +290,9 @@ impl TuiApp {
                     ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
                     ActiveModal::SystemPrompt => {
                         self.sys_prompt_area.insert_str(text.replace('\r', ""));
+                    }
+                    ActiveModal::PersonalIntelligence => {
+                        self.pi_area.insert_str(text.replace('\r', ""));
                     }
                     ActiveModal::None => {
                         self.text_area.insert_str(text.replace('\r', ""));
@@ -463,6 +486,9 @@ impl TuiApp {
             EngineEvent::SkillsUpdated(skills) => {
                 self.config.skills = skills;
             }
+            EngineEvent::PersonalIntelligenceUpdated(pi) => {
+                self.config.personal_intelligence = pi;
+            }
             EngineEvent::ModelConfigUpdated {
                 model,
                 num_ctx,
@@ -515,6 +541,7 @@ impl TuiApp {
             num_ctx: self.num_ctx,
             enable_tools: self.enable_tools,
             active_skill: None,
+            skill_args: None,
         }
     }
 
@@ -524,6 +551,25 @@ impl TuiApp {
         } else {
             preset_label(&self.config.system_presets, self.sys_preset_idx)
         }
+    }
+
+    pub(super) fn current_pi_label(&self) -> String {
+        let count = self.config.personal_intelligence.count();
+        if !self.config.personal_intelligence.enabled {
+            format!("OFF ({count})")
+        } else if count == 0 {
+            "Empty".into()
+        } else if count == 1 {
+            "1 item (ON)".into()
+        } else {
+            format!("{count} items (ON)")
+        }
+    }
+
+    pub(super) fn open_personal_intelligence_modal(&mut self) {
+        self.pi_area = create_pi_area(&self.config.personal_intelligence.to_editor_text());
+        self.pi_enabled_draft = self.config.personal_intelligence.enabled;
+        self.modal = ActiveModal::PersonalIntelligence;
     }
 
     pub(super) fn submit_prompt(&mut self) -> bool {
@@ -564,6 +610,45 @@ impl TuiApp {
                     let _ = self
                         .cmd_tx
                         .send(EngineCommand::RunShellCommand(args.to_string()));
+                    return false;
+                }
+                Some(SlashCommand::Intel) => {
+                    self.text_area = create_text_area();
+                    if args.is_empty() {
+                        self.open_personal_intelligence_modal();
+                        return false;
+                    }
+                    let mut pi = self.config.personal_intelligence.clone();
+                    match args.to_ascii_lowercase().as_str() {
+                        "clear" => {
+                            pi.items.clear();
+                            self.status_bar = ("Personal Intelligence cleared.".into(), false);
+                        }
+                        "on" | "enable" => {
+                            pi.enabled = true;
+                            self.status_bar = ("Personal Intelligence enabled.".into(), false);
+                        }
+                        "off" | "disable" => {
+                            pi.enabled = false;
+                            self.status_bar = ("Personal Intelligence disabled.".into(), false);
+                        }
+                        _ => {
+                            let fact = clean_pi_item(
+                                args.strip_prefix("add ").unwrap_or(args),
+                            );
+                            if !fact.is_empty() {
+                                let mut items = pi.items;
+                                items.push(fact.to_string());
+                                pi = PersonalIntelligence::new(items, true);
+                                self.status_bar = (
+                                    format!("Added to Personal Intelligence: {fact}"),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                    self.config.personal_intelligence = pi.clone();
+                    let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
                     return false;
                 }
                 Some(cmd) if !args.is_empty() => {
@@ -617,7 +702,14 @@ impl TuiApp {
                 }
             }
             self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
+            let args = raw_prompt
+                .trim()
+                .strip_prefix('@')
+                .and_then(|rest| rest.find(char::is_whitespace).map(|idx| rest[idx..].trim()))
+                .filter(|s| !s.is_empty())
+                .map(String::from);
             turn.active_skill = Some(skill_name);
+            turn.skill_args = args;
             user_prompt
         } else {
             raw_prompt

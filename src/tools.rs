@@ -6,12 +6,13 @@ mod execute_command;
 mod fetch_url;
 mod fs;
 mod git;
+mod personal_intelligence;
 mod read_file;
 mod repo_map;
 mod search;
 mod skill;
 mod system;
-mod utils;
+pub(crate) mod utils;
 mod web_search;
 mod workspace_snapshot;
 
@@ -451,7 +452,14 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" => {
+        "git"
+        | "cargo"
+        | "fs"
+        | "repo_map"
+        | "dotfiles"
+        | "system"
+        | "skill"
+        | "personal_intelligence" => {
             let raw = args
                 .get("action")
                 .and_then(Value::as_str)
@@ -459,6 +467,8 @@ pub fn call_signature(call: &ToolCall) -> String {
                 .trim();
             if name == "skill" && matches!(raw, "edit" | "update") {
                 "modify".to_string()
+            } else if name == "personal_intelligence" && raw == "get" {
+                "read".to_string()
             } else {
                 raw.to_string()
             }
@@ -643,6 +653,41 @@ fn format_skill_approval(mut out: String, args: &Value, obj: &Map<String, Value>
     out.trim_end().to_string()
 }
 
+fn format_personal_intelligence_approval(
+    mut out: String,
+    args: &Value,
+    obj: &Map<String, Value>,
+) -> String {
+    for (k, v) in obj {
+        out.push_str(&format_kv(k, v));
+    }
+
+    if let Ok(parsed) = parse_args::<personal_intelligence::PersonalIntelligenceArgs>(
+        args,
+        personal_intelligence::Tool::NAME,
+    ) && let Ok(ctx) = ToolContext::from_cwd()
+    {
+        match parsed.action {
+            personal_intelligence::PersonalIntelligenceAction::Add
+            | personal_intelligence::PersonalIntelligenceAction::Remove
+            | personal_intelligence::PersonalIntelligenceAction::Set
+            | personal_intelligence::PersonalIntelligenceAction::Clear => {
+                match personal_intelligence::preview_mutation(&parsed, &ctx) {
+                    Ok((_, display, original, updated, _)) => {
+                        append_unified_diff(&mut out, &display, &original, &updated);
+                    }
+                    Err(e) => {
+                        out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+                    }
+                }
+            }
+            personal_intelligence::PersonalIntelligenceAction::List
+            | personal_intelligence::PersonalIntelligenceAction::Read => {}
+        }
+    }
+    out.trim_end().to_string()
+}
+
 pub fn format_approval(call: &ToolCall) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -661,6 +706,7 @@ pub fn format_approval(call: &ToolCall) -> String {
         "fs" => return format_fs_approval(out, args, obj),
         "dotfiles" => return format_dotfiles_approval(out, args, obj),
         "skill" => return format_skill_approval(out, args, obj),
+        "personal_intelligence" => return format_personal_intelligence_approval(out, args, obj),
         _ => {}
     }
 
@@ -761,6 +807,7 @@ register_tools! {
     async: fetch_url,
     blocking: fs,
     async: git,
+    blocking: personal_intelligence,
     blocking: read_file,
     blocking: repo_map,
     blocking: search,

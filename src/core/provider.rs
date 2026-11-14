@@ -109,14 +109,19 @@ impl Provider {
         tx: UnboundedSender<EngineEvent>,
     ) {
         let active_skill = turn.active_skill.as_deref();
+        let skill_args = turn.skill_args.as_deref();
 
         let tools_schema = turn
             .enable_tools
             .then(|| tools::schemas_for_turn(&config, active_skill))
             .filter(|t| !t.is_empty());
 
-        let effective_system_prompt =
-            crate::core::skills::compose_system_prompt(&turn.system_prompt, active_skill, &config);
+        let effective_system_prompt = crate::core::skills::compose_system_prompt(
+            &turn.system_prompt,
+            active_skill,
+            skill_args,
+            &config,
+        );
 
         // Strip any historical tool_calls for tools that are currently disabled
         let messages = sanitize_messages_for_turn(messages, &config, active_skill);

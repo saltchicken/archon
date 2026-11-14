@@ -45,10 +45,145 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersonalIntelligence {
+    pub enabled: bool,
+    pub items: Vec<String>,
+}
+
+impl Default for PersonalIntelligence {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            items: vec!["The user is running CachyOS.".into()],
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PersonalIntelligence {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawPi {
+            Table {
+                #[serde(default = "default_true")]
+                enabled: bool,
+                #[serde(default, alias = "facts", alias = "data", alias = "entries")]
+                items: Vec<String>,
+                #[serde(default, alias = "content", alias = "notes")]
+                prompt: Option<String>,
+            },
+            List(Vec<String>),
+            Text(String),
+        }
+
+        fn default_true() -> bool {
+            true
+        }
+
+        match RawPi::deserialize(deserializer)? {
+            RawPi::Table {
+                enabled,
+                items,
+                prompt,
+            } => {
+                let mut merged = items;
+                if let Some(p) = prompt {
+                    merged.extend(
+                        p.lines()
+                            .map(clean_pi_item)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from),
+                    );
+                }
+                Ok(Self::new(merged, enabled))
+            }
+            RawPi::List(items) => Ok(Self::new(items, true)),
+            RawPi::Text(text) => Ok(Self::from_editor_text(&text, true)),
+        }
+    }
+}
+
+pub fn clean_pi_item(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+        .map_or(trimmed, str::trim)
+}
+
+impl PersonalIntelligence {
+    pub fn new(raw_items: Vec<String>, enabled: bool) -> Self {
+        let mut items: Vec<String> = Vec::new();
+        for raw in raw_items {
+            for line in raw.lines() {
+                let cleaned = clean_pi_item(line);
+                if !cleaned.is_empty()
+                    && !items.iter().any(|existing| existing.eq_ignore_ascii_case(cleaned))
+                {
+                    items.push(cleaned.to_string());
+                }
+            }
+        }
+        Self { enabled, items }
+    }
+
+    pub fn count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|s| !clean_pi_item(s).is_empty())
+            .count()
+    }
+
+    pub fn to_editor_text(&self) -> String {
+        self.items
+            .iter()
+            .map(|s| clean_pi_item(s))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn from_editor_text(raw: &str, enabled: bool) -> Self {
+        let lines = raw
+            .lines()
+            .map(clean_pi_item)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        Self::new(lines, enabled)
+    }
+
+    pub fn format_for_prompt(&self) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let bullets: Vec<String> = self
+            .items
+            .iter()
+            .map(|s| clean_pi_item(s))
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("- {s}"))
+            .collect();
+        if bullets.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "<personal_intelligence>\nPersistent user context and environment facts (always apply):\n{}\n</personal_intelligence>",
+            bullets.join("\n")
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
+    pub personal_intelligence: PersonalIntelligence,
     pub execute_command: ExecuteCommandSettings,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: EndpointSettings,
@@ -59,6 +194,7 @@ pub struct Config {
     pub skills: Vec<SkillDefinition>,
     #[serde(skip)]
     pub workspace_skills_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
 }
 
@@ -160,6 +296,8 @@ impl Default for AppSettings {
                 "dotfiles:read",
                 "dotfiles:search",
                 "dotfiles:validate",
+                "personal_intelligence:list",
+                "personal_intelligence:read",
                 "skill:list",
                 "skill:read",
             ]
@@ -204,6 +342,7 @@ impl Default for Config {
         };
         Self {
             app: AppSettings::default(),
+            personal_intelligence: PersonalIntelligence::default(),
             execute_command: ExecuteCommandSettings::default(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: EndpointSettings {
@@ -252,6 +391,77 @@ pub fn archon_config_root() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon")
+}
+
+pub fn save_personal_intelligence_to(
+    cfg_path: &Path,
+    pi: &PersonalIntelligence,
+) -> Result<String> {
+    if let Some(parent) = cfg_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+
+    let mut table: toml::Table = if cfg_path.exists() {
+        let raw = fs::read_to_string(cfg_path)
+            .with_context(|| format!("Failed to read {}", cfg_path.display()))?;
+        toml::from_str(&raw)
+            .with_context(|| format!("Failed to parse TOML in {}", cfg_path.display()))?
+    } else {
+        toml::Table::new()
+    };
+
+    let pi_val = toml::Value::try_from(pi)
+        .context("Failed to serialize personal_intelligence to TOML value")?;
+    table.insert("personal_intelligence".into(), pi_val);
+
+    let rendered =
+        toml::to_string_pretty(&table).context("Failed to serialize updated config.toml")?;
+    crate::tools::utils::fs::atomic_write_file(cfg_path, &rendered)
+        .with_context(|| format!("Failed to write {}", cfg_path.display()))?;
+    Ok(rendered)
+}
+
+pub fn save_global_personal_intelligence(pi: &PersonalIntelligence) -> Result<String> {
+    let base_path = archon_config_root().join("config.toml");
+    save_personal_intelligence_to(&base_path, pi)
+}
+
+pub fn reload_personal_intelligence(current_config: &Config) -> PersonalIntelligence {
+    let base_path = archon_config_root().join("config.toml");
+    let ws_dir = current_config
+        .workspace
+        .as_deref()
+        .map(Path::new)
+        .map(workspace_config_dir_for)
+        .or_else(|| {
+            current_config
+                .workspace_skills_dir
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        });
+
+    let base_figment =
+        Figment::from(Serialized::defaults(Config::default())).merge(Toml::file(&base_path));
+    let global_pi = base_figment
+        .clone()
+        .extract::<Config>()
+        .map(|c| c.personal_intelligence)
+        .unwrap_or_default();
+
+    let Some(ws_dir) = ws_dir else {
+        return global_pi;
+    };
+    let local_config_path = ws_dir.join("config.toml");
+    let Ok(merged_cfg) = base_figment.merge(Toml::file(&local_config_path)).extract::<Config>()
+    else {
+        return global_pi;
+    };
+
+    let mut combined_items = global_pi.items;
+    combined_items.extend(merged_cfg.personal_intelligence.items);
+    PersonalIntelligence::new(combined_items, merged_cfg.personal_intelligence.enabled)
 }
 
 fn read_bound_workspace(cfg_path: &Path) -> Option<PathBuf> {
@@ -403,6 +613,11 @@ impl Config {
             if let Ok(toml_str) = toml::to_string_pretty(&Self::default()) {
                 let _ = fs::write(base_path, toml_str);
             }
+        } else if let Ok(raw) = fs::read_to_string(base_path)
+            && let Ok(table) = toml::from_str::<toml::Table>(&raw)
+            && !table.contains_key("personal_intelligence")
+        {
+            let _ = save_personal_intelligence_to(base_path, &PersonalIntelligence::default());
         }
 
         let ws_dir = workspace_config_dir.as_ref();
@@ -411,10 +626,10 @@ impl Config {
 
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
-        let global_files = base_figment
+        let (global_files, global_pi) = base_figment
             .clone()
             .extract::<Self>()
-            .map(|c| c.workspace_snapshot.file)
+            .map(|c| (c.workspace_snapshot.file, c.personal_intelligence))
             .unwrap_or_default();
 
         let bound_ws = read_bound_workspace(&local_config_path)
@@ -432,6 +647,12 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
+                let mut merged_pi_items = global_pi.items;
+                merged_pi_items.extend(cfg.personal_intelligence.items);
+                cfg.personal_intelligence = PersonalIntelligence::new(
+                    merged_pi_items,
+                    cfg.personal_intelligence.enabled,
+                );
                 cfg.skills = crate::core::skills::discover_skills(
                     &cfg.app.skills_dir,
                     Some(ws_skills_dir.as_path()),

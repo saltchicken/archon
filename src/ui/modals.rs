@@ -225,4 +225,48 @@ impl TuiApp {
         )));
         f.render_widget(footer, chunks[2]);
     }
+
+    pub(super) fn draw_personal_intelligence_modal(&self, f: &mut Frame) {
+        let area = centered_rect(75, 60, f.area());
+        f.render_widget(Clear, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(6),
+                Constraint::Length(2),
+            ])
+            .split(area);
+
+        let (status_label, status_color) = if self.pi_enabled_draft {
+            ("ENABLED", Color::Green)
+        } else {
+            ("DISABLED", Color::Red)
+        };
+
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Persistent Personal Intelligence ",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("(Always passed to the model across all sessions) │ "),
+            Span::styled(
+                format!("Status: {status_label}"),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .block(titled_block(" Personal Intelligence (^P) "));
+        f.render_widget(header, chunks[0]);
+
+        f.render_widget(&self.pi_area, chunks[1]);
+
+        let footer = Paragraph::new(Line::from(Span::styled(
+            " [^E] Toggle ON/OFF   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Persist   [Esc] Cancel",
+            Style::default().fg(Color::Yellow),
+        )));
+        f.render_widget(footer, chunks[2]);
+    }
 }

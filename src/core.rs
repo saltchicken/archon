@@ -9,7 +9,7 @@ pub mod skills;
 
 use crate::tools::{self, ToolCall};
 use attachments::{ImageAttachment, ImageStaging};
-use config::Config;
+use config::{Config, PersonalIntelligence};
 use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
@@ -31,6 +31,7 @@ pub struct TurnConfig {
     pub num_ctx: u32,
     pub enable_tools: bool,
     pub active_skill: Option<String>,
+    pub skill_args: Option<String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,7 @@ pub enum EngineCommand {
         max_tool_output_size: usize,
     },
     SetTurnConfig(TurnConfig),
+    SetPersonalIntelligence(PersonalIntelligence),
     RunShellCommand(String),
 }
 
@@ -108,6 +110,7 @@ pub enum EngineEvent {
     },
     SessionsListed(Vec<SessionSummary>),
     SkillsUpdated(Vec<SkillDefinition>),
+    PersonalIntelligenceUpdated(PersonalIntelligence),
     ModelConfigUpdated {
         model: String,
         num_ctx: u32,
@@ -174,6 +177,7 @@ impl CoreEngine {
                 num_ctx,
                 enable_tools: true,
                 active_skill: None,
+                skill_args: None,
             },
             active_max_tool_output_size,
             session_auto_approve: HashSet::new(),
@@ -648,8 +652,10 @@ impl CoreEngine {
                 turn,
             } => {
                 let active_skill = self.turn.active_skill.take();
+                let skill_args = self.turn.skill_args.take();
                 self.turn = turn;
                 self.turn.active_skill = active_skill;
+                self.turn.skill_args = skill_args;
                 let (index, total) = self.tool_batch_progress();
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
@@ -731,6 +737,7 @@ impl CoreEngine {
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
                         self.turn.active_skill = None;
+                        self.turn.skill_args = None;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -783,6 +790,7 @@ impl CoreEngine {
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
                 self.turn.active_skill = None;
+                self.turn.skill_args = None;
                 self.turn.num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
@@ -844,10 +852,46 @@ impl CoreEngine {
             }
             EngineCommand::SetTurnConfig(new_turn) => {
                 let active_skill = self.turn.active_skill.take();
+                let skill_args = self.turn.skill_args.take();
                 self.turn = new_turn;
                 self.turn.active_skill = active_skill;
+                self.turn.skill_args = skill_args;
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
+            }
+            EngineCommand::SetPersonalIntelligence(pi) => {
+                info!(
+                    "Updating Personal Intelligence (enabled: {}, items: {})",
+                    pi.enabled,
+                    pi.items.len()
+                );
+                let pi_to_save = pi.clone();
+                let save_res = tokio::task::spawn_blocking(move || {
+                    config::save_global_personal_intelligence(&pi_to_save)
+                })
+                .await;
+
+                match save_res {
+                    Ok(Ok(_)) => {
+                        self.config.personal_intelligence =
+                            config::reload_personal_intelligence(&self.config);
+                        let _ = self.tx.send(EngineEvent::PersonalIntelligenceUpdated(
+                            self.config.personal_intelligence.clone(),
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        error!("Failed to persist Personal Intelligence: {e}");
+                        self.config.personal_intelligence = pi;
+                        self.notify(
+                            format!("Updated in memory, but failed to save to config.toml: {e}"),
+                            true,
+                        );
+                    }
+                    Err(e) => {
+                        error!("Personal Intelligence save task panicked: {e}");
+                        self.config.personal_intelligence = pi;
+                    }
+                }
             }
             EngineCommand::RunShellCommand(raw_cmd) => {
                 if self.is_turn_active() {
@@ -977,6 +1021,12 @@ impl CoreEngine {
                     let _ = self
                         .tx
                         .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
+                } else if tool_name == "personal_intelligence" {
+                    self.config.personal_intelligence =
+                        config::reload_personal_intelligence(&self.config);
+                    let _ = self.tx.send(EngineEvent::PersonalIntelligenceUpdated(
+                        self.config.personal_intelligence.clone(),
+                    ));
                 }
                 self.messages
                     .push(ChatMessage::new_tool(tool_name, output, truncated));
