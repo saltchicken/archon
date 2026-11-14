@@ -7,14 +7,15 @@ use super::{
 };
 use crate::core::config::expand_tilde;
 use anyhow::Result;
-use globset::GlobSet;
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
     collections::HashSet,
     fmt::Write as _,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 pub struct Tool;
@@ -89,23 +90,112 @@ fn archon_config_dir() -> Option<PathBuf> {
     dunce::canonicalize(&dir).ok().or(Some(dir))
 }
 
+fn has_glob_meta(s: &str) -> bool {
+    s.contains(['*', '?', '[', '{'])
+}
+
+fn split_static_glob_prefix(path: &Path) -> PathBuf {
+    let mut prefix = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(os) => {
+                if os.to_str().is_some_and(has_glob_meta) {
+                    break;
+                }
+                prefix.push(os);
+            }
+            _ => prefix.push(comp.as_os_str()),
+        }
+    }
+    if prefix.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        prefix
+    }
+}
+
+fn expand_extra_entry(
+    raw_file: &str,
+    base_root: &Path,
+) -> std::result::Result<Vec<PathBuf>, String> {
+    let expanded = expand_tilde(raw_file);
+    let candidate = if expanded.is_relative() {
+        base_root.join(&expanded)
+    } else {
+        expanded
+    };
+
+    let candidate_str = candidate.to_string_lossy();
+    if !has_glob_meta(&candidate_str) {
+        return Ok(vec![candidate]);
+    }
+
+    let search_root = split_static_glob_prefix(&candidate);
+    if !search_root.exists() {
+        return Ok(Vec::new());
+    }
+    let canon_root = dunce::canonicalize(&search_root).unwrap_or_else(|_| search_root.clone());
+
+    let rel_pattern = candidate
+        .strip_prefix(&search_root)
+        .unwrap_or(&candidate)
+        .to_string_lossy();
+    let full_canon_pattern = canon_root
+        .join(rel_pattern.as_ref())
+        .to_string_lossy()
+        .into_owned();
+
+    let mut builder = GlobSetBuilder::new();
+    builder.add(
+        Glob::new(&candidate_str).map_err(|e| format!("Invalid glob pattern '{raw_file}': {e}"))?,
+    );
+    if full_canon_pattern != candidate_str
+        && let Ok(g) = Glob::new(&full_canon_pattern)
+    {
+        builder.add(g);
+    }
+    let matcher = builder
+        .build()
+        .map_err(|e| format!("Invalid glob pattern '{raw_file}': {e}"))?;
+
+    let mut matched = Vec::new();
+    for entry in WalkBuilder::new(&canon_root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build()
+        .flatten()
+    {
+        let p = entry.path();
+        if !p.is_file() || has_git_dir_component(p) {
+            continue;
+        }
+        if matcher.is_match(p) {
+            matched.push(p.to_path_buf());
+        }
+    }
+
+    matched.sort();
+    matched.dedup();
+    Ok(matched)
+}
+
 fn validate_extra_file(
     raw_file: &str,
-    expanded: &Path,
+    candidate: &Path,
     base_root: &Path,
     exclude_set: &GlobSet,
     trusted_global_files: &HashSet<PathBuf>,
+    trusted_global_globs: &GlobSet,
     config_dir: Option<&Path>,
 ) -> std::result::Result<PathBuf, String> {
-    let candidate = if expanded.is_relative() {
-        base_root.join(expanded)
-    } else {
-        expanded.to_path_buf()
-    };
-    let canon = dunce::canonicalize(&candidate).unwrap_or(candidate);
+    let canon = dunce::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
 
     if trusted_global_files.contains(&canon)
-        || trusted_global_files.contains(expanded)
+        || trusted_global_files.contains(candidate)
+        || trusted_global_globs.is_match(&canon)
+        || trusted_global_globs.is_match(candidate)
         || config_dir.is_some_and(|cfg| canon.starts_with(cfg))
     {
         return Ok(canon);
@@ -227,71 +317,111 @@ impl BlockingTool for Tool {
         }
 
         if args.target_path.trim().is_empty() {
-            let trusted_global_files: HashSet<PathBuf> = settings
-                .global_files
-                .iter()
-                .flat_map(|f| {
-                    let exp = expand_tilde(f);
-                    let canon = dunce::canonicalize(&exp).unwrap_or_else(|_| exp.clone());
-                    [exp, canon]
-                })
-                .collect();
+            let mut trusted_global_files = HashSet::new();
+            let mut global_glob_builder = GlobSetBuilder::new();
+            for f in &settings.global_files {
+                let exp = expand_tilde(f);
+                let abs = if exp.is_relative() {
+                    base_root.join(&exp)
+                } else {
+                    exp
+                };
+                let abs_str = abs.to_string_lossy();
+                if has_glob_meta(&abs_str) {
+                    if let Ok(g) = Glob::new(&abs_str) {
+                        global_glob_builder.add(g);
+                    }
+                    let prefix = split_static_glob_prefix(&abs);
+                    if let Ok(canon_prefix) = dunce::canonicalize(&prefix)
+                        && let Ok(rel) = abs.strip_prefix(&prefix)
+                        && let Ok(g) = Glob::new(&canon_prefix.join(rel).to_string_lossy())
+                    {
+                        global_glob_builder.add(g);
+                    }
+                } else {
+                    let canon = dunce::canonicalize(&abs).unwrap_or_else(|_| abs.clone());
+                    trusted_global_files.insert(abs);
+                    trusted_global_files.insert(canon);
+                }
+            }
+            let trusted_global_globs = global_glob_builder
+                .build()
+                .unwrap_or_else(|_| GlobSet::empty());
+
             let cfg_dir = archon_config_dir();
-            let mut seen = HashSet::new();
+            let mut seen: HashSet<PathBuf> = entries
+                .iter()
+                .map(|e| dunce::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone()))
+                .collect();
+
+            let mut record_extra = |display: String, marker: &str, outcome: Option<FileOutcome>| {
+                let _ = writeln!(tree_out, "{display}{marker}");
+                if !args.tree_only
+                    && let Some(o) = outcome
+                {
+                    files.push((display, o));
+                }
+            };
 
             for raw_file in &settings.file {
-                let expanded = expand_tilde(raw_file);
-                if !seen.insert(expanded.clone()) {
-                    continue;
-                }
-
-                let mut record_extra =
-                    |display: String, marker: &str, outcome: Option<FileOutcome>| {
-                        let _ = writeln!(tree_out, "{display}{marker}");
-                        if !args.tree_only
-                            && let Some(o) = outcome
-                        {
-                            files.push((display, o));
-                        }
-                    };
-
-                match validate_extra_file(
-                    raw_file,
-                    &expanded,
-                    &base_root,
-                    &exclude_set,
-                    &trusted_global_files,
-                    cfg_dir.as_deref(),
-                ) {
-                    Ok(valid_path) => {
-                        let display_path = shrink_tilde(&valid_path);
-                        if !valid_path.exists() {
-                            record_extra(
-                                display_path,
-                                " (not found)",
-                                Some(FileOutcome::Error("File does not exist.".into())),
-                            );
-                        } else if valid_path.is_dir() {
-                            record_extra(display_path, "/", None);
-                        } else {
-                            let outcome = (!args.tree_only).then(|| {
-                                read_to_outcome(
-                                    &valid_path,
-                                    display_path.len(),
-                                    settings.max_size,
-                                    &mut used_bytes,
-                                    max_output_size,
-                                )
-                            });
-                            record_extra(display_path, "", outcome);
-                        }
-                    }
-                    Err(sec_err) => {
+                let candidates = match expand_extra_entry(raw_file, &base_root) {
+                    Ok(list) => list,
+                    Err(glob_err) => {
                         record_extra(
-                            shrink_tilde(&expanded),
-                            " (blocked)",
-                            Some(FileOutcome::Error(sec_err)),
+                            raw_file.clone(),
+                            " (invalid glob)",
+                            Some(FileOutcome::Error(glob_err)),
                         );
+                        continue;
+                    }
+                };
+
+                for candidate in candidates {
+                    let dedup_key =
+                        dunce::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    if !seen.insert(dedup_key) {
+                        continue;
+                    }
+
+                    match validate_extra_file(
+                        raw_file,
+                        &candidate,
+                        &base_root,
+                        &exclude_set,
+                        &trusted_global_files,
+                        &trusted_global_globs,
+                        cfg_dir.as_deref(),
+                    ) {
+                        Ok(valid_path) => {
+                            let display_path = shrink_tilde(&valid_path);
+                            if !valid_path.exists() {
+                                record_extra(
+                                    display_path,
+                                    " (not found)",
+                                    Some(FileOutcome::Error("File does not exist.".into())),
+                                );
+                            } else if valid_path.is_dir() {
+                                record_extra(display_path, "/", None);
+                            } else {
+                                let outcome = (!args.tree_only).then(|| {
+                                    read_to_outcome(
+                                        &valid_path,
+                                        display_path.len(),
+                                        settings.max_size,
+                                        &mut used_bytes,
+                                        max_output_size,
+                                    )
+                                });
+                                record_extra(display_path, "", outcome);
+                            }
+                        }
+                        Err(sec_err) => {
+                            record_extra(
+                                shrink_tilde(&candidate),
+                                " (blocked)",
+                                Some(FileOutcome::Error(sec_err)),
+                            );
+                        }
                     }
                 }
             }
