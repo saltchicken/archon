@@ -58,7 +58,6 @@ pub enum EngineCommand {
         num_ctx: u32,
         max_tool_output_size: usize,
     },
-    SetContextWindow(u32),
     SetTurnConfig(TurnConfig),
 }
 
@@ -705,11 +704,7 @@ impl CoreEngine {
                             }
                         }
 
-                        self.turn.num_ctx = if data.num_ctx > 0 {
-                            data.num_ctx
-                        } else {
-                            self.config.context_for_model(&self.model)
-                        };
+                        self.turn.num_ctx = self.config.context_for_model(&self.model);
                         self.active_max_tool_output_size =
                             self.config.max_tool_output_for_model(&self.model);
 
@@ -809,14 +804,6 @@ impl CoreEngine {
                     ),
                     false,
                 );
-            }
-            EngineCommand::SetContextWindow(new_ctx) => {
-                let clamped = new_ctx.max(512);
-                info!("Updating context window to {}", clamped);
-                self.turn.num_ctx = clamped;
-                self.save_session_bg(Vec::new()).await;
-                self.emit_model_config();
-                self.notify(format!("Context window set to {} tokens.", clamped), false);
             }
             EngineCommand::SetTurnConfig(new_turn) => {
                 let active_skill = self

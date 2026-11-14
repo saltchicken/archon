@@ -125,7 +125,6 @@ impl TuiApp {
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
-            ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
             ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
@@ -219,39 +218,6 @@ impl TuiApp {
         }
     }
 
-    fn handle_context_window_key(&mut self, code: KeyCode) {
-        let presets = super::modals::CTX_PRESETS;
-        match code {
-            KeyCode::Esc => self.modal = ActiveModal::None,
-            KeyCode::Up => {
-                self.ctx_input.clear();
-                self.ctx_preset_idx = self.ctx_preset_idx.saturating_sub(1);
-            }
-            KeyCode::Down if self.ctx_preset_idx + 1 < presets.len() => {
-                self.ctx_input.clear();
-                self.ctx_preset_idx += 1;
-            }
-            KeyCode::Backspace => {
-                self.ctx_input.pop();
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                self.ctx_input.push(c);
-            }
-            KeyCode::Enter => {
-                let target_ctx = if !self.ctx_input.is_empty() {
-                    self.ctx_input.parse::<u32>().ok()
-                } else {
-                    presets.get(self.ctx_preset_idx).map(|(v, _)| *v)
-                };
-                if let Some(ctx) = target_ctx {
-                    let _ = self.cmd_tx.send(EngineCommand::SetContextWindow(ctx));
-                }
-                self.modal = ActiveModal::None;
-            }
-            _ => {}
-        }
-    }
-
     fn handle_system_prompt_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
         match key.code {
             KeyCode::Esc => self.modal = ActiveModal::None,
@@ -332,14 +298,6 @@ impl TuiApp {
                     self.model_idx = idx;
                 }
                 self.modal = ActiveModal::ModelSelect;
-            }
-            KeyCode::Char('w') if ctrl => {
-                self.ctx_input.clear();
-                self.ctx_preset_idx = super::modals::CTX_PRESETS
-                    .iter()
-                    .position(|(v, _)| *v == self.num_ctx)
-                    .unwrap_or(3);
-                self.modal = ActiveModal::ContextWindow;
             }
             KeyCode::Char('r') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);

@@ -7,17 +7,6 @@ use ratatui::{
     widgets::{Clear, List, ListItem, Paragraph, Widget, Wrap},
 };
 
-pub const CTX_PRESETS: &[(u32, &str)] = &[
-    (4_096, "4k"),
-    (8_192, "8k"),
-    (16_384, "16k"),
-    (32_768, "32k"),
-    (65_536, "64k"),
-    (131_072, "128k"),
-    (262_144, "256k"),
-    (1_048_576, "1M"),
-];
-
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let split = |dir, pct, rect| {
         let margin = (100 - pct) / 2;
@@ -164,52 +153,6 @@ impl TuiApp {
 
         let widget = List::new(items).block(titled_block(" Select Model (⏎=Switch, Esc=Cancel) "));
         render_modal(f, 65, 45, widget);
-    }
-
-    pub(super) fn draw_context_modal(&self, f: &mut Frame) {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Active Context: ", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    format!("{} tokens", self.num_ctx),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "Custom Value:   ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(if self.ctx_input.is_empty() {
-                    "(select preset below or type digits)"
-                } else {
-                    &self.ctx_input
-                }),
-            ]),
-            Line::from(""),
-        ];
-
-        for (i, (val, label)) in CTX_PRESETS.iter().enumerate() {
-            let selected = i == self.ctx_preset_idx && self.ctx_input.is_empty();
-            let (prefix, style) = selection_style(selected, *val == self.num_ctx);
-            lines.push(Line::from(Span::styled(
-                format!("{prefix}{val:>9} tokens ({label})"),
-                style,
-            )));
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[↑/↓] Select Preset   [0-9] Type Custom   [⏎] Apply   [Esc] Cancel",
-            Style::default().fg(Color::Yellow),
-        )));
-
-        let widget = Paragraph::new(lines).block(titled_block(" Context Window (^W) "));
-        render_modal(f, 55, 50, widget);
     }
 
     pub(super) fn draw_tool_modal(&self, f: &mut Frame) {

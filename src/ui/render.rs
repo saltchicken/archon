@@ -468,7 +468,6 @@ impl TuiApp {
             ActiveModal::Sessions => self.draw_sessions_modal(f),
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
-            ActiveModal::ContextWindow => self.draw_context_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::None => {}
         }
@@ -513,7 +512,6 @@ impl TuiApp {
             ("⏎", "Send"),
             ("⇧⏎", "Newline"),
             ("^M", "Model"),
-            ("^W", "Ctx"),
             ("^B", "Sidebar"),
             ("^S", "Sessions"),
             ("^R", "New"),
@@ -557,7 +555,6 @@ impl TuiApp {
                     format!("{}/{} ({pct:.0}%)", self.used_tokens, self.num_ctx),
                     Style::default().fg(ctx_color),
                 ),
-                Span::raw(" (^W)"),
             ]),
             Line::from(format!(
                 "Tools:   {} ({}KB max) (^T)",

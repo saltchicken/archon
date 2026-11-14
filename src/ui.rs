@@ -57,7 +57,6 @@ pub(super) enum ActiveModal {
     Sessions,
     ToolApproval,
     ModelSelect,
-    ContextWindow,
     SystemPrompt,
 }
 
@@ -119,8 +118,6 @@ pub struct TuiApp {
     pub(super) status_bar: (String, bool),
 
     pub(super) model_idx: usize,
-    pub(super) ctx_preset_idx: usize,
-    pub(super) ctx_input: String,
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) sys_prompt_area: TextArea<'static>,
@@ -205,8 +202,6 @@ impl TuiApp {
                 false,
             ),
             model_idx,
-            ctx_preset_idx: 0,
-            ctx_input: String::new(),
             sys_preset_idx: 0,
             custom_system_prompt: None,
             sys_prompt_area: create_sys_prompt_area(""),
@@ -269,11 +264,6 @@ impl TuiApp {
                 match self.modal {
                     ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
                     ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
-                    ActiveModal::ContextWindow => {
-                        for c in single_line.chars().filter(|c| c.is_ascii_digit()) {
-                            self.ctx_input.push(c);
-                        }
-                    }
                     ActiveModal::SystemPrompt => {
                         self.sys_prompt_area.insert_str(text.replace('\r', ""));
                     }
