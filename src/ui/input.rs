@@ -345,6 +345,7 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
+            KeyCode::Char('e') if ctrl => self.enable_skills = !self.enable_skills,
             KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
             KeyCode::Char('y') if ctrl => {
                 let sys_text = self.current_system_prompt_text();

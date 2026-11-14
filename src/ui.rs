@@ -92,6 +92,7 @@ pub struct TuiApp {
     pub(super) custom_system_prompt: Option<String>,
     pub(super) sys_prompt_area: TextArea<'static>,
     pub(super) enable_tools: bool,
+    pub(super) enable_skills: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
     pub(super) used_tokens: u64,
@@ -177,6 +178,7 @@ impl TuiApp {
             custom_system_prompt: None,
             sys_prompt_area: create_sys_prompt_area(""),
             enable_tools: true,
+            enable_skills: true,
             num_ctx,
             max_tool_output_size,
             used_tokens: 0,
@@ -482,6 +484,7 @@ impl TuiApp {
             system_prompt: self.current_system_prompt_text(),
             num_ctx: self.num_ctx,
             enable_tools: self.enable_tools,
+            enable_skills: self.enable_skills,
         }
     }
 
@@ -501,8 +504,9 @@ impl TuiApp {
         }
 
         let turn = self.current_turn_config();
-        let prompt = if let Some((skill_name, expanded)) =
-            crate::core::skills::expand_slash_command(&raw_prompt, &self.config)
+        let prompt = if self.enable_skills
+            && let Some((skill_name, expanded)) =
+                crate::core::skills::expand_slash_command(&raw_prompt, &self.config)
         {
             self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
             expanded

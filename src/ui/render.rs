@@ -521,6 +521,7 @@ impl TuiApp {
             ("^f", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
+            ("^E", "Skills"),
             ("^Y", "SysMsg"),
             ("^Q", "Quit"),
         ];
@@ -563,7 +564,11 @@ impl TuiApp {
                 if self.enable_tools { "ON" } else { "OFF" },
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
+            Line::from(format!(
+                "Skills:  {} ({} loaded) (^E)",
+                if self.enable_skills { "ON" } else { "OFF" },
+                self.config.skills.len()
+            )),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(
@@ -777,7 +782,8 @@ impl TuiApp {
         let mut scrollbar_state = ScrollbarState::new(max_scroll).position(self.chat_scroll);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
-        if let Some(first_line) = self.text_area.lines().first()
+        if self.enable_skills
+            && let Some(first_line) = self.text_area.lines().first()
             && let Some(cmd_prefix) = first_line.trim_start().strip_prefix('/')
             && !cmd_prefix.contains(char::is_whitespace)
         {

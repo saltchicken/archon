@@ -103,18 +103,25 @@ impl Provider {
         &self,
         client: Client,
         model: String,
-        config: Config,
+        mut config: Config,
         messages: Vec<ChatMessage>,
         turn: TurnConfig,
         tx: UnboundedSender<EngineEvent>,
     ) {
+        if !turn.enable_skills {
+            config.skills.clear();
+        }
+
         let tools_schema = turn
             .enable_tools
             .then(|| tools::schemas_for_turn(&config))
             .filter(|t| !t.is_empty());
 
-        let effective_system_prompt =
-            crate::core::skills::compose_system_prompt(&turn.system_prompt, &config);
+        let effective_system_prompt = if turn.enable_skills {
+            crate::core::skills::compose_system_prompt(&turn.system_prompt, &config)
+        } else {
+            turn.system_prompt.trim().to_string()
+        };
 
         // Strip any historical tool_calls for tools that are currently disabled
         let messages: Vec<ChatMessage> = messages

@@ -29,6 +29,7 @@ pub struct TurnConfig {
     pub system_prompt: String,
     pub num_ctx: u32,
     pub enable_tools: bool,
+    pub enable_skills: bool,
 }
 
 #[derive(Debug)]
@@ -160,6 +161,7 @@ impl CoreEngine {
                 system_prompt: String::new(),
                 num_ctx,
                 enable_tools: true,
+                enable_skills: true,
             },
             active_max_tool_output_size,
             session_auto_approve: HashSet::new(),
@@ -239,8 +241,21 @@ impl CoreEngine {
         });
     }
 
+    fn config_for_turn(&self) -> Config {
+        let mut cfg = self.config.clone();
+        if !self.turn.enable_skills {
+            cfg.skills.clear();
+        }
+        cfg
+    }
+
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
-        let skill_rules = self.config.skills.iter().flat_map(|s| s.auto_approve.iter());
+        let active_skills = if self.turn.enable_skills {
+            self.config.skills.as_slice()
+        } else {
+            &[]
+        };
+        let skill_rules = active_skills.iter().flat_map(|s| s.auto_approve.iter());
 
         let all_rules = self
             .config
@@ -314,7 +329,7 @@ impl CoreEngine {
             total,
         });
 
-        let cfg = self.config.clone();
+        let cfg = self.config_for_turn();
         let max_out = self.active_max_tool_output_size;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.internal_rx = Some(rx);
@@ -334,9 +349,10 @@ impl CoreEngine {
         }
 
         let mut modified = false;
+        let turn_cfg = self.config_for_turn();
 
         while let Some(call) = self.pending_tools.front() {
-            if !tools::is_tool_enabled_for_turn(&call.function.name, &self.config) {
+            if !tools::is_tool_enabled_for_turn(&call.function.name, &turn_cfg) {
                 let call = self.pending_tools.pop_front().unwrap();
                 warn!(
                     "Rejecting disabled tool call '{}' without prompting",
@@ -486,7 +502,10 @@ impl CoreEngine {
                 self.notify("Cleared attached images.", false);
             }
             EngineCommand::SendPrompt { prompt, turn } => {
-                info!("User submitted prompt. Enable tools: {}", turn.enable_tools);
+                info!(
+                    "User submitted prompt. Enable tools: {}, Enable skills: {}",
+                    turn.enable_tools, turn.enable_skills
+                );
                 debug!("Prompt content: {}", prompt.replace('\n', " "));
 
                 let (image_names, new_image_blobs) = self.collect_unsent_images().await;
