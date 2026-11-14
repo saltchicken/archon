@@ -106,12 +106,21 @@ pub struct SessionSummary {
 
 pub struct SessionManager {
     conn: Mutex<Connection>,
+    workspace: String,
 }
 
 impl SessionManager {
-    pub fn new(raw_dir: &str) -> Result<Self> {
+    pub fn new(raw_dir: &str, workspace: Option<&str>) -> Result<Self> {
         let history_dir = expand_tilde(raw_dir);
         fs::create_dir_all(&history_dir)?;
+
+        let workspace = workspace
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map( expand_tilde )
+            .or_else(|| std::env::current_dir().ok())
+            .map(|p| dunce::canonicalize(&p).unwrap_or(p).to_string_lossy().into_owned())
+            .unwrap_or_default();
 
         let db_path = history_dir.join("archon.db");
         let conn = Connection::open(&db_path)
@@ -124,6 +133,7 @@ impl SessionManager {
 
              CREATE TABLE IF NOT EXISTS sessions (
                  id TEXT PRIMARY KEY,
+                 workspace TEXT NOT NULL DEFAULT '',
                  title TEXT NOT NULL,
                  model TEXT NOT NULL,
                  updated_at TEXT NOT NULL,
@@ -146,8 +156,28 @@ impl SessionManager {
         )
         .context("Failed to initialize database schema")?;
 
+        let has_workspace_col: bool = conn
+            .prepare("PRAGMA table_info(sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .flatten()
+            .any(|col| col == "workspace");
+
+        if !has_workspace_col {
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN workspace TEXT NOT NULL DEFAULT '';",
+            )
+            .context("Failed to migrate sessions table with workspace column")?;
+        }
+
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated_at
+                 ON sessions(workspace, updated_at DESC);",
+        )
+        .context("Failed to create workspace index on sessions table")?;
+
         Ok(Self {
             conn: Mutex::new(conn),
+            workspace,
         })
     }
 
@@ -195,9 +225,10 @@ impl SessionManager {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO sessions (id, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO sessions (id, workspace, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
+                 workspace = excluded.workspace,
                  title = excluded.title,
                  model = excluded.model,
                  updated_at = excluded.updated_at,
@@ -207,6 +238,7 @@ impl SessionManager {
                  messages_json = excluded.messages_json",
             params![
                 id,
+                self.workspace,
                 title,
                 model,
                 updated_at,
@@ -234,12 +266,13 @@ impl SessionManager {
         let Ok(mut stmt) = conn.prepare(
             "SELECT id, title, updated_at, message_count
              FROM sessions
+             WHERE workspace = ?1
              ORDER BY updated_at DESC",
         ) else {
             return Vec::new();
         };
 
-        stmt.query_map([], |row| {
+        stmt.query_map(params![self.workspace], |row| {
             Ok(SessionSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,

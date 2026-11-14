@@ -144,7 +144,10 @@ impl CoreEngine {
     ) -> anyhow::Result<Self> {
         let provider = Provider::from_model(&model);
         let attachments = Arc::new(ImageStaging::new()?);
-        let sessions = Arc::new(SessionManager::new(&config.app.history_dir)?);
+        let sessions = Arc::new(SessionManager::new(
+            &config.app.history_dir,
+            config.workspace.as_deref(),
+        )?);
         let client = provider.build_client(&config)?;
         let num_ctx = config.context_for_model(&model);
         let active_max_tool_output_size = config.max_tool_output_for_model(&model);

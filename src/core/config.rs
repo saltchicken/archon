@@ -412,6 +412,10 @@ impl Config {
             .map(|c| c.workspace_snapshot.file)
             .unwrap_or_default();
 
+        let bound_ws = read_bound_workspace(&local_config_path)
+            .or_else(|| std::env::current_dir().ok().map(|p| dunce::canonicalize(&p).unwrap_or(p)))
+            .map(|p| p.to_string_lossy().into_owned());
+
         match base_figment
             .merge(Toml::file(&local_config_path))
             .merge(Env::prefixed("ARCHON_"))
@@ -424,6 +428,17 @@ impl Config {
                     Some(ws_skills_dir.as_path()),
                 );
                 cfg.workspace_skills_dir = Some(ws_skills_dir);
+                if cfg.workspace.as_deref().is_none_or(|s| s.trim().is_empty()) {
+                    cfg.workspace = bound_ws;
+                } else if let Some(ref ws) = cfg.workspace {
+                    let expanded = expand_tilde(ws);
+                    cfg.workspace = Some(
+                        dunce::canonicalize(&expanded)
+                            .unwrap_or(expanded)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
                 (cfg, None)
             }
             Err(e) => {
@@ -433,6 +448,7 @@ impl Config {
                     Some(ws_skills_dir.as_path()),
                 );
                 def.workspace_skills_dir = Some(ws_skills_dir);
+                def.workspace = bound_ws;
                 (def, Some(format!("Config error (using defaults): {e}")))
             }
         }
