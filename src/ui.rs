@@ -168,7 +168,7 @@ impl TuiApp {
             is_streaming: false,
             active_tool_status: None,
             status_bar: (
-                "Ready. Press ⏎ to send, / for skill commands, ? for help.".into(),
+                "Ready. Press ⏎ to send, @ for skill commands, ? for help.".into(),
                 false,
             ),
             model_idx,
@@ -507,7 +507,7 @@ impl TuiApp {
         let mut turn = self.current_turn_config();
         let prompt = if self.enable_skills
             && let Some((skill_name, user_prompt)) =
-                crate::core::skills::expand_slash_command(&raw_prompt, &self.config)
+                crate::core::skills::expand_at_command(&raw_prompt, &self.config)
         {
             self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
             turn.active_skill = Some(skill_name);

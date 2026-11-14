@@ -784,7 +784,7 @@ impl TuiApp {
 
         if self.enable_skills
             && let Some(first_line) = self.text_area.lines().first()
-            && let Some(cmd_prefix) = first_line.trim_start().strip_prefix('/')
+            && let Some(cmd_prefix) = first_line.trim_start().strip_prefix('@')
             && !cmd_prefix.contains(char::is_whitespace)
         {
             let matches: Vec<String> = self
@@ -801,7 +801,7 @@ impl TuiApp {
                     } else {
                         &s.command
                     };
-                    format!("/{trigger} ({})", truncate_str(&s.description, 45))
+                    format!("@{trigger} ({})", truncate_str(&s.description, 45))
                 })
                 .take(4)
                 .collect();

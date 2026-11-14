@@ -263,7 +263,7 @@ impl TuiApp {
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
         let header = Paragraph::new(Line::from(vec![
             Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
-            Span::raw("(Invoked /skill context is appended per turn) │ "),
+            Span::raw("(Invoked @skill context is appended per turn) │ "),
             Span::styled(
                 format!("Preset: {preset_name}"),
                 Style::default()

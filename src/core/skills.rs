@@ -157,7 +157,7 @@ pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
 }
 
 pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a SkillDefinition> {
-    let q = name_or_cmd.trim().trim_start_matches('/');
+    let q = name_or_cmd.trim().trim_start_matches('@');
     if q.is_empty() {
         return None;
     }
@@ -167,9 +167,9 @@ pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a Skill
     })
 }
 
-pub fn expand_slash_command(raw_prompt: &str, config: &Config) -> Option<(String, String)> {
+pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, String)> {
     let trimmed = raw_prompt.trim();
-    let rest = trimmed.strip_prefix('/')?;
+    let rest = trimmed.strip_prefix('@')?;
     let (cmd_token, args_str) = match rest.find(char::is_whitespace) {
         Some(idx) => (&rest[..idx], rest[idx..].trim()),
         None => (rest, ""),
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_slash_command_with_and_without_args() {
+    fn expands_at_command_with_and_without_args() {
         let mut cfg = Config::default();
         cfg.skills.push(SkillDefinition {
             name: "test-cmd".into(),
@@ -294,13 +294,13 @@ mod tests {
             is_trusted: true,
         });
 
-        let (name, user_prompt) = expand_slash_command("/t src/main.rs", &cfg).unwrap();
+        let (name, user_prompt) = expand_at_command("@t src/main.rs", &cfg).unwrap();
         assert_eq!(name, "test-cmd");
         assert_eq!(user_prompt, "src/main.rs");
 
-        let (name_no_args, prompt_no_args) = expand_slash_command("/t", &cfg).unwrap();
+        let (name_no_args, prompt_no_args) = expand_at_command("@t", &cfg).unwrap();
         assert_eq!(name_no_args, "test-cmd");
-        assert_eq!(prompt_no_args, "/t");
+        assert_eq!(prompt_no_args, "@t");
     }
 
     #[test]
