@@ -469,7 +469,6 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::ContextWindow => self.draw_context_modal(f),
-            ActiveModal::Skills => self.draw_skills_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::None => {}
         }
@@ -522,7 +521,6 @@ impl TuiApp {
             ("^f", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
-            ("^E", "Skills"),
             ("^Y", "SysMsg"),
             ("^Q", "Quit"),
         ];
@@ -565,7 +563,7 @@ impl TuiApp {
                 if self.enable_tools { "ON" } else { "OFF" },
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!("Skills:  {} (^E)", self.current_skills_label())),
+            Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(

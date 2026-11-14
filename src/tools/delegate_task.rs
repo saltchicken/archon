@@ -78,7 +78,6 @@ fn resolve_sub_agent_model(arg_model: &str, config: &Config) -> String {
 fn filter_sub_agent_tools(
     requested: &[String],
     skill_tools: &[String],
-    active_skills: &[String],
     config: &Config,
 ) -> Vec<Value> {
     let allow_list: Vec<&str> = if !requested.is_empty() {
@@ -97,7 +96,7 @@ fn filter_sub_agent_tools(
         DEFAULT_ALLOWED_SUB_TOOLS.to_vec()
     };
 
-    super::schemas_for_turn(config, active_skills)
+    super::schemas_for_turn(config)
         .into_iter()
         .filter(|schema| {
             schema
@@ -187,7 +186,7 @@ impl AsyncTool for Tool {
             Some(s.clone())
         };
 
-        let (skill_tools, active_skill_names, sub_system_prompt) = match &resolved_skill {
+        let (skill_tools, sub_system_prompt) = match &resolved_skill {
             Some(s) => {
                 let refs = crate::core::skills::list_skill_reference_paths(s);
                 let refs_line = if refs.is_empty() {
@@ -200,20 +199,18 @@ impl AsyncTool for Tool {
                 };
                 (
                     s.tools.clone(),
-                    vec![s.name.clone()],
                     format!(
-                        "{SUB_AGENT_SYSTEM_PROMPT}\n\n<active_skill name=\"{}\">\n{}{}\n</active_skill>",
+                        "{SUB_AGENT_SYSTEM_PROMPT}\n\n<skill name=\"{}\">\n{}{}\n</skill>",
                         s.name,
                         refs_line,
                         s.prompt.trim()
                     ),
                 )
             }
-            None => (Vec::new(), Vec::new(), SUB_AGENT_SYSTEM_PROMPT.to_string()),
+            None => (Vec::new(), SUB_AGENT_SYSTEM_PROMPT.to_string()),
         };
 
-        let sub_tools =
-            filter_sub_agent_tools(&args.tools, &skill_tools, &active_skill_names, &ctx.config);
+        let sub_tools = filter_sub_agent_tools(&args.tools, &skill_tools, &ctx.config);
         let allowed_tool_names: Vec<String> = sub_tools
             .iter()
             .filter_map(|s| s.get("function")?.get("name")?.as_str().map(String::from))
@@ -282,13 +279,8 @@ impl AsyncTool for Tool {
                 }
 
                 info!("Sub-agent ({model}) step {step}/{max_steps} executing: {sig}");
-                let (output, truncated) = Box::pin(super::execute(
-                    &call,
-                    &ctx.config,
-                    &active_skill_names,
-                    max_tool_out,
-                ))
-                .await;
+                let (output, truncated) =
+                    Box::pin(super::execute(&call, &ctx.config, max_tool_out)).await;
                 let first_line = output.lines().next().unwrap_or("(no output)").trim();
                 execution_log.push(format!(
                     "[Step {step}] {sig} -> {}{}",

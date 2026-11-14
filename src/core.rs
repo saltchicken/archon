@@ -27,7 +27,6 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     pub system_prompt: String,
-    pub active_skills: Vec<String>,
     pub num_ctx: u32,
     pub enable_tools: bool,
 }
@@ -73,7 +72,6 @@ pub enum EngineEvent {
         queued_messages: Vec<ChatMessage>,
         num_ctx: u32,
         system_prompt: String,
-        active_skills: Vec<String>,
     },
     QueuedInterjectionsUpdated(Vec<ChatMessage>),
     StreamStarted,
@@ -149,7 +147,6 @@ impl CoreEngine {
         let client = provider.build_client(&config)?;
         let num_ctx = config.context_for_model(&model);
         let active_max_tool_output_size = config.max_tool_output_for_model(&model);
-        let default_skills = config.app.default_skills.clone();
 
         Ok(Self {
             model,
@@ -161,7 +158,6 @@ impl CoreEngine {
             session_id: SessionManager::new_id(),
             turn: TurnConfig {
                 system_prompt: String::new(),
-                active_skills: default_skills,
                 num_ctx,
                 enable_tools: true,
             },
@@ -244,12 +240,7 @@ impl CoreEngine {
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
-        let skill_rules = self
-            .turn
-            .active_skills
-            .iter()
-            .filter_map(|name| skills::find_skill(&self.config, name))
-            .flat_map(|s| s.auto_approve.iter());
+        let skill_rules = self.config.skills.iter().flat_map(|s| s.auto_approve.iter());
 
         let all_rules = self
             .config
@@ -324,14 +315,12 @@ impl CoreEngine {
         });
 
         let cfg = self.config.clone();
-        let active_skills = self.turn.active_skills.clone();
         let max_out = self.active_max_tool_output_size;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.internal_rx = Some(rx);
 
         self.active_task = Some(tokio::spawn(async move {
-            let (mut output, truncated) =
-                tools::execute(&call, &cfg, &active_skills, max_out).await;
+            let (mut output, truncated) = tools::execute(&call, &cfg, max_out).await;
             if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
                 output.push_str(&format!("\n\n[User attached a message]: {fb}"));
             }
@@ -347,11 +336,7 @@ impl CoreEngine {
         let mut modified = false;
 
         while let Some(call) = self.pending_tools.front() {
-            if !tools::is_tool_enabled_for_turn(
-                &call.function.name,
-                &self.config,
-                &self.turn.active_skills,
-            ) {
+            if !tools::is_tool_enabled_for_turn(&call.function.name, &self.config) {
                 let call = self.pending_tools.pop_front().unwrap();
                 warn!(
                     "Rejecting disabled tool call '{}' without prompting",
@@ -675,7 +660,6 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
-                        self.turn.active_skills = data.active_skills;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -731,7 +715,6 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
-                self.turn.active_skills = self.config.app.default_skills.clone();
                 self.turn.num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
@@ -906,14 +889,11 @@ impl CoreEngine {
         let id = self.session_id.clone();
         let model = self.model.clone();
         let sys = self.turn.system_prompt.clone();
-        let active_skills = self.turn.active_skills.clone();
         let ctx = self.turn.num_ctx;
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) =
-                sessions.save(&id, &model, &sys, &active_skills, ctx, &msgs, &new_images)
-            {
+            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images) {
                 error!("Failed to save session {id}: {e}");
             }
         }));
@@ -984,7 +964,6 @@ impl CoreEngine {
             queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,
             system_prompt: self.turn.system_prompt.clone(),
-            active_skills: self.turn.active_skills.clone(),
         });
     }
 

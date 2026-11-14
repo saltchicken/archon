@@ -63,7 +63,6 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub skills_dir: String,
-    pub default_skills: Vec<String>,
     pub enabled_tools: Vec<String>,
     pub allowed_commands: Vec<String>,
     pub auto_approve: Vec<String>,
@@ -140,7 +139,6 @@ impl Default for AppSettings {
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
             skills_dir: "~/.config/archon/skills".into(),
-            default_skills: Vec::new(),
             enabled_tools: crate::tools::ALL_TOOL_NAMES
                 .iter()
                 .map(|&s| String::from(s))

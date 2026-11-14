@@ -12,7 +12,7 @@ pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
-    /// Path to the file in the workspace (or inside an active skill directory).
+    /// Path to the file in the workspace (or inside a skill directory).
     file_path: String,
     /// Optional 1-based starting line number (inclusive). If set, output lines are prefixed with line numbers.
     #[serde(default)]
@@ -24,7 +24,7 @@ pub struct ReadFileArgs {
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "read_file";
-    const DESCRIPTION: &'static str = "Read the contents of a file in the workspace or an active skill reference file, optionally restricted to a 1-based line range [start_line, end_line].";
+    const DESCRIPTION: &'static str = "Read the contents of a file in the workspace or a skill reference file, optionally restricted to a 1-based line range [start_line, end_line].";
     type Args = ReadFileArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

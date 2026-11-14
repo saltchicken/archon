@@ -157,10 +157,7 @@ pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a Skill
     })
 }
 
-pub fn expand_slash_command(
-    raw_prompt: &str,
-    config: &Config,
-) -> Option<(String, String, Option<String>)> {
+pub fn expand_slash_command(raw_prompt: &str, config: &Config) -> Option<(String, String)> {
     let trimmed = raw_prompt.trim();
     let rest = trimmed.strip_prefix('/')?;
     let (cmd_token, args_str) = match rest.find(char::is_whitespace) {
@@ -184,10 +181,7 @@ pub fn expand_slash_command(
         format!("{}\n\nUser request: {args_str}", skill.prompt)
     };
 
-    let auto_skill = (!skill.tools.is_empty() || !skill.auto_approve.is_empty())
-        .then(|| skill.name.clone());
-
-    Some((skill.name.clone(), expanded, auto_skill))
+    Some((skill.name.clone(), expanded))
 }
 
 fn format_skill_path_for_read(path: &Path) -> String {
@@ -225,35 +219,29 @@ pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
     out
 }
 
-pub fn compose_system_prompt(
-    base_system_prompt: &str,
-    active_skills: &[String],
-    config: &Config,
-) -> String {
+pub fn compose_system_prompt(base_system_prompt: &str, config: &Config) -> String {
     let mut sections = Vec::new();
     if !base_system_prompt.trim().is_empty() {
         sections.push(base_system_prompt.trim().to_string());
     }
 
-    let mut active_blocks = String::new();
-    for skill_name in active_skills {
-        if let Some(skill) = find_skill(config, skill_name)
-            && !skill.prompt.trim().is_empty()
-        {
-            let _ = writeln!(active_blocks, "### Skill: {}", skill.name);
+    let mut skill_blocks = String::new();
+    for skill in &config.skills {
+        if !skill.prompt.trim().is_empty() {
+            let _ = writeln!(skill_blocks, "### Skill: {}", skill.name);
             let refs = list_skill_reference_paths(skill);
             if !refs.is_empty() {
                 let _ = writeln!(
-                    active_blocks,
+                    skill_blocks,
                     "Reference files (read via `read_file`): {}",
                     refs.join(", ")
                 );
             }
-            let _ = writeln!(active_blocks, "{}\n", skill.prompt.trim());
+            let _ = writeln!(skill_blocks, "{}\n", skill.prompt.trim());
         }
     }
-    if !active_blocks.is_empty() {
-        sections.push(format!("<active_skills>\n{}</active_skills>", active_blocks.trim_end()));
+    if !skill_blocks.is_empty() {
+        sections.push(format!("<skills>\n{}</skills>", skill_blocks.trim_end()));
     }
 
     sections.join("\n\n")
@@ -287,9 +275,8 @@ mod tests {
             dir_path: None,
         });
 
-        let (name, expanded, auto_skill) = expand_slash_command("/t src/main.rs", &cfg).unwrap();
+        let (name, expanded) = expand_slash_command("/t src/main.rs", &cfg).unwrap();
         assert_eq!(name, "test-cmd");
         assert_eq!(expanded, "Run on src/main.rs");
-        assert_eq!(auto_skill.as_deref(), Some("test-cmd"));
     }
 }

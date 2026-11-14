@@ -247,70 +247,6 @@ impl TuiApp {
         render_modal(f, 80, 75, widget);
     }
 
-    pub(super) fn draw_skills_modal(&self, f: &mut Frame) {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Active Skills: ", Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    if self.active_skills.is_empty() {
-                        "None (activate via Space below or `/command` in prompt)".to_string()
-                    } else {
-                        self.active_skills.join(", ")
-                    },
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-        ];
-
-        if self.config.skills.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  No skills found in config.toml, ~/.config/archon/skills, or .archon/skills.",
-                Style::default().fg(Color::DarkGray),
-            )));
-        } else {
-            for (i, skill) in self.config.skills.iter().enumerate() {
-                let is_active = self
-                    .active_skills
-                    .iter()
-                    .any(|s| s.eq_ignore_ascii_case(&skill.name));
-                let (prefix, style) = selection_style(i == self.skill_idx, is_active);
-                let checkbox = if is_active { "[x]" } else { "[ ]" };
-                let cmd = if skill.command.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (/{})", skill.command)
-                };
-                let tools = if skill.tools.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [tools: {}]", skill.tools.join(", "))
-                };
-                lines.push(Line::from(Span::styled(
-                    format!("{prefix}{checkbox} {}{cmd}{tools}", skill.name),
-                    style,
-                )));
-                lines.push(Line::from(Span::styled(
-                    format!("       {}", sanitize_line(&skill.description)),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "[Space] Toggle Skill   [R] Insert /command   [C] Clear All   [⏎/Esc] Apply & Close",
-            Style::default().fg(Color::Yellow),
-        )));
-
-        let widget = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(titled_block(" Skills Manager (^E) "));
-        render_modal(f, 75, 65, widget);
-    }
-
     pub(super) fn draw_system_prompt_modal(&self, f: &mut Frame) {
         let area = centered_rect(75, 60, f.area());
         f.render_widget(Clear, area);
@@ -327,7 +263,7 @@ impl TuiApp {
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
         let header = Paragraph::new(Line::from(vec![
             Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
-            Span::raw("(Active skills are appended automatically) │ "),
+            Span::raw("(Available skills are appended automatically) │ "),
             Span::styled(
                 format!("Preset: {preset_name}"),
                 Style::default()

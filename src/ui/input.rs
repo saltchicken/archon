@@ -1,4 +1,4 @@
-use super::{ActiveModal, TuiApp, create_text_area};
+use super::{ActiveModal, TuiApp};
 use crate::core::EngineCommand;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
@@ -126,7 +126,6 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
-            ActiveModal::Skills => self.handle_skills_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
             ActiveModal::None => self.handle_main_key(key, ctrl),
         }
@@ -253,52 +252,6 @@ impl TuiApp {
         }
     }
 
-    fn handle_skills_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Esc | KeyCode::Enter => {
-                self.modal = ActiveModal::None;
-                let _ = self
-                    .cmd_tx
-                    .send(EngineCommand::SetTurnConfig(self.current_turn_config()));
-            }
-            KeyCode::Up => self.skill_idx = self.skill_idx.saturating_sub(1),
-            KeyCode::Down if self.skill_idx + 1 < self.config.skills.len() => {
-                self.skill_idx += 1;
-            }
-            KeyCode::Char(' ') => {
-                if let Some(skill) = self.config.skills.get(self.skill_idx) {
-                    if let Some(pos) = self
-                        .active_skills
-                        .iter()
-                        .position(|s| s.eq_ignore_ascii_case(&skill.name))
-                    {
-                        self.active_skills.remove(pos);
-                    } else {
-                        self.active_skills.push(skill.name.clone());
-                    }
-                }
-            }
-            KeyCode::Char('c') => {
-                self.active_skills.clear();
-            }
-            KeyCode::Char('r') => {
-                if let Some(skill) = self.config.skills.get(self.skill_idx)
-                    && !skill.prompt.is_empty()
-                {
-                    let cmd = if !skill.command.is_empty() {
-                        format!("/{} ", skill.command)
-                    } else {
-                        format!("/{} ", skill.name)
-                    };
-                    self.text_area = create_text_area();
-                    self.text_area.insert_str(cmd);
-                    self.modal = ActiveModal::None;
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn handle_system_prompt_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
         match key.code {
             KeyCode::Esc => self.modal = ActiveModal::None,
@@ -393,10 +346,6 @@ impl TuiApp {
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
             KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
-            KeyCode::Char('e') if ctrl => {
-                self.skill_idx = self.skill_idx.min(self.config.skills.len().saturating_sub(1));
-                self.modal = ActiveModal::Skills;
-            }
             KeyCode::Char('y') if ctrl => {
                 let sys_text = self.current_system_prompt_text();
                 self.sys_prompt_area = super::create_sys_prompt_area(&sys_text);

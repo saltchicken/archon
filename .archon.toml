@@ -1,5 +1,4 @@
 [app]
-default_skills = ["codebase-architect"]
 enabled_tools = [
     "cargo",
     "create_file",
