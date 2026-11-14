@@ -103,40 +103,26 @@ impl Provider {
         &self,
         client: Client,
         model: String,
-        mut config: Config,
+        config: Config,
         messages: Vec<ChatMessage>,
         turn: TurnConfig,
         tx: UnboundedSender<EngineEvent>,
     ) {
-        if !turn.enable_skills {
-            config.skills.clear();
-        }
+        let active_skill = turn
+            .enable_skills
+            .then_some(turn.active_skill.as_deref())
+            .flatten();
 
         let tools_schema = turn
             .enable_tools
-            .then(|| tools::schemas_for_turn(&config))
+            .then(|| tools::schemas_for_turn(&config, active_skill))
             .filter(|t| !t.is_empty());
 
-        let effective_system_prompt = if turn.enable_skills {
-            crate::core::skills::compose_system_prompt(&turn.system_prompt, &config)
-        } else {
-            turn.system_prompt.trim().to_string()
-        };
+        let effective_system_prompt =
+            crate::core::skills::compose_system_prompt(&turn.system_prompt, active_skill, &config);
 
         // Strip any historical tool_calls for tools that are currently disabled
-        let messages: Vec<ChatMessage> = messages
-            .into_iter()
-            .map(|mut m| {
-                if let Some(calls) = m.tool_calls.take() {
-                    let filtered: Vec<_> = calls
-                        .into_iter()
-                        .filter(|tc| tools::is_tool_enabled_for_turn(&tc.function.name, &config))
-                        .collect();
-                    m.tool_calls = (!filtered.is_empty()).then_some(filtered);
-                }
-                m
-            })
-            .collect();
+        let messages = sanitize_messages_for_turn(messages, &config, active_skill);
 
         match self {
             Self::Ollama => {
@@ -162,5 +148,111 @@ impl Provider {
                     .await;
             }
         }
+    }
+}
+
+pub fn sanitize_messages_for_turn(
+    messages: Vec<ChatMessage>,
+    config: &Config,
+    active_skill: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut active_call_mask: Vec<bool> = Vec::new();
+    let mut tool_idx = 0usize;
+
+    for mut m in messages {
+        match m.role.as_str() {
+            "assistant" => {
+                active_call_mask.clear();
+                tool_idx = 0;
+
+                if let Some(calls) = m.tool_calls.take() {
+                    let mut kept_calls = Vec::with_capacity(calls.len());
+                    for tc in calls {
+                        let enabled = tools::is_tool_enabled_for_turn(
+                            &tc.function.name,
+                            config,
+                            active_skill,
+                        );
+                        active_call_mask.push(enabled);
+                        if enabled {
+                            kept_calls.push(tc);
+                        }
+                    }
+                    m.tool_calls = (!kept_calls.is_empty()).then_some(kept_calls);
+                }
+
+                let has_content = !m.content.trim().is_empty();
+                let has_tools = m.tool_calls.is_some();
+                let has_thoughts = m.thoughts.as_ref().is_some_and(|t| !t.is_empty());
+
+                if has_content || has_tools || has_thoughts {
+                    out.push(m);
+                }
+            }
+            "tool" => {
+                let keep = if let Some(ref name) = m.tool_name {
+                    let positional_ok = active_call_mask.get(tool_idx).copied().unwrap_or(true);
+                    positional_ok && tools::is_tool_enabled_for_turn(name, config, active_skill)
+                } else {
+                    active_call_mask.get(tool_idx).copied().unwrap_or(false)
+                };
+                tool_idx += 1;
+
+                if keep {
+                    out.push(m);
+                }
+            }
+            _ => {
+                active_call_mask.clear();
+                tool_idx = 0;
+                out.push(m);
+            }
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{ToolCall, ToolFunction};
+    use serde_json::json;
+
+    #[test]
+    fn strips_disabled_tool_calls_and_matching_tool_responses_in_lockstep() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec!["read_file".into()];
+
+        let mut assistant = ChatMessage::new("assistant", "");
+        assistant.tool_calls = Some(vec![
+            ToolCall {
+                function: ToolFunction {
+                    name: "cargo".into(),
+                    arguments: json!({"action": "check"}),
+                },
+                thought_signature: None,
+            },
+            ToolCall {
+                function: ToolFunction {
+                    name: "read_file".into(),
+                    arguments: json!({"file_path": "Cargo.toml"}),
+                },
+                thought_signature: None,
+            },
+        ]);
+
+        let tool_1 = ChatMessage::new("tool", "cargo check output");
+        let tool_2 = ChatMessage::new("tool", "[package]\nname = \"archon\"");
+
+        let sanitized = sanitize_messages_for_turn(vec![assistant, tool_1, tool_2], &cfg, None);
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(
+            sanitized[0].tool_calls.as_ref().unwrap()[0].function.name,
+            "read_file"
+        );
+        assert_eq!(sanitized[1].role, "tool");
+        assert_eq!(sanitized[1].content, "[package]\nname = \"archon\"");
     }
 }

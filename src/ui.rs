@@ -485,6 +485,7 @@ impl TuiApp {
             num_ctx: self.num_ctx,
             enable_tools: self.enable_tools,
             enable_skills: self.enable_skills,
+            active_skill: None,
         }
     }
 
@@ -503,13 +504,14 @@ impl TuiApp {
             return;
         }
 
-        let turn = self.current_turn_config();
+        let mut turn = self.current_turn_config();
         let prompt = if self.enable_skills
-            && let Some((skill_name, expanded)) =
+            && let Some((skill_name, user_prompt)) =
                 crate::core::skills::expand_slash_command(&raw_prompt, &self.config)
         {
             self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
-            expanded
+            turn.active_skill = Some(skill_name);
+            user_prompt
         } else {
             raw_prompt
         };

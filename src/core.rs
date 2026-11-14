@@ -30,6 +30,7 @@ pub struct TurnConfig {
     pub num_ctx: u32,
     pub enable_tools: bool,
     pub enable_skills: bool,
+    pub active_skill: Option<String>,
 }
 
 #[derive(Debug)]
@@ -130,6 +131,7 @@ pub struct CoreEngine {
     active_task: Option<JoinHandle<()>>,
     internal_rx: Option<UnboundedReceiver<EngineEvent>>,
     executing_tool: bool,
+    active_tool_name: Option<String>,
     queued_interjections: Vec<QueuedInterjection>,
     save_task: Option<JoinHandle<()>>,
     pending_tools: VecDeque<ToolCall>,
@@ -162,6 +164,7 @@ impl CoreEngine {
                 num_ctx,
                 enable_tools: true,
                 enable_skills: true,
+                active_skill: None,
             },
             active_max_tool_output_size,
             session_auto_approve: HashSet::new(),
@@ -171,6 +174,7 @@ impl CoreEngine {
             active_task: None,
             internal_rx: None,
             executing_tool: false,
+            active_tool_name: None,
             queued_interjections: Vec::new(),
             save_task: None,
             pending_tools: VecDeque::new(),
@@ -191,34 +195,46 @@ impl CoreEngine {
 
     fn abort_active_state(&mut self) {
         self.finish_active_task();
+        self.active_tool_name = None;
         self.queued_interjections.clear();
         self.pending_tools.clear();
         self.sent_images.clear();
         self.stream_buffer.clear();
     }
 
-    fn unresolved_tool_call_count(&self) -> usize {
+    fn unresolved_tool_names(&self) -> Vec<String> {
         let mut resolved = 0usize;
         for m in self.messages.iter().rev() {
             match m.role.as_str() {
                 "tool" => resolved += 1,
                 "assistant" => {
-                    let total = m.tool_calls.as_ref().map_or(0, Vec::len);
-                    return total.saturating_sub(resolved);
+                    let Some(calls) = m.tool_calls.as_ref() else {
+                        return Vec::new();
+                    };
+                    if resolved >= calls.len() {
+                        return Vec::new();
+                    }
+                    return calls[resolved..]
+                        .iter()
+                        .map(|tc| tc.function.name.clone())
+                        .collect();
                 }
                 _ => break,
             }
         }
-        0
+        Vec::new()
     }
 
     fn close_unresolved_tool_calls(&mut self, message: &str) -> usize {
-        let unresolved = self.unresolved_tool_call_count();
+        let unresolved_names = self.unresolved_tool_names();
+        let count = unresolved_names.len();
         self.pending_tools.clear();
-        for _ in 0..unresolved {
-            self.messages.push(ChatMessage::new("tool", message));
+        self.active_tool_name = None;
+        for name in unresolved_names {
+            self.messages
+                .push(ChatMessage::new_tool(name, message, false));
         }
-        unresolved
+        count
     }
 
     async fn flush_save_task(&mut self) {
@@ -241,28 +257,19 @@ impl CoreEngine {
         });
     }
 
-    fn config_for_turn(&self) -> Config {
-        let mut cfg = self.config.clone();
-        if !self.turn.enable_skills {
-            cfg.skills.clear();
-        }
-        cfg
+    fn active_turn_skill(&self) -> Option<&str> {
+        self.turn
+            .enable_skills
+            .then_some(self.turn.active_skill.as_deref())
+            .flatten()
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
-        let active_skills = if self.turn.enable_skills {
-            self.config.skills.as_slice()
-        } else {
-            &[]
-        };
-        let skill_rules = active_skills.iter().flat_map(|s| s.auto_approve.iter());
-
         let all_rules = self
             .config
             .app
             .auto_approve
             .iter()
-            .chain(skill_rules)
             .chain(self.session_auto_approve.iter())
             .map(String::as_str);
         tools::is_auto_approved(call, all_rules)
@@ -323,19 +330,22 @@ impl CoreEngine {
     ) {
         let sig = tools::call_signature(&call);
         self.executing_tool = true;
+        self.active_tool_name = Some(call.function.name.clone());
         let _ = self.tx.send(EngineEvent::ToolStarted {
             summary: sig,
             index,
             total,
         });
 
-        let cfg = self.config_for_turn();
+        let cfg = self.config.clone();
+        let active_skill = self.active_turn_skill().map(String::from);
         let max_out = self.active_max_tool_output_size;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.internal_rx = Some(rx);
 
         self.active_task = Some(tokio::spawn(async move {
-            let (mut output, truncated) = tools::execute(&call, &cfg, max_out).await;
+            let (mut output, truncated) =
+                tools::execute(&call, &cfg, active_skill.as_deref(), max_out).await;
             if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
                 output.push_str(&format!("\n\n[User attached a message]: {fb}"));
             }
@@ -349,19 +359,21 @@ impl CoreEngine {
         }
 
         let mut modified = false;
-        let turn_cfg = self.config_for_turn();
 
         while let Some(call) = self.pending_tools.front() {
-            if !tools::is_tool_enabled_for_turn(&call.function.name, &turn_cfg) {
+            if !tools::is_tool_enabled_for_turn(
+                &call.function.name,
+                &self.config,
+                self.active_turn_skill(),
+            ) {
                 let call = self.pending_tools.pop_front().unwrap();
                 warn!(
                     "Rejecting disabled tool call '{}' without prompting",
                     call.function.name
                 );
-                self.messages.push(ChatMessage::new(
-                    "tool",
-                    format!("Error: Unknown tool: '{}'", call.function.name),
-                ));
+                let err_msg = format!("Error: Unknown tool: '{}'", call.function.name);
+                self.messages
+                    .push(ChatMessage::new_tool(call.function.name, err_msg, false));
                 modified = true;
                 continue;
             }
@@ -503,8 +515,8 @@ impl CoreEngine {
             }
             EngineCommand::SendPrompt { prompt, turn } => {
                 info!(
-                    "User submitted prompt. Enable tools: {}, Enable skills: {}",
-                    turn.enable_tools, turn.enable_skills
+                    "User submitted prompt. Enable tools: {}, Active skill: {:?}",
+                    turn.enable_tools, turn.active_skill
                 );
                 debug!("Prompt content: {}", prompt.replace('\n', " "));
 
@@ -599,7 +611,9 @@ impl CoreEngine {
                 feedback,
                 turn,
             } => {
+                let active_skill = self.turn.active_skill.take().filter(|_| turn.enable_skills);
                 self.turn = turn;
+                self.turn.active_skill = active_skill;
                 let (index, total) = self.tool_batch_progress();
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
@@ -634,10 +648,11 @@ impl CoreEngine {
                         internal_out
                             .push_str(&format!(" User provided this reason/message: {trimmed_fb}"));
                     }
-                    self.messages.push(ChatMessage {
-                        truncated: false,
-                        ..ChatMessage::new("tool", internal_out)
-                    });
+                    self.messages.push(ChatMessage::new_tool(
+                        call.function.name,
+                        internal_out,
+                        false,
+                    ));
                     self.save_and_emit_chat(Vec::new()).await;
                     info!("Tool declination recorded to chat history.");
                     self.process_pending_tools().await;
@@ -679,6 +694,7 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
+                        self.turn.active_skill = None;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -734,6 +750,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
+                self.turn.active_skill = None;
                 self.turn.num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
@@ -802,7 +819,13 @@ impl CoreEngine {
                 self.notify(format!("Context window set to {} tokens.", clamped), false);
             }
             EngineCommand::SetTurnConfig(new_turn) => {
+                let active_skill = self
+                    .turn
+                    .active_skill
+                    .take()
+                    .filter(|_| new_turn.enable_skills);
                 self.turn = new_turn;
+                self.turn.active_skill = active_skill;
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
             }
@@ -882,10 +905,13 @@ impl CoreEngine {
             }
             EngineEvent::ToolCompleted { output, truncated } => {
                 self.finish_active_task();
-                self.messages.push(ChatMessage {
-                    truncated,
-                    ..ChatMessage::new("tool", output)
-                });
+                let tool_name = self
+                    .active_tool_name
+                    .take()
+                    .or_else(|| self.unresolved_tool_names().into_iter().next())
+                    .unwrap_or_else(|| "tool_execution".into());
+                self.messages
+                    .push(ChatMessage::new_tool(tool_name, output, truncated));
                 self.save_and_emit_chat(Vec::new()).await;
                 info!("Tool execution completed and recorded to chat history.");
                 self.process_pending_tools().await;

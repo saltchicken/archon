@@ -30,6 +30,8 @@ pub struct ChatMessage {
     #[serde(default)]
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_names: Option<Vec<String>>,
@@ -45,6 +47,24 @@ impl ChatMessage {
             role: role.into(),
             content: content.into(),
             truncated: false,
+            tool_name: None,
+            images: None,
+            image_names: None,
+            tool_calls: None,
+            thoughts: None,
+        }
+    }
+
+    pub fn new_tool(
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            role: "tool".into(),
+            content: content.into(),
+            truncated,
+            tool_name: Some(tool_name.into()),
             images: None,
             image_names: None,
             tool_calls: None,

@@ -78,6 +78,7 @@ fn resolve_sub_agent_model(arg_model: &str, config: &Config) -> String {
 fn filter_sub_agent_tools(
     requested: &[String],
     skill_tools: &[String],
+    active_skill: Option<&str>,
     config: &Config,
 ) -> Vec<Value> {
     let allow_list: Vec<&str> = if !requested.is_empty() {
@@ -96,7 +97,7 @@ fn filter_sub_agent_tools(
         DEFAULT_ALLOWED_SUB_TOOLS.to_vec()
     };
 
-    super::schemas_for_turn(config)
+    super::schemas_for_turn(config, active_skill)
         .into_iter()
         .filter(|schema| {
             schema
@@ -186,31 +187,18 @@ impl AsyncTool for Tool {
             Some(s.clone())
         };
 
-        let (skill_tools, sub_system_prompt) = match &resolved_skill {
-            Some(s) => {
-                let refs = crate::core::skills::list_skill_reference_paths(s);
-                let refs_line = if refs.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "Reference files (read via `read_file`): {}\n",
-                        refs.join(", ")
-                    )
-                };
-                (
-                    s.tools.clone(),
-                    format!(
-                        "{SUB_AGENT_SYSTEM_PROMPT}\n\n<skill name=\"{}\">\n{}{}\n</skill>",
-                        s.name,
-                        refs_line,
-                        s.prompt.trim()
-                    ),
-                )
-            }
-            None => (Vec::new(), SUB_AGENT_SYSTEM_PROMPT.to_string()),
-        };
+        let active_skill = resolved_skill.as_ref().map(|s| s.name.as_str());
+        let skill_tools = resolved_skill
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.tools.clone());
+        let sub_system_prompt = crate::core::skills::compose_system_prompt(
+            SUB_AGENT_SYSTEM_PROMPT,
+            active_skill,
+            &ctx.config,
+        );
 
-        let sub_tools = filter_sub_agent_tools(&args.tools, &skill_tools, &ctx.config);
+        let sub_tools =
+            filter_sub_agent_tools(&args.tools, &skill_tools, active_skill, &ctx.config);
         let allowed_tool_names: Vec<String> = sub_tools
             .iter()
             .filter_map(|s| s.get("function")?.get("name")?.as_str().map(String::from))
@@ -233,13 +221,8 @@ impl AsyncTool for Tool {
 
         for step in 1..=max_steps {
             let tools_opt = (!sub_tools.is_empty()).then(|| sub_tools.clone());
-            let payload = ollama::build_payload(
-                &model,
-                &messages,
-                &sub_system_prompt,
-                num_ctx,
-                tools_opt,
-            );
+            let payload =
+                ollama::build_payload(&model, &messages, &sub_system_prompt, num_ctx, tools_opt);
 
             let (assistant_text, tool_calls, pt, et) =
                 run_ollama_turn(&client, &ctx.config.ollama.base_url, payload).await?;
@@ -268,19 +251,22 @@ impl AsyncTool for Tool {
                     execution_log.push(format!(
                         "[Step {step}] {sig} -> [Blocked: tool not allowed]"
                     ));
-                    messages.push(ChatMessage::new(
-                        "tool",
-                        format!(
-                            "Error: Tool '{}' is not permitted in sub-agent.",
-                            call.function.name
-                        ),
-                    ));
+                    let err_msg = format!(
+                        "Error: Tool '{}' is not permitted in sub-agent.",
+                        call.function.name
+                    );
+                    messages.push(ChatMessage::new_tool(call.function.name, err_msg, false));
                     continue;
                 }
 
                 info!("Sub-agent ({model}) step {step}/{max_steps} executing: {sig}");
-                let (output, truncated) =
-                    Box::pin(super::execute(&call, &ctx.config, max_tool_out)).await;
+                let (output, truncated) = Box::pin(super::execute(
+                    &call,
+                    &ctx.config,
+                    active_skill,
+                    max_tool_out,
+                ))
+                .await;
                 let first_line = output.lines().next().unwrap_or("(no output)").trim();
                 execution_log.push(format!(
                     "[Step {step}] {sig} -> {}{}",
@@ -288,10 +274,7 @@ impl AsyncTool for Tool {
                     if truncated { " [truncated]" } else { "" }
                 ));
 
-                messages.push(ChatMessage {
-                    truncated,
-                    ..ChatMessage::new("tool", output)
-                });
+                messages.push(ChatMessage::new_tool(call.function.name, output, truncated));
             }
 
             if step == max_steps {

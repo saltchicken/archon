@@ -83,16 +83,18 @@ pub(super) struct ToolContext {
     pub max_output_size: usize,
     pub snapshot: WorkspaceSnapshotSettings,
     pub allowed_commands: Vec<String>,
+    pub active_skill: Option<String>,
     pub config: Config,
 }
 
 impl ToolContext {
-    fn new(config: &Config, max_output_size: usize) -> Result<Self> {
+    fn new(config: &Config, active_skill: Option<&str>, max_output_size: usize) -> Result<Self> {
         Ok(Self {
             root: workspace_root()?,
             max_output_size,
             snapshot: config.workspace_snapshot.clone(),
             allowed_commands: config.app.allowed_commands.clone(),
+            active_skill: active_skill.map(String::from),
             config: config.clone(),
         })
     }
@@ -103,6 +105,7 @@ impl ToolContext {
             max_output_size: 0,
             snapshot: WorkspaceSnapshotSettings::default(),
             allowed_commands: Vec::new(),
+            active_skill: None,
             config: Config::default(),
         })
     }
@@ -160,13 +163,32 @@ impl ToolContext {
         let canon = dunce::canonicalize(&candidate)?;
 
         let global_skills_root = expand_tilde(&self.config.app.skills_dir);
-        let canon_global =
-            dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
+        let canon_global = dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
         let local_skills_root = self.root.join(".archon/skills");
-        let canon_local =
-            dunce::canonicalize(&local_skills_root).unwrap_or(local_skills_root);
+        let canon_local = dunce::canonicalize(&local_skills_root).unwrap_or(local_skills_root);
 
         if canon.starts_with(&canon_global) || canon.starts_with(&canon_local) {
+            let allowed = self
+                .active_skill
+                .as_deref()
+                .and_then(|name| crate::core::skills::find_skill(&self.config, name))
+                .and_then(|s| s.dir_path.as_deref())
+                .filter(|d| d.is_dir())
+                .is_some_and(|dir| {
+                    let abs_dir = if dir.is_absolute() {
+                        dir.to_path_buf()
+                    } else {
+                        self.root.join(dir)
+                    };
+                    let canon_dir = dunce::canonicalize(&abs_dir).unwrap_or(abs_dir);
+                    canon.starts_with(&canon_dir)
+                });
+
+            if !allowed {
+                bail!(
+                    "Security violation: cannot read skill file '{trimmed}' because its skill is not active."
+                );
+            }
             return Ok(canon);
         }
 
@@ -888,23 +910,30 @@ pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
         .any(|t| t == "*" || t == name)
 }
 
-pub fn is_tool_enabled_for_turn(name: &str, config: &Config) -> bool {
-    is_tool_enabled(name, config)
-        || config
-            .skills
-            .iter()
-            .any(|s| s.tools.iter().any(|t| t.trim() == name || t.trim() == "*"))
+pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skill: Option<&str>) -> bool {
+    if is_tool_enabled(name, config) {
+        return true;
+    }
+    active_skill
+        .and_then(|s| crate::core::skills::find_skill(config, s))
+        .is_some_and(|skill| {
+            skill
+                .tools
+                .iter()
+                .map(|t| t.trim())
+                .any(|t| t == "*" || t == name)
+        })
 }
 
 macro_rules! register_tools {
     ($( $kind:ident : $mod:ident ),* $(,)?) => {
         pub const ALL_TOOL_NAMES: &[&str] = &[ $( $mod::Tool::NAME ),* ];
 
-        pub fn schemas_for_turn(config: &Config) -> Vec<Value> {
+        pub fn schemas_for_turn(config: &Config, active_skill: Option<&str>) -> Vec<Value> {
             [ $( ( $mod::Tool::NAME, register_tools!(@schema $kind, $mod), ) ),* ]
                 .into_iter()
                 .filter_map(|(name, schema)| {
-                    is_tool_enabled_for_turn(name, config).then_some(schema)
+                    is_tool_enabled_for_turn(name, config, active_skill).then_some(schema)
                 })
                 .collect()
         }
@@ -913,12 +942,13 @@ macro_rules! register_tools {
             name: &str,
             args: &Value,
             config: &Config,
+            active_skill: Option<&str>,
             max_output_size: usize,
         ) -> Result<String> {
-            if !is_tool_enabled_for_turn(name, config) {
+            if !is_tool_enabled_for_turn(name, config, active_skill) {
                 bail!("Unknown tool: '{name}'");
             }
-            let ctx = ToolContext::new(config, max_output_size)?;
+            let ctx = ToolContext::new(config, active_skill, max_output_size)?;
             match name {
                 $( $mod::Tool::NAME => register_tools!(@run $kind, $mod::Tool, args, ctx), )*
                 _ => bail!("Unknown tool: '{name}'"),
@@ -960,6 +990,7 @@ register_tools! {
 pub async fn execute(
     call: &ToolCall,
     config: &Config,
+    active_skill: Option<&str>,
     max_size: usize,
 ) -> (String, bool) {
     let name = &call.function.name;
@@ -967,7 +998,7 @@ pub async fn execute(
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(name, args, config, max_size).await {
+    match dispatch_tool(name, args, config, active_skill, max_size).await {
         Ok(mut out) => {
             let truncated = out.len() > max_size;
             if truncated {

@@ -61,4 +61,4 @@ Operate as a disciplined debugging engineer. Do **not** guess or edit code befor
 - Summarize: **root cause**, **the fix** (file + what changed), and **verification** (which command now passes).
 - Call out any remaining risk, edge case, or follow-up you could not address.
 
-For a deeper troubleshooting checklist and common Rust pitfalls, call the `skill` tool with `action: "read_resource"`, `name: "bugfix"`, `resource_path: "references/debugging-playbook.md"`.
+For a deeper troubleshooting checklist and common Rust pitfalls, read `.archon/skills/bugfix/references/debugging-playbook.md` via `read_file`.

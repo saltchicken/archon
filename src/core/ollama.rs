@@ -75,6 +75,9 @@ pub fn build_payload(
 
     for m in messages {
         let mut msg_obj = json!({ "role": m.role, "content": m.content });
+        if let Some(name) = m.tool_name.as_ref().filter(|n| !n.is_empty()) {
+            msg_obj["tool_name"] = json!(name);
+        }
         if let Some(imgs) = m.images.as_ref().filter(|i| !i.is_empty()) {
             msg_obj["images"] = json!(imgs);
         }

@@ -262,11 +262,14 @@ pub fn build_payload(
                 }
             }
             "tool" => {
-                let fn_name = pending_tool_names
-                    .get(tool_resp_idx)
-                    .cloned()
-                    .unwrap_or_else(|| "tool_execution".into());
+                let positional_name = pending_tool_names.get(tool_resp_idx).cloned();
                 tool_resp_idx += 1;
+
+                let fn_name = m
+                    .tool_name
+                    .clone()
+                    .or(positional_name)
+                    .unwrap_or_else(|| "tool_execution".into());
 
                 let part = json!({
                     "functionResponse": { "name": fn_name, "response": { "output": m.content } }

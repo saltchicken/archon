@@ -12,9 +12,9 @@ pub struct SkillDefinition {
     pub description: String,
     pub command: String,
     pub tools: Vec<String>,
-    pub auto_approve: Vec<String>,
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
+    pub is_trusted: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -24,7 +24,6 @@ struct SkillFrontmatter {
     description: String,
     command: String,
     tools: Vec<String>,
-    auto_approve: Vec<String>,
 }
 
 fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
@@ -59,7 +58,7 @@ fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
     (None, trimmed)
 }
 
-fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
+fn parse_skill_markdown(raw: &str, dir_path: &Path, is_trusted: bool) -> Option<SkillDefinition> {
     let fallback_name = dir_path.file_name()?.to_str()?.trim().to_string();
     let (fm_str, body) = split_toml_frontmatter(raw);
     let fm: SkillFrontmatter = fm_str
@@ -94,13 +93,13 @@ fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
         description,
         command: fm.command.trim().trim_start_matches('/').to_string(),
         tools: fm.tools,
-        auto_approve: fm.auto_approve,
         prompt,
         dir_path: Some(dir_path.to_path_buf()),
+        is_trusted,
     })
 }
 
-fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
+fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefinition> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -112,7 +111,7 @@ fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
         if path.is_dir() {
             let md_path = path.join("SKILL.md");
             if let Ok(raw) = fs::read_to_string(&md_path)
-                && let Some(skill) = parse_skill_markdown(&raw, &path)
+                && let Some(skill) = parse_skill_markdown(&raw, &path, is_trusted)
             {
                 skills.push(skill);
             }
@@ -120,7 +119,7 @@ fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
             && let Ok(raw) = fs::read_to_string(&path)
         {
             let stem_dir = path.with_extension("");
-            if let Some(skill) = parse_skill_markdown(&raw, &stem_dir) {
+            if let Some(skill) = parse_skill_markdown(&raw, &stem_dir, is_trusted) {
                 skills.push(skill);
             }
         }
@@ -135,6 +134,9 @@ pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
             .iter_mut()
             .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
         {
+            if existing.is_trusted && !incoming.is_trusted {
+                return;
+            }
             *existing = incoming;
         } else {
             list.push(incoming);
@@ -142,12 +144,12 @@ pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
     };
 
     let global_dir = expand_tilde(skills_dir);
-    for skill in scan_skills_dir(&global_dir) {
+    for skill in scan_skills_dir(&global_dir, true) {
         upsert(&mut merged, skill);
     }
 
     let local_dir = Path::new(".archon/skills");
-    for skill in scan_skills_dir(local_dir) {
+    for skill in scan_skills_dir(local_dir, false) {
         upsert(&mut merged, skill);
     }
 
@@ -181,15 +183,13 @@ pub fn expand_slash_command(raw_prompt: &str, config: &Config) -> Option<(String
             || s.name.eq_ignore_ascii_case(cmd_token)
     })?;
 
-    let expanded = if skill.prompt.contains("{{args}}") {
-        skill.prompt.replace("{{args}}", args_str).trim().to_string()
-    } else if args_str.is_empty() {
-        skill.prompt.clone()
+    let user_prompt = if args_str.is_empty() {
+        trimmed.to_string()
     } else {
-        format!("{}\n\nUser request: {args_str}", skill.prompt)
+        args_str.to_string()
     };
 
-    Some((skill.name.clone(), expanded))
+    Some((skill.name.clone(), user_prompt))
 }
 
 fn format_skill_path_for_read(path: &Path) -> String {
@@ -227,29 +227,39 @@ pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
     out
 }
 
-pub fn compose_system_prompt(base_system_prompt: &str, config: &Config) -> String {
+pub fn compose_system_prompt(
+    base_system_prompt: &str,
+    active_skill: Option<&str>,
+    config: &Config,
+) -> String {
     let mut sections = Vec::new();
     if !base_system_prompt.trim().is_empty() {
         sections.push(base_system_prompt.trim().to_string());
     }
 
-    let mut skill_blocks = String::new();
-    for skill in &config.skills {
-        if !skill.prompt.trim().is_empty() {
-            let _ = writeln!(skill_blocks, "### Skill: {}", skill.name);
-            let refs = list_skill_reference_paths(skill);
+    if let Some(skill_name) = active_skill
+        && let Some(skill) = find_skill(config, skill_name)
+    {
+        let refs = list_skill_reference_paths(skill);
+        let prompt_body = skill.prompt.replace("{{args}}", "").trim().to_string();
+        if !refs.is_empty() || !prompt_body.is_empty() {
+            let mut block = String::new();
             if !refs.is_empty() {
                 let _ = writeln!(
-                    skill_blocks,
+                    block,
                     "Reference files (read via `read_file`): {}",
                     refs.join(", ")
                 );
             }
-            let _ = writeln!(skill_blocks, "{}\n", skill.prompt.trim());
+            if !prompt_body.is_empty() {
+                let _ = writeln!(block, "{prompt_body}");
+            }
+            sections.push(format!(
+                "<skill name=\"{}\">\n{}\n</skill>",
+                skill.name,
+                block.trim_end()
+            ));
         }
-    }
-    if !skill_blocks.is_empty() {
-        sections.push(format!("<skills>\n{}</skills>", skill_blocks.trim_end()));
     }
 
     sections.join("\n\n")
@@ -262,12 +272,13 @@ mod tests {
     #[test]
     fn parses_toml_frontmatter_and_body() {
         let raw = "+++\nname = \"rust-expert\"\ndescription = \"Rust playbook\"\ncommand = \"rust\"\ntools = [\"cargo\", \"repo_map\"]\n+++\n# Instructions\nRun cargo check.";
-        let skill = parse_skill_markdown(raw, Path::new("/tmp/rust-expert")).unwrap();
+        let skill = parse_skill_markdown(raw, Path::new("/tmp/rust-expert"), true).unwrap();
         assert_eq!(skill.name, "rust-expert");
         assert_eq!(skill.description, "Rust playbook");
         assert_eq!(skill.command, "rust");
         assert_eq!(skill.tools, vec!["cargo", "repo_map"]);
         assert_eq!(skill.prompt, "# Instructions\nRun cargo check.");
+        assert!(skill.is_trusted);
     }
 
     #[test]
@@ -278,13 +289,50 @@ mod tests {
             description: "Test".into(),
             command: "t".into(),
             tools: vec!["git".into()],
-            auto_approve: vec![],
             prompt: "Run on {{args}}".into(),
             dir_path: None,
+            is_trusted: true,
         });
 
-        let (name, expanded) = expand_slash_command("/t src/main.rs", &cfg).unwrap();
+        let (name, user_prompt) = expand_slash_command("/t src/main.rs", &cfg).unwrap();
         assert_eq!(name, "test-cmd");
-        assert_eq!(expanded, "Run on src/main.rs");
+        assert_eq!(user_prompt, "src/main.rs");
+
+        let (name_no_args, prompt_no_args) = expand_slash_command("/t", &cfg).unwrap();
+        assert_eq!(name_no_args, "test-cmd");
+        assert_eq!(prompt_no_args, "/t");
+    }
+
+    #[test]
+    fn compose_system_prompt_only_includes_selected_skill() {
+        let mut cfg = Config::default();
+        cfg.skills.push(SkillDefinition {
+            name: "skill-a".into(),
+            description: "Skill A".into(),
+            command: "a".into(),
+            tools: vec![],
+            prompt: "Instructions for A".into(),
+            dir_path: None,
+            is_trusted: true,
+        });
+        cfg.skills.push(SkillDefinition {
+            name: "skill-b".into(),
+            description: "Skill B".into(),
+            command: "b".into(),
+            tools: vec![],
+            prompt: "Instructions for B".into(),
+            dir_path: None,
+            is_trusted: false,
+        });
+
+        let none_sys = compose_system_prompt("Base prompt", None, &cfg);
+        assert_eq!(none_sys, "Base prompt");
+
+        let selected_b = compose_system_prompt("Base prompt", Some("skill-b"), &cfg);
+        assert_eq!(
+            selected_b,
+            "Base prompt\n\n<skill name=\"skill-b\">\nInstructions for B\n</skill>"
+        );
+        assert!(!selected_b.contains("Instructions for A"));
     }
 }
