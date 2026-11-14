@@ -10,7 +10,6 @@ mod git;
 mod read_file;
 mod repo_map;
 mod search;
-mod skill;
 mod system;
 mod web_search;
 mod workspace_snapshot;
@@ -660,7 +659,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" => args
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" => args
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("")
@@ -936,7 +935,6 @@ register_tools! {
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
-    blocking: skill,
     async: system,
     async: web_search,
     blocking: workspace_snapshot,

@@ -878,18 +878,6 @@ impl CoreEngine {
             }
             EngineEvent::ToolCompleted { output, truncated } => {
                 self.finish_active_task();
-                let resolved_idx = self.messages.iter().rev().take_while(|m| m.role == "tool").count();
-                if let Some(assistant_msg) = self.messages.iter().rev().find(|m| m.role == "assistant")
-                    && let Some(call) = assistant_msg.tool_calls.as_ref().and_then(|c| c.get(resolved_idx))
-                    && call.function.name == "skill"
-                    && call.function.arguments.get("action").and_then(|v| v.as_str()) == Some("load")
-                    && let Some(skill_name) = call.function.arguments.get("name").and_then(|v| v.as_str())
-                    && let Some(skill) = skills::find_skill(&self.config, skill_name)
-                    && !self.turn.active_skills.iter().any(|s| s.eq_ignore_ascii_case(&skill.name))
-                {
-                    info!("Dynamically activating loaded skill '{}' for current session", skill.name);
-                    self.turn.active_skills.push(skill.name.clone());
-                }
                 self.messages.push(ChatMessage {
                     truncated,
                     ..ChatMessage::new("tool", output)

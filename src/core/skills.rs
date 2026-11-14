@@ -1,11 +1,9 @@
 use crate::core::config::{Config, SkillDefinition, expand_tilde};
-use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::{
-    collections::HashSet,
     fmt::Write as _,
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,7 +85,6 @@ fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
         tools: fm.tools,
         auto_approve: fm.auto_approve,
         prompt,
-        dir_path: Some(dir_path.to_path_buf()),
     })
 }
 
@@ -159,75 +156,6 @@ pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a Skill
     })
 }
 
-pub fn list_skill_resources(skill: &SkillDefinition) -> Vec<String> {
-    let Some(dir) = skill.dir_path.as_deref().filter(|d| d.is_dir()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    fn walk(base: &Path, cur: &Path, out: &mut Vec<String>) {
-        let Ok(rd) = fs::read_dir(cur) else {
-            return;
-        };
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                walk(base, &p, out);
-            } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md")
-                && let Ok(rel) = p.strip_prefix(base)
-            {
-                out.push(rel.to_string_lossy().into_owned());
-            }
-        }
-    }
-    walk(dir, dir, &mut out);
-    out.sort();
-    out
-}
-
-pub fn read_skill_resource(
-    skill: &SkillDefinition,
-    rel_path: &str,
-    max_bytes: usize,
-) -> Result<String> {
-    let Some(base_dir) = skill.dir_path.as_deref().filter(|d| d.is_dir()) else {
-        bail!(
-            "Skill '{}' does not have an associated resource directory on disk.",
-            skill.name
-        );
-    };
-    let trimmed = rel_path.trim();
-    if trimmed.is_empty() {
-        bail!("'resource_path' cannot be empty");
-    }
-    let rel = Path::new(trimmed);
-    if rel.is_absolute()
-        || rel
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-    {
-        bail!("Security violation: invalid relative resource path '{trimmed}'");
-    }
-
-    let canon_base = dunce::canonicalize(base_dir).unwrap_or_else(|_| base_dir.to_path_buf());
-    let candidate = canon_base.join(rel);
-    if !candidate.exists() {
-        bail!(
-            "Resource '{}' not found in skill '{}'",
-            trimmed,
-            skill.name
-        );
-    }
-    let canon_target = dunce::canonicalize(&candidate)?;
-    if !canon_target.starts_with(&canon_base) {
-        bail!("Security violation: resource path '{trimmed}' escapes skill directory");
-    }
-
-    let bytes = fs::read(&canon_target)
-        .with_context(|| format!("Failed to read skill resource '{}'", trimmed))?;
-    let take = bytes.len().min(max_bytes);
-    Ok(String::from_utf8_lossy(&bytes[..take]).into_owned())
-}
-
 pub fn expand_slash_command(
     raw_prompt: &str,
     config: &Config,
@@ -264,7 +192,6 @@ pub fn expand_slash_command(
 pub fn compose_system_prompt(
     base_system_prompt: &str,
     active_skills: &[String],
-    enable_tools: bool,
     config: &Config,
 ) -> String {
     let mut sections = Vec::new();
@@ -272,7 +199,6 @@ pub fn compose_system_prompt(
         sections.push(base_system_prompt.trim().to_string());
     }
 
-    let active_set: HashSet<&str> = active_skills.iter().map(String::as_str).collect();
     let mut active_blocks = String::new();
     for skill_name in active_skills {
         if let Some(skill) = find_skill(config, skill_name)
@@ -288,31 +214,6 @@ pub fn compose_system_prompt(
     }
     if !active_blocks.is_empty() {
         sections.push(format!("<active_skills>\n{}</active_skills>", active_blocks.trim_end()));
-    }
-
-    if enable_tools && crate::tools::is_tool_enabled("skill", config) {
-        let inactive: Vec<&SkillDefinition> = config
-            .skills
-            .iter()
-            .filter(|s| !active_set.contains(s.name.as_str()))
-            .collect();
-
-        if !inactive.is_empty() {
-            let mut catalog = String::from(
-                "<available_skills>\n\
-                 Specialized skills are available on-demand. When a task matches a skill below, call the `skill` tool (`action: \"load\"`, `name: \"<skill_name>\"`) to load its full instructions before proceeding:\n",
-            );
-            for s in inactive {
-                let cmd_badge = if s.command.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (/{})", s.command)
-                };
-                let _ = writeln!(catalog, "- `{}`{}: {}", s.name, cmd_badge, s.description);
-            }
-            catalog.push_str("</available_skills>");
-            sections.push(catalog);
-        }
     }
 
     sections.join("\n\n")
@@ -343,7 +244,6 @@ mod tests {
             tools: vec!["git".into()],
             auto_approve: vec![],
             prompt: "Run on {{args}}".into(),
-            dir_path: None,
         });
 
         let (name, expanded, auto_skill) = expand_slash_command("/t src/main.rs", &cfg).unwrap();

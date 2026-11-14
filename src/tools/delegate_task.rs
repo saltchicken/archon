@@ -32,7 +32,6 @@ const DEFAULT_ALLOWED_SUB_TOOLS: &[&str] = &[
     "git",
     "dotfiles",
     "system",
-    "skill",
     "execute_command",
 ];
 

@@ -128,8 +128,6 @@ pub struct SkillDefinition {
     pub tools: Vec<String>,
     pub auto_approve: Vec<String>,
     pub prompt: String,
-    #[serde(skip)]
-    pub dir_path: Option<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -154,8 +152,6 @@ impl Default for AppSettings {
                 "repo_map",
                 "workspace_snapshot",
                 "delegate_task",
-                "skill",
-                "skill:*",
                 "fs:list",
                 "git:status",
                 "git:diff",
@@ -265,7 +261,6 @@ impl Default for Config {
                         "delegate_task".into(),
                     ],
                     prompt: "Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and delegate routine formatting/lint verification (`cargo fmt`, `cargo clippy`, `cargo check`) to the local model via `delegate_task`.".into(),
-                    dir_path: None,
                 },
                 SkillDefinition {
                     name: "cachyos-optimizer".into(),
@@ -280,7 +275,6 @@ impl Default for Config {
                         "dotfiles:validate".into(),
                     ],
                     prompt: "Operate as a CachyOS & Arch Linux system optimization and dotfiles architect:\n1. System Telemetry (`system`): Start with `system` (`action: \"overview\"`) to inspect the CachyOS kernel, sched-ext (`scx`) scheduler, CPU governor/EPP, PSI resource pressure, ZRAM, and thermals. Use `action: \"journal\"` and `action: \"services\"` (`failed`, `blame`, `timers`) to diagnose errors and boot bottlenecks. Use `action: \"btrfs\"` for mount options/compression/usage, `action: \"packages\"` for `paru`/`pacman` orphans/foreign packages/modified configs, `action: \"hyprland\"` for compositor state, and `action: \"fish\"` (`recent`, `frequent`, `abbreviations`) to optimize shell workflows.\n2. Dotfiles Management (`dotfiles`): Use `dotfiles` (`list`, `read`, `search`) to inspect `~/.config` (`hypr/`, `fish/`, `waybar/`, etc.). Apply targeted atomic edits with `dotfiles` (`action: \"edit\"` or `\"create\"`) and verify syntax with `action: \"validate\"`.".into(),
-                    dir_path: None,
                 },
                 SkillDefinition {
                     name: "git-commit".into(),
@@ -289,7 +283,6 @@ impl Default for Config {
                     tools: vec!["git".into()],
                     auto_approve: vec!["git:status".into(), "git:diff".into(), "git:log".into()],
                     prompt: "Inspect the repository using the `git` tool (`status`, `diff` with `target: \"--staged\"`, and `log` with `limit: 5`). If no changes are staged, inspect the unstaged `diff` and stage the relevant files using `git` (`action: \"add\"`). Then commit the staged changes using `git` (`action: \"commit\"`) with a clear, conventional commit message (concise summary line followed by bullet points explaining key changes).".into(),
-                    dir_path: None,
                 },
                 SkillDefinition {
                     name: "describe-image".into(),
@@ -298,7 +291,6 @@ impl Default for Config {
                     tools: Vec::new(),
                     auto_approve: Vec::new(),
                     prompt: "Describe this image in detail. {{args}}".into(),
-                    dir_path: None,
                 },
                 SkillDefinition {
                     name: "extract-text".into(),
@@ -307,7 +299,6 @@ impl Default for Config {
                     tools: Vec::new(),
                     auto_approve: Vec::new(),
                     prompt: "Extract all the text from this image. {{args}}".into(),
-                    dir_path: None,
                 },
             ],
         }

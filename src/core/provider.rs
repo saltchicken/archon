@@ -116,7 +116,6 @@ impl Provider {
         let effective_system_prompt = crate::core::skills::compose_system_prompt(
             &turn.system_prompt,
             &turn.active_skills,
-            turn.enable_tools,
             &config,
         );
 

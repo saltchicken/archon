@@ -253,8 +253,7 @@ impl TuiApp {
                 Span::styled("Active Skills: ", Style::default().fg(Color::Cyan)),
                 Span::styled(
                     if self.active_skills.is_empty() {
-                        "None (all skills remain available on-demand via `skill` tool or `/command`)"
-                            .to_string()
+                        "None (activate via Space below or `/command` in prompt)".to_string()
                     } else {
                         self.active_skills.join(", ")
                     },
@@ -328,7 +327,7 @@ impl TuiApp {
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
         let header = Paragraph::new(Line::from(vec![
             Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
-            Span::raw("(Active skills & on-demand skill catalog are appended automatically) │ "),
+            Span::raw("(Active skills are appended automatically) │ "),
             Span::styled(
                 format!("Preset: {preset_name}"),
                 Style::default()
