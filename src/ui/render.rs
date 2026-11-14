@@ -648,6 +648,7 @@ impl TuiApp {
             let (header_label, color) = match m.role.as_str() {
                 "user" => (format!("USER{}", image_badge(m)), Color::Cyan),
                 "assistant" => ("ARCHON".to_string(), Color::Green),
+                "local" => ("SHELL".to_string(), Color::Magenta),
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
                         .map_or_else(|| "tool".to_string(), format_tool_call_summary);

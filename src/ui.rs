@@ -409,16 +409,18 @@ impl TuiApp {
                 );
 
                 for (i, m) in self.messages.iter().enumerate() {
-                    if m.role == "tool" || m.role == "local" {
+                    if m.role == "tool" {
                         self.msg_states[i].collapsed = true;
                     }
                 }
 
-                // Unfold the latest assistant response while keeping `tool` blocks collapsed.
-                if let Some(last_assistant_idx) =
-                    self.messages.iter().rposition(|m| m.role == "assistant")
+                // Unfold the latest assistant or local shell response while keeping `tool` blocks collapsed.
+                if let Some(last_idx) = self
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == "assistant" || m.role == "local")
                 {
-                    self.msg_states[last_assistant_idx].unfolded = true;
+                    self.msg_states[last_idx].unfolded = true;
                 }
             }
             EngineEvent::QueuedInterjectionsUpdated(queued) => {
