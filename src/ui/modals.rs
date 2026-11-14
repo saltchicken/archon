@@ -308,7 +308,7 @@ impl TuiApp {
 
         let widget = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .block(titled_block(" Skills Manager (^K) "));
+            .block(titled_block(" Skills Manager (^E) "));
         render_modal(f, 75, 65, widget);
     }
 

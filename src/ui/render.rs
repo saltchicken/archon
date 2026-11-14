@@ -522,7 +522,7 @@ impl TuiApp {
             ("^f", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
-            ("^K", "Skills"),
+            ("^E", "Skills"),
             ("^Y", "SysMsg"),
             ("^Q", "Quit"),
         ];
@@ -565,7 +565,7 @@ impl TuiApp {
                 if self.enable_tools { "ON" } else { "OFF" },
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!("Skills:  {} (^K)", self.current_skills_label())),
+            Line::from(format!("Skills:  {} (^E)", self.current_skills_label())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(

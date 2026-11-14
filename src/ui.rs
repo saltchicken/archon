@@ -171,7 +171,7 @@ impl TuiApp {
             is_streaming: false,
             active_tool_status: None,
             status_bar: (
-                "Ready. Press ⏎ to send, / for skill commands, ^K for skills, ? for help.".into(),
+                "Ready. Press ⏎ to send, / for skill commands, ^E for skills, ? for help.".into(),
                 false,
             ),
             model_idx,
