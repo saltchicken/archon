@@ -19,7 +19,7 @@ enabled_tools = [
 [workspace_snapshot]
 git_root = true
 include = ["**/*"]
-exclude = ["target/**", "Cargo.lock"]
+exclude = ["target/**", "Cargo.lock", "TODO.txt"]
 include_in_tree = ["Cargo.lock"]
 file = ["~/.config/archon/config.toml"]
 max_size = 1048576
