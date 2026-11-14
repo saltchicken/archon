@@ -129,13 +129,27 @@ impl ToolContext {
         resolve_existing_under(&self.root, raw, escape_label)
     }
 
+    pub fn ensure_not_excluded(&self, canon_path: &Path) -> Result<()> {
+        let rel = diff_paths(canon_path, &self.root).unwrap_or_else(|| canon_path.to_path_buf());
+        let exclude_set = self.build_exclude_globset(&[], true)?;
+        if exclude_set.is_match(&rel) {
+            bail!(
+                "Security violation: '{}' matches an excluded pattern",
+                rel.display()
+            );
+        }
+        Ok(())
+    }
+
     pub fn resolve_existing_path(&self, raw: &str) -> Result<PathBuf> {
         let trimmed = raw.trim();
         let target = self.root.join(validate_relative_path(trimmed)?);
         if !target.exists() {
             bail!("Target path does not exist: '{trimmed}'");
         }
-        self.ensure_within_workspace(&target, trimmed)
+        let canon = self.ensure_within_workspace(&target, trimmed)?;
+        self.ensure_not_excluded(&canon)?;
+        Ok(canon)
     }
 
     pub fn resolve_readable_path(&self, raw: &str) -> Result<PathBuf> {
@@ -191,7 +205,9 @@ impl ToolContext {
             return Ok(canon);
         }
 
-        self.ensure_within_workspace(&canon, trimmed)
+        let canon = self.ensure_within_workspace(&canon, trimmed)?;
+        self.ensure_not_excluded(&canon)?;
+        Ok(canon)
     }
 
     pub fn resolve_new_path(&self, raw: &str) -> Result<PathBuf> {
