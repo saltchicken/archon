@@ -60,7 +60,6 @@ pub struct Config {
 #[serde(default)]
 pub struct AppSettings {
     pub default_model: String,
-    pub sub_agent_model: String,
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub skills_dir: String,
@@ -123,7 +122,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_model: "qwen3.8:27b".into(),
-            sub_agent_model: "qwen3.8:27b".into(),
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
             skills_dir: "~/.config/archon/skills".into(),
@@ -139,7 +137,6 @@ impl Default for AppSettings {
                 "search",
                 "repo_map",
                 "workspace_snapshot",
-                "delegate_task",
                 "fs:list",
                 "git:status",
                 "git:diff",

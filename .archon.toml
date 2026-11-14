@@ -2,7 +2,6 @@
 enabled_tools = [
     "cargo",
     "create_file",
-    "delegate_task",
     "edit_file",
     "fetch_url",
     "fs",

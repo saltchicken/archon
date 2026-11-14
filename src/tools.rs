@@ -1,6 +1,5 @@
 mod cargo;
 mod create_file;
-mod delegate_task;
 mod dotfiles;
 mod edit_file;
 mod execute_command;
@@ -972,7 +971,6 @@ macro_rules! register_tools {
 register_tools! {
     async: cargo,
     blocking: create_file,
-    async: delegate_task,
     blocking: dotfiles,
     blocking: edit_file,
     async: execute_command,
