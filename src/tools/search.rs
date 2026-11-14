@@ -1,4 +1,4 @@
-use super::{BlockingTool, ToolContext, read_utf8_capped};
+use super::{BlockingTool, ToolContext, utils::read_utf8_capped};
 use anyhow::{Context, Result, bail};
 use regex::RegexBuilder;
 use schemars::JsonSchema;

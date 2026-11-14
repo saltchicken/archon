@@ -1,6 +1,6 @@
 use super::{
-    BlockingTool, FileOutcome, ToolContext, build_globset, has_git_dir_component,
-    read_text_file_inspected,
+    BlockingTool, ToolContext,
+    utils::{FileOutcome, build_globset, has_git_dir_component, read_text_file_inspected},
 };
 use crate::core::config::expand_tilde;
 use anyhow::Result;

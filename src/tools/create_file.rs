@@ -1,4 +1,7 @@
-use super::{BlockingTool, ToolContext, atomic_write_file, ensure_parent_dir};
+use super::{
+    BlockingTool, ToolContext,
+    utils::{atomic_write_file, ensure_parent_dir},
+};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;
