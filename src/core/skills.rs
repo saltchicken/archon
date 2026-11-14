@@ -1,10 +1,21 @@
-use crate::core::config::{Config, SkillDefinition, expand_tilde};
+use crate::core::config::{Config, expand_tilde};
 use serde::Deserialize;
 use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillDefinition {
+    pub name: String,
+    pub description: String,
+    pub command: String,
+    pub tools: Vec<String>,
+    pub auto_approve: Vec<String>,
+    pub prompt: String,
+    pub dir_path: Option<PathBuf>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -117,11 +128,8 @@ fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
     skills
 }
 
-pub fn discover_skills(
-    base_skills: Vec<SkillDefinition>,
-    skills_dir: &str,
-) -> Vec<SkillDefinition> {
-    let mut merged: Vec<SkillDefinition> = base_skills;
+pub fn discover_skills(skills_dir: &str) -> Vec<SkillDefinition> {
+    let mut merged = Vec::new();
     let upsert = |list: &mut Vec<SkillDefinition>, incoming: SkillDefinition| {
         if let Some(existing) = list
             .iter_mut()
