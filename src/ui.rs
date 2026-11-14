@@ -61,6 +61,39 @@ pub(super) enum ActiveModal {
     SystemPrompt,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(super) enum SlashCommand {
+    Exit,
+    Reset,
+}
+
+impl SlashCommand {
+    pub const ALL: &[(&str, Self)] = &[("exit", Self::Exit), ("reset", Self::Reset)];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exit => "exit",
+            Self::Reset => "reset",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|(cmd, _)| cmd.eq_ignore_ascii_case(name))
+            .map(|(_, variant)| *variant)
+    }
+
+    pub fn matching_triggers(prefix: &str) -> Vec<String> {
+        let lower = prefix.to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .filter(|(cmd, _)| cmd.starts_with(&lower))
+            .map(|(cmd, _)| format!("/{cmd}"))
+            .collect()
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 pub(super) struct MsgUiState {
     pub scroll: usize,
@@ -168,7 +201,7 @@ impl TuiApp {
             is_streaming: false,
             active_tool_status: None,
             status_bar: (
-                "Ready. Press ⏎ to send, @ for skill commands, ? for help.".into(),
+                "Ready. Press ⏎ to send, / for commands, @ for skills, ? for help.".into(),
                 false,
             ),
             model_idx,
@@ -497,11 +530,38 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn submit_prompt(&mut self) {
+    pub(super) fn submit_prompt(&mut self) -> bool {
         let raw_prompt = self.text_area.lines().join("\n").trim().to_string();
         if raw_prompt.is_empty() {
             self.status_bar = ("Prompt cannot be empty.".into(), true);
-            return;
+            return false;
+        }
+
+        if let Some(rest) = raw_prompt.strip_prefix('/') {
+            let (cmd_token, args) = match rest.find(char::is_whitespace) {
+                Some(idx) => (&rest[..idx], rest[idx..].trim()),
+                None => (rest, ""),
+            };
+            match SlashCommand::from_name(cmd_token) {
+                Some(cmd) if !args.is_empty() => {
+                    self.status_bar = (
+                        format!("Command '/{}' does not take any arguments.", cmd.as_str()),
+                        true,
+                    );
+                    return false;
+                }
+                Some(SlashCommand::Exit) => return true,
+                Some(SlashCommand::Reset) => {
+                    self.text_area = create_text_area();
+                    self.scroll_to_bottom();
+                    let _ = self.cmd_tx.send(EngineCommand::ResetChat);
+                    return false;
+                }
+                None => {
+                    self.status_bar = (format!("Unknown command: /{cmd_token}"), true);
+                    return false;
+                }
+            }
         }
 
         let mut turn = self.current_turn_config();
@@ -519,6 +579,7 @@ impl TuiApp {
         self.text_area = create_text_area();
         self.scroll_to_bottom();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt { prompt, turn });
+        false
     }
 
     pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {
@@ -532,5 +593,60 @@ impl TuiApp {
                 turn: self.current_turn_config(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn slash_command_lookup_and_autocomplete() {
+        assert_eq!(SlashCommand::from_name("exit"), Some(SlashCommand::Exit));
+        assert_eq!(SlashCommand::from_name("EXIT"), Some(SlashCommand::Exit));
+        assert_eq!(SlashCommand::from_name("reset"), Some(SlashCommand::Reset));
+        assert_eq!(SlashCommand::from_name("unknown"), None);
+
+        assert_eq!(
+            SlashCommand::matching_triggers(""),
+            vec!["/exit".to_string(), "/reset".to_string()]
+        );
+        assert_eq!(
+            SlashCommand::matching_triggers("e"),
+            vec!["/exit".to_string()]
+        );
+        assert_eq!(
+            SlashCommand::matching_triggers("R"),
+            vec!["/reset".to_string()]
+        );
+        assert!(SlashCommand::matching_triggers("xyz").is_empty());
+    }
+
+    #[test]
+    fn submit_prompt_handles_slash_commands() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = TuiApp::new("test-model".into(), Config::default(), tx);
+
+        // Unknown command shows error and does not send to engine
+        app.text_area = create_text_area();
+        app.text_area.insert_str("/unknown");
+        assert!(!app.submit_prompt());
+        assert!(app.status_bar.1);
+        assert_eq!(app.status_bar.0, "Unknown command: /unknown");
+        assert!(rx.try_recv().is_err());
+
+        // /reset sends ResetChat and clears prompt
+        app.text_area = create_text_area();
+        app.text_area.insert_str("/reset");
+        assert!(!app.submit_prompt());
+        assert_eq!(app.text_area.lines(), &[""]);
+        assert!(matches!(rx.try_recv(), Ok(EngineCommand::ResetChat)));
+
+        // /exit returns true to quit the app without sending a prompt
+        app.text_area = create_text_area();
+        app.text_area.insert_str("/exit");
+        assert!(app.submit_prompt());
+        assert!(rx.try_recv().is_err());
     }
 }

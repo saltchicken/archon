@@ -127,7 +127,7 @@ impl TuiApp {
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
-            ActiveModal::None => self.handle_main_key(key, ctrl),
+            ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
         false
     }
@@ -287,7 +287,7 @@ impl TuiApp {
         }
     }
 
-    fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
+    fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
@@ -312,7 +312,7 @@ impl TuiApp {
             KeyCode::Enter if shift => {
                 self.text_area.insert_newline();
             }
-            KeyCode::Enter => self.submit_prompt(),
+            KeyCode::Enter => return self.submit_prompt(),
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }
@@ -356,5 +356,6 @@ impl TuiApp {
                 self.text_area.input(key);
             }
         }
+        false
     }
 }

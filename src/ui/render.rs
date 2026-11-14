@@ -1,4 +1,4 @@
-use super::{ActiveModal, MsgUiState, TuiApp, titled_block};
+use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::ToolCall,
@@ -782,9 +782,19 @@ impl TuiApp {
         let mut scrollbar_state = ScrollbarState::new(max_scroll).position(self.chat_scroll);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
-        if self.enable_skills
-            && let Some(first_line) = self.text_area.lines().first()
-            && let Some(cmd_prefix) = first_line.trim_start().strip_prefix('@')
+        let first_trimmed = self
+            .text_area
+            .lines()
+            .first()
+            .map_or("", |l| l.trim_start());
+
+        let prompt_hint = if let Some(cmd_prefix) = first_trimmed.strip_prefix('/')
+            && !cmd_prefix.contains(char::is_whitespace)
+        {
+            let matches = SlashCommand::matching_triggers(cmd_prefix);
+            (!matches.is_empty()).then(|| format!(" Prompt — Commands: {} ", matches.join(" │ ")))
+        } else if self.enable_skills
+            && let Some(cmd_prefix) = first_trimmed.strip_prefix('@')
             && !cmd_prefix.contains(char::is_whitespace)
         {
             let matches: Vec<String> = self
@@ -805,17 +815,14 @@ impl TuiApp {
                 })
                 .take(4)
                 .collect();
+            (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+        } else {
+            None
+        };
 
-            if !matches.is_empty() {
-                self.text_area.set_block(
-                    titled_block(format!(" Prompt — Skills: {} ", matches.join(" │ ")))
-                        .border_style(Style::default().fg(Color::Yellow)),
-                );
-            } else {
-                self.text_area.set_block(
-                    titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
-                );
-            }
+        if let Some(title) = prompt_hint {
+            self.text_area
+                .set_block(titled_block(title).border_style(Style::default().fg(Color::Yellow)));
         } else {
             self.text_area
                 .set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
