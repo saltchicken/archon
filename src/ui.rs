@@ -460,6 +460,9 @@ impl TuiApp {
                 self.sessions = list;
                 self.session_idx = 0;
             }
+            EngineEvent::SkillsUpdated(skills) => {
+                self.config.skills = skills;
+            }
             EngineEvent::ModelConfigUpdated {
                 model,
                 num_ctx,

@@ -26,7 +26,7 @@ struct SkillFrontmatter {
     tools: Vec<String>,
 }
 
-fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
     let trimmed = raw.trim_start_matches('\u{feff}');
     let Some(rest) = trimmed
         .strip_prefix("+++\n")
@@ -58,7 +58,11 @@ fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
     (None, trimmed)
 }
 
-fn parse_skill_markdown(raw: &str, dir_path: &Path, is_trusted: bool) -> Option<SkillDefinition> {
+pub(crate) fn parse_skill_markdown(
+    raw: &str,
+    dir_path: &Path,
+    is_trusted: bool,
+) -> Option<SkillDefinition> {
     let fallback_name = dir_path.file_name()?.to_str()?.trim().to_string();
     let (fm_str, body) = split_toml_frontmatter(raw);
     let fm: SkillFrontmatter = fm_str
@@ -99,7 +103,7 @@ fn parse_skill_markdown(raw: &str, dir_path: &Path, is_trusted: bool) -> Option<
     })
 }
 
-fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefinition> {
+pub(crate) fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefinition> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -196,7 +200,7 @@ pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, S
     Some((skill.name.clone(), user_prompt))
 }
 
-fn format_skill_path_for_read(path: &Path) -> String {
+pub(crate) fn format_skill_path_for_read(path: &Path) -> String {
     if path.is_relative() {
         return path.to_string_lossy().into_owned();
     }

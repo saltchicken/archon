@@ -9,6 +9,7 @@ mod git;
 mod read_file;
 mod repo_map;
 mod search;
+mod skill;
 mod system;
 mod utils;
 mod web_search;
@@ -94,13 +95,21 @@ impl ToolContext {
     }
 
     fn from_cwd() -> Result<Self> {
+        let root = workspace_root()?;
+        let mut config = Config::default();
+        let ws_skills_dir = crate::core::config::workspace_config_dir_for(&root).join("skills");
+        config.skills = crate::core::skills::discover_skills(
+            &config.app.skills_dir,
+            Some(ws_skills_dir.as_path()),
+        );
+        config.workspace_skills_dir = Some(ws_skills_dir);
         Ok(Self {
-            root: workspace_root()?,
+            root,
             max_output_size: 0,
             snapshot: WorkspaceSnapshotSettings::default(),
             execute_command: ExecuteCommandSettings::default(),
             active_skill: None,
-            config: Config::default(),
+            config,
         })
     }
 
@@ -442,12 +451,18 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" => args
-            .get("action")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string(),
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" => {
+            let raw = args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if name == "skill" && matches!(raw, "edit" | "update") {
+                "modify".to_string()
+            } else {
+                raw.to_string()
+            }
+        }
         "execute_command" => {
             shlex::split(args.get("command").and_then(Value::as_str).unwrap_or(""))
                 .and_then(|parts| parts.into_iter().next())
@@ -591,6 +606,43 @@ fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Val
     out.trim_end().to_string()
 }
 
+fn format_skill_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
+    for (k, v) in obj
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "edits" | "content" | "prompt"))
+    {
+        out.push_str(&format_kv(k, v));
+    }
+
+    if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
+        && let Ok(ctx) = ToolContext::from_cwd()
+    {
+        match parsed.action {
+            skill::SkillAction::Modify => match skill::preview_modify(&parsed, &ctx) {
+                Ok((_, display, original, updated, hunk_count)) => {
+                    if hunk_count > 0 {
+                        out.push_str(&format!("  hunks: {hunk_count}\n"));
+                    }
+                    append_unified_diff(&mut out, &display, &original, &updated);
+                }
+                Err(e) => {
+                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+                }
+            },
+            skill::SkillAction::Create => match skill::preview_create(&parsed, &ctx) {
+                Ok((_, display, rendered)) => {
+                    append_unified_diff(&mut out, &display, "", &rendered);
+                }
+                Err(e) => {
+                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+                }
+            },
+            _ => {}
+        }
+    }
+    out.trim_end().to_string()
+}
+
 pub fn format_approval(call: &ToolCall) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -608,6 +660,7 @@ pub fn format_approval(call: &ToolCall) -> String {
         "edit_file" => return format_edit_approval(out, args, obj),
         "fs" => return format_fs_approval(out, args, obj),
         "dotfiles" => return format_dotfiles_approval(out, args, obj),
+        "skill" => return format_skill_approval(out, args, obj),
         _ => {}
     }
 
@@ -709,6 +762,7 @@ register_tools! {
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
+    blocking: skill,
     async: system,
     async: web_search,
     blocking: workspace_snapshot,

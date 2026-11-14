@@ -160,6 +160,8 @@ impl Default for AppSettings {
                 "dotfiles:read",
                 "dotfiles:search",
                 "dotfiles:validate",
+                "skill:list",
+                "skill:read",
             ]
             .map(String::from)
             .into(),
@@ -344,7 +346,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# Overrides ~/.config/archon/config.toml for this directory.\n",
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
-            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"web_search\", \"workspace_snapshot\"]\n\n",
+            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"web_search\", \"workspace_snapshot\"]\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
             "# include = [\"**/*\"]\n",

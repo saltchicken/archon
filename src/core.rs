@@ -13,6 +13,7 @@ use config::Config;
 use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
+use skills::SkillDefinition;
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -106,6 +107,7 @@ pub enum EngineEvent {
         total: usize,
     },
     SessionsListed(Vec<SessionSummary>),
+    SkillsUpdated(Vec<SkillDefinition>),
     ModelConfigUpdated {
         model: String,
         num_ctx: u32,
@@ -937,6 +939,15 @@ impl CoreEngine {
                     .take()
                     .or_else(|| self.unresolved_tool_names().into_iter().next())
                     .unwrap_or_else(|| "tool_execution".into());
+                if tool_name == "skill" {
+                    self.config.skills = skills::discover_skills(
+                        &self.config.app.skills_dir,
+                        self.config.workspace_skills_dir.as_deref(),
+                    );
+                    let _ = self
+                        .tx
+                        .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
+                }
                 self.messages
                     .push(ChatMessage::new_tool(tool_name, output, truncated));
                 self.save_and_emit_chat(Vec::new()).await;
