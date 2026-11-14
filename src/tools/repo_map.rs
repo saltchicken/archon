@@ -1,4 +1,4 @@
-use super::{BlockingTool, ToolContext, utils::read_utf8_capped};
+use super::{BlockingTool, ToolContext, utils::fs::read_utf8_capped};
 use crate::core::{config::WorkspaceSnapshotSettings, session::truncate_str};
 use anyhow::{Result, bail};
 use schemars::JsonSchema;

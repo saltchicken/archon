@@ -1,18 +1,16 @@
-use super::{BlockingTool, ToolContext, utils::atomic_write_file};
+use super::{
+    BlockingTool, ToolContext,
+    utils::{
+        edit::{EditHunk, apply_hunks_to_str},
+        fs::atomic_write_file,
+    },
+};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::{borrow::Cow, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 pub struct Tool;
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct EditHunk {
-    /// The exact, unique block of text to search for.
-    pub search_string: String,
-    /// The replacement text to substitute in place of `search_string`.
-    pub replace_string: String,
-}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct EditFileArgs {
@@ -20,103 +18,6 @@ pub struct EditFileArgs {
     file_path: String,
     /// Disjoint search/replace hunks to apply atomically to the file in a single pass.
     edits: Vec<EditHunk>,
-}
-
-fn normalize_eol(s: &str, use_crlf: bool) -> String {
-    let lf = s.replace("\r\n", "\n");
-    if use_crlf {
-        lf.replace('\n', "\r\n")
-    } else {
-        lf
-    }
-}
-
-fn locate_hunk_span(
-    content: &str,
-    file_path: &str,
-    search: &str,
-    replace: &str,
-    hunk_label: &str,
-) -> Result<(usize, usize, String)> {
-    if search.is_empty() {
-        bail!("{hunk_label}: search_string cannot be empty");
-    }
-
-    let mut matches: Vec<usize> = content.match_indices(search).map(|(i, _)| i).collect();
-    let mut effective_search = Cow::Borrowed(search);
-    let mut effective_replace = Cow::Borrowed(replace);
-
-    if matches.is_empty() && search.contains('\n') {
-        let target_crlf = content.contains("\r\n");
-        let alt_search = normalize_eol(search, target_crlf);
-        let alt_matches: Vec<usize> = content.match_indices(&alt_search).map(|(i, _)| i).collect();
-        if !alt_matches.is_empty() {
-            matches = alt_matches;
-            effective_search = Cow::Owned(alt_search);
-            effective_replace = Cow::Owned(normalize_eol(replace, target_crlf));
-        }
-    }
-
-    match matches.as_slice() {
-        [] => bail!("{hunk_label}: exact search_string not found in {file_path}"),
-        &[start] => Ok((
-            start,
-            start + effective_search.len(),
-            effective_replace.into_owned(),
-        )),
-        n => bail!(
-            "{hunk_label}: search_string matched {} times in {file_path}. Provide more surrounding context to make it unique.",
-            n.len()
-        ),
-    }
-}
-
-pub fn apply_hunks_to_str(content: &str, file_path: &str, edits: &[EditHunk]) -> Result<String> {
-    if edits.is_empty() {
-        bail!("'edits' array cannot be empty");
-    }
-
-    let total = edits.len();
-    let label_for = |idx: usize| {
-        if total == 1 {
-            "Edit".into()
-        } else {
-            format!("Hunk {}/{total}", idx + 1)
-        }
-    };
-
-    let mut resolved: Vec<(usize, usize, usize, String)> = Vec::with_capacity(total);
-    for (idx, hunk) in edits.iter().enumerate() {
-        let (start, end, replacement) = locate_hunk_span(
-            content,
-            file_path,
-            &hunk.search_string,
-            &hunk.replace_string,
-            &label_for(idx),
-        )?;
-        for &(prev_idx, prev_start, prev_end, _) in &resolved {
-            if start < prev_end && prev_start < end {
-                bail!(
-                    "{} and {} overlap in {file_path}. Edits must be disjoint.",
-                    label_for(prev_idx),
-                    label_for(idx)
-                );
-            }
-        }
-        resolved.push((idx, start, end, replacement));
-    }
-
-    resolved.sort_by_key(|&(_, start, _, _)| start);
-
-    let mut out = String::with_capacity(content.len());
-    let mut cursor = 0;
-    for (_, start, end, replacement) in resolved {
-        out.push_str(&content[cursor..start]);
-        out.push_str(&replacement);
-        cursor = end;
-    }
-    out.push_str(&content[cursor..]);
-    Ok(out)
 }
 
 pub fn preview_edits(
@@ -163,103 +64,5 @@ impl BlockingTool for Tool {
         } else {
             Ok(format!("Successfully applied {hunk_count} edits to {path}"))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn applies_multiple_disjoint_hunks_out_of_order() {
-        let original = "fn alpha() {\n    let a = 1;\n}\n\nfn beta() {\n    let b = 2;\n}\n";
-        let edits = vec![
-            EditHunk {
-                search_string: "let b = 2;".into(),
-                replace_string: "let b = 20;".into(),
-            },
-            EditHunk {
-                search_string: "let a = 1;".into(),
-                replace_string: "let a = 10;".into(),
-            },
-        ];
-
-        let updated = apply_hunks_to_str(original, "test.rs", &edits).unwrap();
-        assert_eq!(
-            updated,
-            "fn alpha() {\n    let a = 10;\n}\n\nfn beta() {\n    let b = 20;\n}\n"
-        );
-    }
-
-    #[test]
-    fn disjoint_hunks_do_not_interfere_with_each_other() {
-        let original = "first = alpha\nsecond = beta\n";
-        let edits = vec![
-            EditHunk {
-                search_string: "first = alpha".into(),
-                replace_string: "first = second = beta".into(),
-            },
-            EditHunk {
-                search_string: "second = beta".into(),
-                replace_string: "second = gamma".into(),
-            },
-        ];
-
-        let updated = apply_hunks_to_str(original, "test.txt", &edits).unwrap();
-        assert_eq!(updated, "first = second = beta\nsecond = gamma\n");
-    }
-
-    #[test]
-    fn rejects_overlapping_hunks() {
-        let original = "line 1\nline 2\nline 3\n";
-        let edits = vec![
-            EditHunk {
-                search_string: "line 1\nline 2".into(),
-                replace_string: "a\nb".into(),
-            },
-            EditHunk {
-                search_string: "line 2\nline 3".into(),
-                replace_string: "c\nd".into(),
-            },
-        ];
-
-        let err = apply_hunks_to_str(original, "test.txt", &edits).unwrap_err();
-        assert!(err.to_string().contains("overlap in test.txt"));
-    }
-
-    #[test]
-    fn atomic_write_creates_and_updates_without_leaving_temp_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("script.sh");
-
-        atomic_write_file(&file_path, "#!/bin/sh\necho old\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(&file_path).unwrap(),
-            "#!/bin/sh\necho old\n"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&file_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&file_path, perms).unwrap();
-        }
-
-        atomic_write_file(&file_path, "#!/bin/sh\necho new\n").unwrap();
-        assert_eq!(
-            fs::read_to_string(&file_path).unwrap(),
-            "#!/bin/sh\necho new\n"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o755);
-        }
-
-        let remaining_entries: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
-        assert_eq!(remaining_entries.len(), 1);
     }
 }

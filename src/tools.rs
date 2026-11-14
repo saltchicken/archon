@@ -34,8 +34,11 @@ use std::{
 use tokio::{process::Command, time::timeout};
 use tracing::{debug, error, info};
 use utils::{
-    build_globset, ensure_within_root, has_git_dir_component, read_capped, resolve_existing_under,
-    validate_relative_path, workspace_root,
+    fs::read_capped,
+    path::{
+        build_globset, ensure_within_root, has_git_dir_component, resolve_existing_under,
+        validate_relative_path, workspace_root,
+    },
 };
 
 const COMMAND_TIMEOUT_SECS: u64 = 30;

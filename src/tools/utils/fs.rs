@@ -1,11 +1,9 @@
 use anyhow::{Context, Result, bail};
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::{
-    env,
     fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::{Read as _, Write as _},
-    path::{Component, Path, PathBuf},
+    io::{BufRead, BufReader, Read, Write as _},
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -14,26 +12,6 @@ pub enum FileOutcome {
     Content(String),
     Skipped(&'static str),
     Error(String),
-}
-
-pub fn workspace_root() -> Result<PathBuf> {
-    Ok(dunce::canonicalize(env::current_dir()?)?)
-}
-
-pub fn ensure_within_root(path: &Path, root: &Path, label: &str) -> Result<PathBuf> {
-    let canon = dunce::canonicalize(path)?;
-    if !canon.starts_with(root) {
-        bail!("Security violation: '{label}' escapes workspace");
-    }
-    Ok(canon)
-}
-
-pub fn ensure_parent_dir(target: &Path, root: &Path, label: &str) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).context("Error creating parent directories")?;
-        ensure_within_root(parent, root, label)?;
-    }
-    Ok(())
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -145,54 +123,6 @@ where
     } else {
         Ok(out.trim_end().to_string())
     }
-}
-
-pub fn validate_relative_path(raw: &str) -> Result<&Path> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        bail!("Security violation: path cannot be empty");
-    }
-    let rel = Path::new(trimmed);
-    if rel.is_absolute() {
-        bail!(
-            "Security violation: path must be relative to current working directory: '{trimmed}'"
-        );
-    }
-    if rel
-        .components()
-        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
-    {
-        bail!("Security violation: path traversal blocked for '{trimmed}'");
-    }
-    Ok(rel)
-}
-
-pub fn resolve_existing_under(base_root: &Path, raw: &str, escape_label: &str) -> Result<PathBuf> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return Ok(base_root.to_path_buf());
-    }
-    let candidate = base_root.join(validate_relative_path(trimmed)?);
-    if !candidate.exists() {
-        bail!("Target path does not exist: '{trimmed}'");
-    }
-    ensure_within_root(&candidate, base_root, escape_label)
-}
-
-pub fn has_git_dir_component(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == ".git")
-}
-
-pub fn build_globset(patterns: &[String], allow_recursive_shorthand: bool) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
-    for pat in patterns {
-        builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
-        if allow_recursive_shorthand && !pat.contains(['/', '\\']) {
-            let rec = format!("**/{pat}");
-            builder.add(Glob::new(&rec).with_context(|| format!("Invalid glob pattern: {rec}"))?);
-        }
-    }
-    Ok(builder.build()?)
 }
 
 /// Atomically writes `content` to `target_path` via a sibling temporary file,
@@ -307,5 +237,119 @@ pub fn read_utf8_capped(path: &Path, max_file_size: u64) -> Option<String> {
     match read_text_file_inspected(path, max_file_size) {
         FileOutcome::Content(s) if !s.is_empty() => Some(s),
         _ => None,
+    }
+}
+
+pub fn read_file_contents(
+    target_path: &Path,
+    display_path: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    max_output_size: usize,
+) -> Result<String> {
+    if !target_path.is_file() {
+        bail!("Target is not a file: {display_path}");
+    }
+
+    let file = File::open(target_path).context("Error opening file")?;
+
+    // Fast path: full raw file read when no line range is requested
+    if start_line.is_none() && end_line.is_none() {
+        let cap = (max_output_size as u64).saturating_add(1);
+        let mut buf = Vec::new();
+        file.take(cap)
+            .read_to_end(&mut buf)
+            .context("Error reading file")?;
+        return Ok(String::from_utf8_lossy(&buf).into_owned());
+    }
+
+    let start = start_line.unwrap_or(1).max(1);
+    let end = end_line.unwrap_or(usize::MAX);
+    if start > end {
+        bail!("Invalid line range: start_line ({start}) cannot be greater than end_line ({end})");
+    }
+
+    let mut reader = BufReader::new(file);
+    let mut raw_line = Vec::new();
+    let mut line_no = 0usize;
+    let mut shown_start = None;
+    let mut shown_end = 0usize;
+    let mut out = String::new();
+    let mut hit_cap = false;
+
+    loop {
+        raw_line.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut raw_line)
+            .context("Error reading file line")?;
+        if bytes_read == 0 {
+            break;
+        }
+        line_no += 1;
+
+        if line_no >= start && line_no <= end && !hit_cap {
+            let text = String::from_utf8_lossy(&raw_line);
+            let trimmed = text.trim_end_matches(['\r', '\n']);
+            let _ = writeln!(out, "{line_no:>4}: {trimmed}");
+            shown_start.get_or_insert(line_no);
+            shown_end = line_no;
+
+            if out.len() > max_output_size {
+                hit_cap = true;
+            }
+        }
+    }
+
+    if line_no == 0 {
+        return Ok("(Empty file)".into());
+    }
+
+    if let Some(first) = shown_start {
+        let _ = write!(out, "\n[Showing lines {first}..{shown_end} of {line_no}]");
+    } else {
+        bail!("Requested start_line ({start}) exceeds total lines in file ({line_no})");
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_creates_and_updates_without_leaving_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("script.sh");
+
+        atomic_write_file(&file_path, "#!/bin/sh\necho old\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "#!/bin/sh\necho old\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&file_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&file_path, perms).unwrap();
+        }
+
+        atomic_write_file(&file_path, "#!/bin/sh\necho new\n").unwrap();
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "#!/bin/sh\necho new\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755);
+        }
+
+        let remaining_entries: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert_eq!(remaining_entries.len(), 1);
     }
 }

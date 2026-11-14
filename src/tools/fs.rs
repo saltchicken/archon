@@ -1,6 +1,9 @@
 use super::{
     BlockingTool, ToolContext,
-    utils::{ensure_parent_dir, format_size, has_git_dir_component, render_directory_listing},
+    utils::{
+        fs::{format_size, render_directory_listing},
+        path::{ensure_parent_dir, has_git_dir_component},
+    },
 };
 use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;

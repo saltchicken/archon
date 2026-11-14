@@ -1,6 +1,6 @@
 use super::{
     BlockingTool, ToolContext,
-    utils::{atomic_write_file, ensure_parent_dir},
+    utils::{fs::atomic_write_file, path::ensure_parent_dir},
 };
 use anyhow::{Context, Result};
 use schemars::JsonSchema;

@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    fetch_url::{build_pinned_client, decode_entities, validate_public_url},
+    utils::http::{build_pinned_client, decode_entities, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
 use regex::Regex;
