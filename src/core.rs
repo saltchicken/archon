@@ -29,7 +29,6 @@ pub struct TurnConfig {
     pub system_prompt: String,
     pub num_ctx: u32,
     pub enable_tools: bool,
-    pub enable_skills: bool,
     pub active_skill: Option<String>,
 }
 
@@ -162,7 +161,6 @@ impl CoreEngine {
                 system_prompt: String::new(),
                 num_ctx,
                 enable_tools: true,
-                enable_skills: true,
                 active_skill: None,
             },
             active_max_tool_output_size,
@@ -257,10 +255,7 @@ impl CoreEngine {
     }
 
     fn active_turn_skill(&self) -> Option<&str> {
-        self.turn
-            .enable_skills
-            .then_some(self.turn.active_skill.as_deref())
-            .flatten()
+        self.turn.active_skill.as_deref()
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
@@ -610,7 +605,7 @@ impl CoreEngine {
                 feedback,
                 turn,
             } => {
-                let active_skill = self.turn.active_skill.take().filter(|_| turn.enable_skills);
+                let active_skill = self.turn.active_skill.take();
                 self.turn = turn;
                 self.turn.active_skill = active_skill;
                 let (index, total) = self.tool_batch_progress();
@@ -806,11 +801,7 @@ impl CoreEngine {
                 );
             }
             EngineCommand::SetTurnConfig(new_turn) => {
-                let active_skill = self
-                    .turn
-                    .active_skill
-                    .take()
-                    .filter(|_| new_turn.enable_skills);
+                let active_skill = self.turn.active_skill.take();
                 self.turn = new_turn;
                 self.turn.active_skill = active_skill;
                 self.save_session_bg(Vec::new()).await;

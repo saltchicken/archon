@@ -519,7 +519,6 @@ impl TuiApp {
             ("^f", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
-            ("^E", "Skills"),
             ("^Y", "SysMsg"),
             ("^Q", "Quit"),
         ];
@@ -561,11 +560,7 @@ impl TuiApp {
                 if self.enable_tools { "ON" } else { "OFF" },
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!(
-                "Skills:  {} ({} loaded) (^E)",
-                if self.enable_skills { "ON" } else { "OFF" },
-                self.config.skills.len()
-            )),
+            Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(
@@ -790,8 +785,7 @@ impl TuiApp {
         {
             let matches = SlashCommand::matching_triggers(cmd_prefix);
             (!matches.is_empty()).then(|| format!(" Prompt — Commands: {} ", matches.join(" │ ")))
-        } else if self.enable_skills
-            && let Some(cmd_prefix) = first_trimmed.strip_prefix('@')
+        } else if let Some(cmd_prefix) = first_trimmed.strip_prefix('@')
             && !cmd_prefix.contains(char::is_whitespace)
         {
             let matches: Vec<String> = self

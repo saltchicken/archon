@@ -108,10 +108,7 @@ impl Provider {
         turn: TurnConfig,
         tx: UnboundedSender<EngineEvent>,
     ) {
-        let active_skill = turn
-            .enable_skills
-            .then_some(turn.active_skill.as_deref())
-            .flatten();
+        let active_skill = turn.active_skill.as_deref();
 
         let tools_schema = turn
             .enable_tools
