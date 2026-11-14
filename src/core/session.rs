@@ -117,9 +117,14 @@ impl SessionManager {
         let workspace = workspace
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map( expand_tilde )
+            .map(expand_tilde)
             .or_else(|| std::env::current_dir().ok())
-            .map(|p| dunce::canonicalize(&p).unwrap_or(p).to_string_lossy().into_owned())
+            .map(|p| {
+                dunce::canonicalize(&p)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .unwrap_or_default();
 
         let db_path = history_dir.join("archon.db");

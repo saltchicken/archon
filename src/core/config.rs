@@ -334,7 +334,10 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
     fs::create_dir_all(&skills_dir)
         .with_context(|| format!("Failed to create directory {}", skills_dir.display()))?;
 
-    let escaped_ws = canon.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_ws = canon
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
     let default_ws_toml = format!(
         concat!(
             "# Archon workspace configuration\n",
@@ -413,7 +416,11 @@ impl Config {
             .unwrap_or_default();
 
         let bound_ws = read_bound_workspace(&local_config_path)
-            .or_else(|| std::env::current_dir().ok().map(|p| dunce::canonicalize(&p).unwrap_or(p)))
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| dunce::canonicalize(&p).unwrap_or(p))
+            })
             .map(|p| p.to_string_lossy().into_owned());
 
         match base_figment
