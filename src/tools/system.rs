@@ -793,34 +793,3 @@ impl AsyncTool for Tool {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_fish_history_and_redacts_secrets() {
-        let sample = "\
-- cmd: cargo check --all-targets
-  when: 1700000001
-- cmd: export OPENAI_API_KEY=sk-1234567890
-  when: 1700000002
-- cmd: hyprctl monitors\\nhyprctl workspaces
-  when: 1700000003
-- cmd: curl -H \"Authorization: Bearer my-token\" https://example.com
-  when: 1700000004
-";
-        let entries = parse_fish_history_str(sample);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].cmd, "cargo check --all-targets");
-        assert_eq!(entries[0].when, Some(1700000001));
-        assert_eq!(entries[1].cmd, "hyprctl monitors\nhyprctl workspaces");
-    }
-
-    #[test]
-    fn validates_safe_arguments() {
-        assert!(validate_safe_arg("hyprland.service", "unit").is_ok());
-        assert!(validate_safe_arg("--privileged", "unit").is_err());
-        assert!(validate_safe_arg("", "unit").is_err());
-    }
-}

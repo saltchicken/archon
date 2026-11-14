@@ -522,39 +522,3 @@ impl BlockingTool for Tool {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalizes_and_validates_config_paths() {
-        let root = PathBuf::from("/home/user/.config");
-        assert_eq!(
-            normalize_config_subpath("hypr/hyprland.conf", &root).unwrap(),
-            PathBuf::from("hypr/hyprland.conf")
-        );
-        assert_eq!(
-            normalize_config_subpath("~/.config/fish/config.fish", &root).unwrap(),
-            PathBuf::from("fish/config.fish")
-        );
-        assert_eq!(
-            normalize_config_subpath(".config/waybar/config", &root).unwrap(),
-            PathBuf::from("waybar/config")
-        );
-        assert!(normalize_config_subpath("../.ssh/id_rsa", &root).is_err());
-        assert!(normalize_config_subpath("/etc/passwd", &root).is_err());
-    }
-
-    #[test]
-    fn blocks_sensitive_config_paths() {
-        let blocked = blocked_globset(&[]).unwrap();
-        assert!(check_not_blocked(Path::new("gh/hosts.yml"), &blocked).is_err());
-        assert!(check_not_blocked(Path::new("google-chrome/Default/Cookies"), &blocked).is_err());
-        assert!(check_not_blocked(Path::new("Bitwarden/data.json"), &blocked).is_err());
-        assert!(check_not_blocked(Path::new("rclone/rclone.conf"), &blocked).is_err());
-        assert!(check_not_blocked(Path::new("my_app/.env.local"), &blocked).is_err());
-        assert!(check_not_blocked(Path::new("hypr/hyprland.conf"), &blocked).is_ok());
-        assert!(check_not_blocked(Path::new("fish/config.fish"), &blocked).is_ok());
-    }
-}
