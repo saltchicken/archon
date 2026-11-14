@@ -393,7 +393,7 @@ impl TuiApp {
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
             KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
-            KeyCode::Char('e') if ctrl => {
+            KeyCode::Char('k') if ctrl => {
                 self.skill_idx = self.skill_idx.min(self.config.skills.len().saturating_sub(1));
                 self.modal = ActiveModal::Skills;
             }
