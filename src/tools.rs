@@ -691,6 +691,39 @@ register_tools! {
     blocking: workspace_snapshot,
 }
 
+pub async fn run_manual_command(
+    program: &str,
+    args: &[String],
+    config: &Config,
+    max_size: usize,
+) -> (String, bool, bool) {
+    let ctx = match ToolContext::new(config, None, max_size) {
+        Ok(c) => c,
+        Err(e) => return (format!("Error resolving workspace root: {e}"), false, true),
+    };
+
+    match ctx
+        .run_command(program, args, "(Command completed with no output)")
+        .await
+    {
+        Ok(mut out) => {
+            let is_error =
+                out.contains("[Exit code:") || out.contains("[Process terminated by signal]");
+            let truncated = out.len() > max_size;
+            if truncated {
+                let truncate_at = out.floor_char_boundary(max_size);
+                let dropped = out.len() - truncate_at;
+                out.truncate(truncate_at);
+                out.push_str(&format!(
+                    "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
+                ));
+            }
+            (out, truncated, is_error)
+        }
+        Err(e) => (format!("Error: {e}"), false, true),
+    }
+}
+
 pub async fn execute(
     call: &ToolCall,
     config: &Config,

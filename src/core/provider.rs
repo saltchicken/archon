@@ -200,6 +200,7 @@ pub fn sanitize_messages_for_turn(
                     out.push(m);
                 }
             }
+            "local" => {}
             _ => {
                 active_call_mask.clear();
                 tool_idx = 0;

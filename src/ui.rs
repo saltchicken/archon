@@ -64,15 +64,21 @@ pub(super) enum ActiveModal {
 pub(super) enum SlashCommand {
     Exit,
     Reset,
+    Run,
 }
 
 impl SlashCommand {
-    pub const ALL: &[(&str, Self)] = &[("exit", Self::Exit), ("reset", Self::Reset)];
+    pub const ALL: &[(&str, Self)] = &[
+        ("exit", Self::Exit),
+        ("reset", Self::Reset),
+        ("run", Self::Run),
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exit => "exit",
             Self::Reset => "reset",
+            Self::Run => "run",
         }
     }
 
@@ -380,7 +386,7 @@ impl TuiApp {
                 );
 
                 for (i, m) in self.messages.iter().enumerate() {
-                    if m.role == "tool" {
+                    if m.role == "tool" || m.role == "local" {
                         self.msg_states[i].collapsed = true;
                     }
                 }
@@ -437,7 +443,7 @@ impl TuiApp {
                 );
                 self.scroll_to_bottom();
             }
-            EngineEvent::ToolCompleted { .. } => {
+            EngineEvent::ToolCompleted { .. } | EngineEvent::ShellCommandCompleted { .. } => {
                 self.active_tool_status = None;
             }
             EngineEvent::ToolApprovalRequested {
@@ -524,12 +530,39 @@ impl TuiApp {
             return false;
         }
 
+        if let Some(shell_cmd) = raw_prompt.strip_prefix('!') {
+            let shell_cmd = shell_cmd.trim();
+            if shell_cmd.is_empty() {
+                self.status_bar = ("Usage: !<command> (e.g. !git push)".into(), true);
+                return false;
+            }
+            self.text_area = create_text_area();
+            self.scroll_to_bottom();
+            let _ = self
+                .cmd_tx
+                .send(EngineCommand::RunShellCommand(shell_cmd.to_string()));
+            return false;
+        }
+
         if let Some(rest) = raw_prompt.strip_prefix('/') {
             let (cmd_token, args) = match rest.find(char::is_whitespace) {
                 Some(idx) => (&rest[..idx], rest[idx..].trim()),
                 None => (rest, ""),
             };
             match SlashCommand::from_name(cmd_token) {
+                Some(SlashCommand::Run) => {
+                    if args.is_empty() {
+                        self.status_bar =
+                            ("Usage: /run <command> (e.g. /run git push)".into(), true);
+                        return false;
+                    }
+                    self.text_area = create_text_area();
+                    self.scroll_to_bottom();
+                    let _ = self
+                        .cmd_tx
+                        .send(EngineCommand::RunShellCommand(args.to_string()));
+                    return false;
+                }
                 Some(cmd) if !args.is_empty() => {
                     self.status_bar = (
                         format!("Command '/{}' does not take any arguments.", cmd.as_str()),

@@ -58,6 +58,7 @@ pub enum EngineCommand {
         max_tool_output_size: usize,
     },
     SetTurnConfig(TurnConfig),
+    RunShellCommand(String),
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +93,12 @@ pub enum EngineEvent {
     ToolCompleted {
         output: String,
         truncated: bool,
+    },
+    ShellCommandCompleted {
+        command: String,
+        output: String,
+        truncated: bool,
+        is_error: bool,
     },
     ToolApprovalRequested {
         formatted_preview: String,
@@ -810,6 +817,45 @@ impl CoreEngine {
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
             }
+            EngineCommand::RunShellCommand(raw_cmd) => {
+                if self.is_turn_active() {
+                    self.notify(
+                        "Cannot run shell command while a turn or tool is active.",
+                        true,
+                    );
+                    return;
+                }
+
+                let cmd_str = raw_cmd.trim().to_string();
+                let Some(parts) = shlex::split(&cmd_str).filter(|p| !p.is_empty()) else {
+                    self.notify("Invalid or empty shell command.", true);
+                    return;
+                };
+
+                info!("Executing manual shell command: {cmd_str}");
+                self.executing_tool = true;
+                let _ = self.tx.send(EngineEvent::ToolStarted {
+                    summary: format!("! {cmd_str}"),
+                    index: 1,
+                    total: 1,
+                });
+
+                let cfg = self.config.clone();
+                let max_out = self.active_max_tool_output_size;
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                self.internal_rx = Some(rx);
+
+                self.active_task = Some(tokio::spawn(async move {
+                    let (output, truncated, is_error) =
+                        tools::run_manual_command(&parts[0], &parts[1..], &cfg, max_out).await;
+                    let _ = tx.send(EngineEvent::ShellCommandCompleted {
+                        command: cmd_str,
+                        output,
+                        truncated,
+                        is_error,
+                    });
+                }));
+            }
         }
     }
 
@@ -896,6 +942,29 @@ impl CoreEngine {
                 self.save_and_emit_chat(Vec::new()).await;
                 info!("Tool execution completed and recorded to chat history.");
                 self.process_pending_tools().await;
+            }
+            EngineEvent::ShellCommandCompleted {
+                command,
+                output,
+                truncated,
+                is_error,
+            } => {
+                self.finish_active_task();
+                let mut msg = ChatMessage::new("local", format!("$ {command}\n{output}"));
+                msg.truncated = truncated;
+                self.messages.push(msg);
+                self.save_and_emit_chat(Vec::new()).await;
+                let _ = self.tx.send(EngineEvent::ToolCompleted {
+                    output: String::new(),
+                    truncated,
+                });
+                let status = if is_error {
+                    format!("Command failed: {command}")
+                } else {
+                    format!("Command completed: {command}")
+                };
+                self.notify(status, is_error);
+                self.flush_queued_interjections().await;
             }
             other => {
                 let _ = self.tx.send(other);

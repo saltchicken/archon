@@ -807,6 +807,8 @@ impl TuiApp {
                 .take(4)
                 .collect();
             (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+        } else if first_trimmed.starts_with('!') {
+            Some(" Prompt — Shell Escape: !<command> (runs in workspace root) ".into())
         } else {
             None
         };
