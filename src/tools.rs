@@ -10,6 +10,7 @@ mod git;
 mod read_file;
 mod repo_map;
 mod search;
+mod skill;
 mod system;
 mod web_search;
 mod workspace_snapshot;
@@ -659,7 +660,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" => args
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" => args
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("")
@@ -855,14 +856,40 @@ pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
         .any(|t| t == "*" || t == name)
 }
 
+pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skills: &[String]) -> bool {
+    if is_tool_enabled(name, config) {
+        return true;
+    }
+    active_skills
+        .iter()
+        .filter_map(|s| crate::core::skills::find_skill(config, s))
+        .any(|skill| {
+            skill
+                .tools
+                .iter()
+                .map(|t| t.trim())
+                .any(|t| t == "*" || t == name)
+        })
+}
+
+fn is_tool_available_or_skill_scoped(name: &str, config: &Config) -> bool {
+    is_tool_enabled(name, config)
+        || config
+            .skills
+            .iter()
+            .any(|s| s.tools.iter().any(|t| t.trim() == name || t.trim() == "*"))
+}
+
 macro_rules! register_tools {
     ($( $kind:ident : $mod:ident ),* $(,)?) => {
         pub const ALL_TOOL_NAMES: &[&str] = &[ $( $mod::Tool::NAME ),* ];
 
-        pub fn schemas(config: &Config) -> Vec<Value> {
+        pub fn schemas_for_turn(config: &Config, active_skills: &[String]) -> Vec<Value> {
             [ $( ( $mod::Tool::NAME, register_tools!(@schema $kind, $mod), ) ),* ]
                 .into_iter()
-                .filter_map(|(name, schema)| is_tool_enabled(name, config).then_some(schema))
+                .filter_map(|(name, schema)| {
+                    is_tool_enabled_for_turn(name, config, active_skills).then_some(schema)
+                })
                 .collect()
         }
 
@@ -872,7 +899,7 @@ macro_rules! register_tools {
             config: &Config,
             max_output_size: usize,
         ) -> Result<String> {
-            if !is_tool_enabled(name, config) {
+            if !is_tool_available_or_skill_scoped(name, config) {
                 bail!("Unknown tool: '{name}'");
             }
             let ctx = ToolContext::new(config, max_output_size)?;
@@ -909,6 +936,7 @@ register_tools! {
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
+    blocking: skill,
     async: system,
     async: web_search,
     blocking: workspace_snapshot,

@@ -51,8 +51,8 @@ pub struct Config {
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
     pub models: Vec<ModelPreset>,
-    pub presets: Vec<Preset>,
     pub system_presets: Vec<Preset>,
+    pub skills: Vec<SkillDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +62,8 @@ pub struct AppSettings {
     pub sub_agent_model: String,
     pub max_msg_lines: usize,
     pub history_dir: String,
+    pub skills_dir: String,
+    pub default_skills: Vec<String>,
     pub enabled_tools: Vec<String>,
     pub allowed_commands: Vec<String>,
     pub auto_approve: Vec<String>,
@@ -117,6 +119,19 @@ pub struct Preset {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillDefinition {
+    pub name: String,
+    pub description: String,
+    pub command: String,
+    pub tools: Vec<String>,
+    pub auto_approve: Vec<String>,
+    pub prompt: String,
+    #[serde(skip)]
+    pub dir_path: Option<PathBuf>,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -124,6 +139,8 @@ impl Default for AppSettings {
             sub_agent_model: "qwen3.8:27b".into(),
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
+            skills_dir: "~/.config/archon/skills".into(),
+            default_skills: Vec::new(),
             enabled_tools: crate::tools::ALL_TOOL_NAMES
                 .iter()
                 .map(|&s| String::from(s))
@@ -137,6 +154,8 @@ impl Default for AppSettings {
                 "repo_map",
                 "workspace_snapshot",
                 "delegate_task",
+                "skill",
+                "skill:*",
                 "fs:list",
                 "git:status",
                 "git:diff",
@@ -209,15 +228,6 @@ impl Default for Config {
                     max_tool_output_size: 524_288,
                 },
             ],
-            presets: vec![
-                preset("Custom", ""),
-                preset(
-                    "Git Commit",
-                    "Inspect the repository using the `git` tool (`status`, `diff` with `target: \"--staged\"`, and `log` with `limit: 5`). If no changes are staged, inspect the unstaged `diff` and stage the relevant files using `git` (`action: \"add\"`). Then commit the staged changes using `git` (`action: \"commit\"`) with a clear, conventional commit message (concise summary line followed by bullet points explaining key changes).",
-                ),
-                preset("Describe in detail", "Describe this image in detail."),
-                preset("Extract text", "Extract all the text from this image."),
-            ],
             system_presets: vec![
                 preset("None", ""),
                 preset(
@@ -225,17 +235,80 @@ impl Default for Config {
                     "You are a highly capable and helpful AI visual assistant. Provide concise and accurate answers.",
                 ),
                 preset(
-                    "Codebase Architect",
-                    "You are an expert software architect working inside Archon. Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and delegate routine formatting/lint verification (`cargo fmt`, `cargo clippy`, `cargo check`) to the local model via `delegate_task`.",
-                ),
-                preset(
-                    "CachyOS Optimizer",
-                    "You are a CachyOS & Arch Linux system optimization and dotfiles architect running inside Archon.\n1. System Telemetry (`system`): Start with `system` (`action: \"overview\"`) to inspect the CachyOS kernel, sched-ext (`scx`) scheduler, CPU governor/EPP, PSI resource pressure, ZRAM, and thermals. Use `action: \"journal\"` and `action: \"services\"` (`failed`, `blame`, `timers`) to diagnose errors and boot bottlenecks. Use `action: \"btrfs\"` for mount options/compression/usage, `action: \"packages\"` for `paru`/`pacman` orphans/foreign packages/modified configs, `action: \"hyprland\"` for compositor state, and `action: \"fish\"` (`recent`, `frequent`, `abbreviations`) to optimize shell workflows.\n2. Dotfiles Management (`dotfiles`): Use `dotfiles` (`list`, `read`, `search`) to inspect `~/.config` (`hypr/`, `fish/`, `waybar/`, etc.). Apply targeted atomic edits with `dotfiles` (`action: \"edit\"` or `\"create\"`) and verify syntax with `action: \"validate\"`.",
-                ),
-                preset(
                     "JSON Only",
                     "You are a data extractor. Only output valid JSON. Do not include markdown or explanations.",
                 ),
+            ],
+            skills: vec![
+                SkillDefinition {
+                    name: "codebase-architect".into(),
+                    description: "Navigate and modify workspaces using AST repo_map, targeted reads, atomic edits, and sub-agent delegation.".into(),
+                    command: "architect".into(),
+                    tools: vec![
+                        "repo_map".into(),
+                        "search".into(),
+                        "workspace_snapshot".into(),
+                        "read_file".into(),
+                        "edit_file".into(),
+                        "create_file".into(),
+                        "cargo".into(),
+                        "delegate_task".into(),
+                    ],
+                    auto_approve: vec![
+                        "repo_map".into(),
+                        "search".into(),
+                        "workspace_snapshot".into(),
+                        "read_file".into(),
+                        "cargo:check".into(),
+                        "cargo:clippy".into(),
+                        "cargo:fmt_check".into(),
+                        "delegate_task".into(),
+                    ],
+                    prompt: "Navigate and modify the workspace efficiently:\n1. Architecture & Symbols (`repo_map`): Start with `repo_map` (`action: \"map\"`) to inspect the PageRank-ranked AST symbol graph. Use `action: \"definition\"` to read a symbol's exact implementation by name without needing file paths or line numbers, and `action: \"references\"` to find all AST call sites grouped by enclosing scope.\n2. Text & Configs (`search` & `workspace_snapshot`): Use `search` for regex/literal strings, error messages, or comments (`files_with_matches: true` for broad surveys). Use `workspace_snapshot` (`tree_only: true`) for directory structure, or scoped with `target_path`/`include` to inspect manifests (`Cargo.toml`) and small modules.\n3. Targeted Reads & Edits: Use `read_file` with `start_line`/`end_line` for non-code files or surrounding context, apply minimal atomic hunks via `edit_file`, and delegate routine formatting/lint verification (`cargo fmt`, `cargo clippy`, `cargo check`) to the local model via `delegate_task`.".into(),
+                    dir_path: None,
+                },
+                SkillDefinition {
+                    name: "cachyos-optimizer".into(),
+                    description: "Diagnose and optimize CachyOS kernel, sched-ext (scx), systemd services/logs, Btrfs, packages, Hyprland, and dotfiles.".into(),
+                    command: "cachyos".into(),
+                    tools: vec!["system".into(), "dotfiles".into()],
+                    auto_approve: vec![
+                        "system:*".into(),
+                        "dotfiles:list".into(),
+                        "dotfiles:read".into(),
+                        "dotfiles:search".into(),
+                        "dotfiles:validate".into(),
+                    ],
+                    prompt: "Operate as a CachyOS & Arch Linux system optimization and dotfiles architect:\n1. System Telemetry (`system`): Start with `system` (`action: \"overview\"`) to inspect the CachyOS kernel, sched-ext (`scx`) scheduler, CPU governor/EPP, PSI resource pressure, ZRAM, and thermals. Use `action: \"journal\"` and `action: \"services\"` (`failed`, `blame`, `timers`) to diagnose errors and boot bottlenecks. Use `action: \"btrfs\"` for mount options/compression/usage, `action: \"packages\"` for `paru`/`pacman` orphans/foreign packages/modified configs, `action: \"hyprland\"` for compositor state, and `action: \"fish\"` (`recent`, `frequent`, `abbreviations`) to optimize shell workflows.\n2. Dotfiles Management (`dotfiles`): Use `dotfiles` (`list`, `read`, `search`) to inspect `~/.config` (`hypr/`, `fish/`, `waybar/`, etc.). Apply targeted atomic edits with `dotfiles` (`action: \"edit\"` or `\"create\"`) and verify syntax with `action: \"validate\"`.".into(),
+                    dir_path: None,
+                },
+                SkillDefinition {
+                    name: "git-commit".into(),
+                    description: "Inspect repository status/diffs, stage relevant changes, and create a conventional commit.".into(),
+                    command: "commit".into(),
+                    tools: vec!["git".into()],
+                    auto_approve: vec!["git:status".into(), "git:diff".into(), "git:log".into()],
+                    prompt: "Inspect the repository using the `git` tool (`status`, `diff` with `target: \"--staged\"`, and `log` with `limit: 5`). If no changes are staged, inspect the unstaged `diff` and stage the relevant files using `git` (`action: \"add\"`). Then commit the staged changes using `git` (`action: \"commit\"`) with a clear, conventional commit message (concise summary line followed by bullet points explaining key changes).".into(),
+                    dir_path: None,
+                },
+                SkillDefinition {
+                    name: "describe-image".into(),
+                    description: "Describe attached image(s) in comprehensive visual and technical detail.".into(),
+                    command: "describe".into(),
+                    tools: Vec::new(),
+                    auto_approve: Vec::new(),
+                    prompt: "Describe this image in detail. {{args}}".into(),
+                    dir_path: None,
+                },
+                SkillDefinition {
+                    name: "extract-text".into(),
+                    description: "Extract all visible text from attached image(s) verbatim.".into(),
+                    command: "extract".into(),
+                    tools: Vec::new(),
+                    auto_approve: Vec::new(),
+                    prompt: "Extract all the text from this image. {{args}}".into(),
+                    dir_path: None,
+                },
             ],
         }
     }
@@ -300,12 +373,16 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
+                let skills_dir = cfg.app.skills_dir.clone();
+                cfg.skills = crate::core::skills::discover_skills(cfg.skills, &skills_dir);
                 (cfg, None)
             }
-            Err(e) => (
-                Self::default(),
-                Some(format!("Config error (using defaults): {e}")),
-            ),
+            Err(e) => {
+                let mut def = Self::default();
+                let skills_dir = def.app.skills_dir.clone();
+                def.skills = crate::core::skills::discover_skills(def.skills, &skills_dir);
+                (def, Some(format!("Config error (using defaults): {e}")))
+            }
         }
     }
 }

@@ -1,5 +1,8 @@
 use super::{AsyncTool, ToolCall, ToolContext};
-use crate::core::{EngineEvent, config::Config, ollama, provider::Provider, session::ChatMessage};
+use crate::core::{
+    EngineEvent, config::Config, ollama, provider::Provider, session::ChatMessage,
+    skills::find_skill,
+};
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -29,6 +32,7 @@ const DEFAULT_ALLOWED_SUB_TOOLS: &[&str] = &[
     "git",
     "dotfiles",
     "system",
+    "skill",
     "execute_command",
 ];
 
@@ -38,10 +42,13 @@ pub struct Tool;
 pub struct DelegateTaskArgs {
     /// Clear, self-contained instructions for the local sub-agent (e.g. "Run cargo fmt and cargo clippy, fix any warnings, and report the result").
     pub task: String,
+    /// Optional skill name (e.g. `"codebase-architect"`, `"cachyos-optimizer"`, `"git-commit"`) to equip the sub-agent with specialized instructions and scoped tools.
+    #[serde(default)]
+    pub skill: String,
     /// Optional local Ollama model override. Defaults to `app.sub_agent_model` (or `app.default_model` if it is an Ollama model).
     #[serde(default)]
     pub model: String,
-    /// Optional list of tool names to expose to the sub-agent (e.g. `["cargo", "read_file", "edit_file"]`). Defaults to safe local workspace tools.
+    /// Optional list of tool names to expose to the sub-agent (e.g. `["cargo", "read_file", "edit_file"]`). Overrides skill tools when non-empty.
     #[serde(default)]
     pub tools: Vec<String>,
     /// Maximum number of autonomous tool-calling turns allowed before stopping (default: 8, max: 15).
@@ -69,18 +76,29 @@ fn resolve_sub_agent_model(arg_model: &str, config: &Config) -> String {
         .map_or_else(|| "qwen3.8:27b".into(), |m| m.name.clone())
 }
 
-fn filter_sub_agent_tools(requested: &[String], config: &Config) -> Vec<Value> {
-    let allow_list: Vec<&str> = if requested.is_empty() {
-        DEFAULT_ALLOWED_SUB_TOOLS.to_vec()
-    } else {
+fn filter_sub_agent_tools(
+    requested: &[String],
+    skill_tools: &[String],
+    active_skills: &[String],
+    config: &Config,
+) -> Vec<Value> {
+    let allow_list: Vec<&str> = if !requested.is_empty() {
         requested
             .iter()
             .map(String::as_str)
             .filter(|&name| name != "delegate_task")
             .collect()
+    } else if !skill_tools.is_empty() {
+        skill_tools
+            .iter()
+            .map(String::as_str)
+            .filter(|&name| name != "delegate_task")
+            .collect()
+    } else {
+        DEFAULT_ALLOWED_SUB_TOOLS.to_vec()
     };
 
-    super::schemas(config)
+    super::schemas_for_turn(config, active_skills)
         .into_iter()
         .filter(|schema| {
             schema
@@ -155,15 +173,48 @@ impl AsyncTool for Tool {
             .unwrap_or(DEFAULT_MAX_STEPS)
             .clamp(1, MAX_STEPS_CAP);
 
-        let sub_tools = filter_sub_agent_tools(&args.tools, &ctx.config);
+        let resolved_skill = if args.skill.trim().is_empty() {
+            None
+        } else {
+            let Some(s) = find_skill(&ctx.config, &args.skill) else {
+                let available: Vec<&str> =
+                    ctx.config.skills.iter().map(|k| k.name.as_str()).collect();
+                bail!(
+                    "Unknown sub-agent skill '{}'. Available skills: {}",
+                    args.skill.trim(),
+                    available.join(", ")
+                );
+            };
+            Some(s.clone())
+        };
+
+        let (skill_tools, active_skill_names, sub_system_prompt) = match &resolved_skill {
+            Some(s) => (
+                s.tools.clone(),
+                vec![s.name.clone()],
+                format!(
+                    "{SUB_AGENT_SYSTEM_PROMPT}\n\n<active_skill name=\"{}\">\n{}\n</active_skill>",
+                    s.name,
+                    s.prompt.trim()
+                ),
+            ),
+            None => (Vec::new(), Vec::new(), SUB_AGENT_SYSTEM_PROMPT.to_string()),
+        };
+
+        let sub_tools =
+            filter_sub_agent_tools(&args.tools, &skill_tools, &active_skill_names, &ctx.config);
         let allowed_tool_names: Vec<String> = sub_tools
             .iter()
             .filter_map(|s| s.get("function")?.get("name")?.as_str().map(String::from))
             .collect();
 
         info!(
-            "Starting sub-agent '{}' (ctx: {}, max_steps: {}, tools: {:?})",
-            model, num_ctx, max_steps, allowed_tool_names
+            "Starting sub-agent '{}' (skill: {:?}, ctx: {}, max_steps: {}, tools: {:?})",
+            model,
+            resolved_skill.as_ref().map(|s| s.name.as_str()),
+            num_ctx,
+            max_steps,
+            allowed_tool_names
         );
 
         let mut messages = vec![ChatMessage::new("user", task)];
@@ -177,7 +228,7 @@ impl AsyncTool for Tool {
             let payload = ollama::build_payload(
                 &model,
                 &messages,
-                SUB_AGENT_SYSTEM_PROMPT,
+                &sub_system_prompt,
                 num_ctx,
                 tools_opt,
             );

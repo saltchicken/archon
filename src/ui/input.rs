@@ -126,6 +126,8 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::ContextWindow => self.handle_context_window_key(key.code),
+            ActiveModal::Skills => self.handle_skills_key(key.code),
+            ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
             ActiveModal::None => self.handle_main_key(key, ctrl),
         }
         false
@@ -251,6 +253,87 @@ impl TuiApp {
         }
     }
 
+    fn handle_skills_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Enter => {
+                self.modal = ActiveModal::None;
+                let _ = self
+                    .cmd_tx
+                    .send(EngineCommand::SetTurnConfig(self.current_turn_config()));
+            }
+            KeyCode::Up => self.skill_idx = self.skill_idx.saturating_sub(1),
+            KeyCode::Down if self.skill_idx + 1 < self.config.skills.len() => {
+                self.skill_idx += 1;
+            }
+            KeyCode::Char(' ') => {
+                if let Some(skill) = self.config.skills.get(self.skill_idx) {
+                    if let Some(pos) = self
+                        .active_skills
+                        .iter()
+                        .position(|s| s.eq_ignore_ascii_case(&skill.name))
+                    {
+                        self.active_skills.remove(pos);
+                    } else {
+                        self.active_skills.push(skill.name.clone());
+                    }
+                }
+            }
+            KeyCode::Char('c') => {
+                self.active_skills.clear();
+            }
+            KeyCode::Char('r') => {
+                if let Some(skill) = self.config.skills.get(self.skill_idx)
+                    && !skill.prompt.is_empty()
+                {
+                    let cmd = if !skill.command.is_empty() {
+                        format!("/{} ", skill.command)
+                    } else {
+                        format!("/{} ", skill.name)
+                    };
+                    self.text_area = create_text_area();
+                    self.text_area.insert_str(cmd);
+                    self.modal = ActiveModal::None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_system_prompt_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
+        match key.code {
+            KeyCode::Esc => self.modal = ActiveModal::None,
+            KeyCode::Char('p') if ctrl && !self.config.system_presets.is_empty() => {
+                self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
+                let preset_prompt = self.config.system_presets[self.sys_preset_idx]
+                    .prompt
+                    .clone();
+                self.sys_prompt_area = super::create_sys_prompt_area(&preset_prompt);
+            }
+            KeyCode::Char('x') if ctrl => {
+                self.sys_preset_idx = 0;
+                self.sys_prompt_area = super::create_sys_prompt_area("");
+            }
+            KeyCode::Enter if shift => {
+                self.sys_prompt_area.insert_newline();
+            }
+            KeyCode::Enter => {
+                let edited = self.sys_prompt_area.lines().join("\n").trim().to_string();
+                self.sync_system_prompt(&edited);
+                self.modal = ActiveModal::None;
+                let _ = self
+                    .cmd_tx
+                    .send(EngineCommand::SetTurnConfig(self.current_turn_config()));
+                self.status_bar = (
+                    format!("System message updated ({}).", self.current_system_label()),
+                    false,
+                );
+            }
+            _ => {
+                self.sys_prompt_area.input(key);
+            }
+        }
+    }
+
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -310,17 +393,14 @@ impl TuiApp {
             }
             KeyCode::Char('t') if ctrl => self.enable_tools = !self.enable_tools,
             KeyCode::Char('b') if ctrl => self.sidebar_expanded = !self.sidebar_expanded,
-            KeyCode::Char('p') if ctrl && !self.config.presets.is_empty() => {
-                self.preset_idx = (self.preset_idx + 1) % self.config.presets.len();
-                let prompt = &self.config.presets[self.preset_idx].prompt;
-                if !prompt.is_empty() {
-                    self.text_area = create_text_area();
-                    self.text_area.insert_str(prompt);
-                }
+            KeyCode::Char('e') if ctrl => {
+                self.skill_idx = self.skill_idx.min(self.config.skills.len().saturating_sub(1));
+                self.modal = ActiveModal::Skills;
             }
-            KeyCode::Char('y') if ctrl && !self.config.system_presets.is_empty() => {
-                self.sys_preset_idx = (self.sys_preset_idx + 1) % self.config.system_presets.len();
-                self.custom_system_prompt = None;
+            KeyCode::Char('y') if ctrl => {
+                let sys_text = self.current_system_prompt_text();
+                self.sys_prompt_area = super::create_sys_prompt_area(&sys_text);
+                self.modal = ActiveModal::SystemPrompt;
             }
             _ => {
                 self.text_area.input(key);

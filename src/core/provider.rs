@@ -110,8 +110,15 @@ impl Provider {
     ) {
         let tools_schema = turn
             .enable_tools
-            .then(|| tools::schemas(&config))
+            .then(|| tools::schemas_for_turn(&config, &turn.active_skills))
             .filter(|t| !t.is_empty());
+
+        let effective_system_prompt = crate::core::skills::compose_system_prompt(
+            &turn.system_prompt,
+            &turn.active_skills,
+            turn.enable_tools,
+            &config,
+        );
 
         // Strip any historical tool_calls for tools that are currently disabled
         let messages: Vec<ChatMessage> = messages
@@ -120,7 +127,13 @@ impl Provider {
                 if let Some(calls) = m.tool_calls.take() {
                     let filtered: Vec<_> = calls
                         .into_iter()
-                        .filter(|tc| tools::is_tool_enabled(&tc.function.name, &config))
+                        .filter(|tc| {
+                            tools::is_tool_enabled_for_turn(
+                                &tc.function.name,
+                                &config,
+                                &turn.active_skills,
+                            )
+                        })
                         .collect();
                     m.tool_calls = (!filtered.is_empty()).then_some(filtered);
                 }
@@ -133,7 +146,7 @@ impl Provider {
                 let payload = ollama::build_payload(
                     &model,
                     &messages,
-                    &turn.system_prompt,
+                    &effective_system_prompt,
                     turn.num_ctx,
                     tools_schema,
                 );
@@ -146,7 +159,8 @@ impl Provider {
                     ));
                     return;
                 };
-                let payload = gemini::build_payload(&messages, &turn.system_prompt, tools_schema);
+                let payload =
+                    gemini::build_payload(&messages, &effective_system_prompt, tools_schema);
                 gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
                     .await;
             }

@@ -1,4 +1,4 @@
-use super::{ActiveModal, MsgUiState, TuiApp, preset_label, titled_block};
+use super::{ActiveModal, MsgUiState, TuiApp, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::ToolCall,
@@ -469,6 +469,8 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::ContextWindow => self.draw_context_modal(f),
+            ActiveModal::Skills => self.draw_skills_modal(f),
+            ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::None => {}
         }
     }
@@ -520,8 +522,8 @@ impl TuiApp {
             ("^f", "Add Img"),
             ("^X", "Clear Imgs"),
             ("^T", "Tools"),
-            ("^P", "Preset"),
-            ("^Y", "SysPrompt"),
+            ("^K", "Skills"),
+            ("^Y", "SysMsg"),
             ("^Q", "Quit"),
         ];
 
@@ -563,10 +565,7 @@ impl TuiApp {
                 if self.enable_tools { "ON" } else { "OFF" },
                 self.max_tool_output_size / 1024
             )),
-            Line::from(format!(
-                "Preset:  {} (^P)",
-                preset_label(&self.config.presets, self.preset_idx)
-            )),
+            Line::from(format!("Skills:  {} (^K)", self.current_skills_label())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
         ];
         f.render_widget(
@@ -779,6 +778,44 @@ impl TuiApp {
             .end_symbol(Some("▼"));
         let mut scrollbar_state = ScrollbarState::new(max_scroll).position(self.chat_scroll);
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
+
+        if let Some(first_line) = self.text_area.lines().first()
+            && let Some(cmd_prefix) = first_line.trim_start().strip_prefix('/')
+            && !cmd_prefix.contains(char::is_whitespace)
+        {
+            let matches: Vec<String> = self
+                .config
+                .skills
+                .iter()
+                .filter(|s| {
+                    (!s.command.is_empty() && s.command.starts_with(cmd_prefix))
+                        || s.name.starts_with(cmd_prefix)
+                })
+                .map(|s| {
+                    let trigger = if s.command.is_empty() {
+                        &s.name
+                    } else {
+                        &s.command
+                    };
+                    format!("/{trigger} ({})", truncate_str(&s.description, 45))
+                })
+                .take(4)
+                .collect();
+
+            if !matches.is_empty() {
+                self.text_area.set_block(
+                    titled_block(format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+                        .border_style(Style::default().fg(Color::Yellow)),
+                );
+            } else {
+                self.text_area.set_block(
+                    titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)),
+                );
+            }
+        } else {
+            self.text_area
+                .set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
+        }
 
         f.render_widget(&self.text_area, chunks[1]);
     }

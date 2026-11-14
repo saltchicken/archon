@@ -58,6 +58,8 @@ pub(super) enum ActiveModal {
     ToolApproval,
     ModelSelect,
     ContextWindow,
+    Skills,
+    SystemPrompt,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -87,9 +89,11 @@ pub struct TuiApp {
     pub(super) model_idx: usize,
     pub(super) ctx_preset_idx: usize,
     pub(super) ctx_input: String,
-    pub(super) preset_idx: usize,
+    pub(super) active_skills: Vec<String>,
+    pub(super) skill_idx: usize,
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
+    pub(super) sys_prompt_area: TextArea<'static>,
     pub(super) enable_tools: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
@@ -124,6 +128,15 @@ pub(super) fn create_text_area() -> TextArea<'static> {
     ta
 }
 
+pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
+    let mut ta = TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>());
+    ta.set_block(
+        titled_block(" Edit System Message ").border_style(Style::default().fg(Color::Cyan)),
+    );
+    ta.set_cursor_line_style(Style::default());
+    ta
+}
+
 pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
     Block::default().borders(Borders::ALL).title(title)
 }
@@ -141,6 +154,7 @@ impl TuiApp {
             .iter()
             .position(|m| m.name == model)
             .unwrap_or(0);
+        let active_skills = config.app.default_skills.clone();
 
         Self {
             model,
@@ -157,15 +171,17 @@ impl TuiApp {
             is_streaming: false,
             active_tool_status: None,
             status_bar: (
-                "Ready. Press ⏎ to send prompt (⇧⏎ newline), ? to toggle help.".into(),
+                "Ready. Press ⏎ to send, / for skill commands, ^K for skills, ? for help.".into(),
                 false,
             ),
             model_idx,
             ctx_preset_idx: 0,
             ctx_input: String::new(),
-            preset_idx: 0,
+            active_skills,
+            skill_idx: 0,
             sys_preset_idx: 0,
             custom_system_prompt: None,
+            sys_prompt_area: create_sys_prompt_area(""),
             enable_tools: true,
             num_ctx,
             max_tool_output_size,
@@ -229,10 +245,13 @@ impl TuiApp {
                             self.ctx_input.push(c);
                         }
                     }
+                    ActiveModal::SystemPrompt => {
+                        self.sys_prompt_area.insert_str(text.replace('\r', ""));
+                    }
                     ActiveModal::None => {
                         self.text_area.insert_str(text.replace('\r', ""));
                     }
-                    ActiveModal::Sessions | ActiveModal::ModelSelect => {}
+                    ActiveModal::Sessions | ActiveModal::ModelSelect | ActiveModal::Skills => {}
                 }
             }
             _ => {}
@@ -326,6 +345,7 @@ impl TuiApp {
                 queued_messages,
                 num_ctx,
                 system_prompt,
+                active_skills,
             } => {
                 if messages.is_empty() {
                     self.used_tokens = 0;
@@ -336,6 +356,7 @@ impl TuiApp {
                 self.finish_stream();
                 self.streaming_text.clear();
                 self.num_ctx = num_ctx;
+                self.active_skills = active_skills;
                 self.sync_system_prompt(&system_prompt);
                 self.msg_states.clear();
                 self.msg_states.resize(
@@ -454,16 +475,20 @@ impl TuiApp {
         }
     }
 
-    fn current_turn_config(&self) -> TurnConfig {
-        let system_prompt = self.custom_system_prompt.clone().unwrap_or_else(|| {
+    pub(super) fn current_system_prompt_text(&self) -> String {
+        self.custom_system_prompt.clone().unwrap_or_else(|| {
             self.config
                 .system_presets
                 .get(self.sys_preset_idx)
                 .map(|p| p.prompt.clone())
                 .unwrap_or_default()
-        });
+        })
+    }
+
+    pub(super) fn current_turn_config(&self) -> TurnConfig {
         TurnConfig {
-            system_prompt,
+            system_prompt: self.current_system_prompt_text(),
+            active_skills: self.active_skills.clone(),
             num_ctx: self.num_ctx,
             enable_tools: self.enable_tools,
         }
@@ -471,25 +496,49 @@ impl TuiApp {
 
     pub(super) fn current_system_label(&self) -> &str {
         if self.custom_system_prompt.is_some() {
-            "Custom (Session)"
+            "Custom"
         } else {
             preset_label(&self.config.system_presets, self.sys_preset_idx)
         }
     }
 
+    pub(super) fn current_skills_label(&self) -> String {
+        match self.active_skills.as_slice() {
+            [] => format!("0/{} active", self.config.skills.len()),
+            [single] => single.clone(),
+            many => format!("{} active ({})", many.len(), many[0]),
+        }
+    }
+
     pub(super) fn submit_prompt(&mut self) {
-        let prompt = self.text_area.lines().join("\n").trim().to_string();
-        if prompt.is_empty() {
+        let raw_prompt = self.text_area.lines().join("\n").trim().to_string();
+        if raw_prompt.is_empty() {
             self.status_bar = ("Prompt cannot be empty.".into(), true);
             return;
         }
 
+        let mut turn = self.current_turn_config();
+        let prompt = if let Some((skill_name, expanded, maybe_auto_skill)) =
+            crate::core::skills::expand_slash_command(&raw_prompt, &self.config)
+        {
+            if let Some(auto_skill) = maybe_auto_skill
+                && !turn
+                    .active_skills
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(&auto_skill))
+            {
+                turn.active_skills.push(auto_skill.clone());
+                self.active_skills = turn.active_skills.clone();
+            }
+            self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
+            expanded
+        } else {
+            raw_prompt
+        };
+
         self.text_area = create_text_area();
         self.scroll_to_bottom();
-        let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
-            prompt,
-            turn: self.current_turn_config(),
-        });
+        let _ = self.cmd_tx.send(EngineCommand::SendPrompt { prompt, turn });
     }
 
     pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {

@@ -72,6 +72,8 @@ pub struct SessionData {
     pub model: String,
     pub updated_at: String,
     pub system_prompt: String,
+    #[serde(default)]
+    pub active_skills: Vec<String>,
     pub num_ctx: u32,
     pub messages: Vec<ChatMessage>,
 }
@@ -108,6 +110,7 @@ impl SessionManager {
                  model TEXT NOT NULL,
                  updated_at TEXT NOT NULL,
                  system_prompt TEXT NOT NULL,
+                 active_skills_json TEXT NOT NULL DEFAULT '[]',
                  num_ctx INTEGER NOT NULL,
                  message_count INTEGER NOT NULL DEFAULT 0,
                  messages_json TEXT NOT NULL
@@ -125,6 +128,11 @@ impl SessionManager {
              );",
         )
         .context("Failed to initialize database schema")?;
+
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN active_skills_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -146,6 +154,7 @@ impl SessionManager {
         id: &str,
         model: &str,
         system_prompt: &str,
+        active_skills: &[String],
         num_ctx: u32,
         messages: &[ChatMessage],
         new_images: &[(String, Vec<u8>)],
@@ -168,6 +177,7 @@ impl SessionManager {
             .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50));
 
         let updated_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let active_skills_json = serde_json::to_string(active_skills)?;
         let messages_json = serde_json::to_string(&clean_msgs)?;
         let msg_count = clean_msgs.len() as i64;
 
@@ -175,13 +185,14 @@ impl SessionManager {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO sessions (id, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO sessions (id, title, model, updated_at, system_prompt, active_skills_json, num_ctx, message_count, messages_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  title = excluded.title,
                  model = excluded.model,
                  updated_at = excluded.updated_at,
                  system_prompt = excluded.system_prompt,
+                 active_skills_json = excluded.active_skills_json,
                  num_ctx = excluded.num_ctx,
                  message_count = excluded.message_count,
                  messages_json = excluded.messages_json",
@@ -191,6 +202,7 @@ impl SessionManager {
                 model,
                 updated_at,
                 system_prompt,
+                active_skills_json,
                 num_ctx,
                 msg_count,
                 messages_json
@@ -235,9 +247,9 @@ impl SessionManager {
 
     pub fn load(&self, id: &str) -> Result<SessionData> {
         let conn = self.lock_conn();
-        let (mut session, messages_json) = conn
+        let (mut session, active_skills_json, messages_json) = conn
             .query_row(
-                "SELECT title, model, updated_at, system_prompt, num_ctx, messages_json
+                "SELECT title, model, updated_at, system_prompt, active_skills_json, num_ctx, messages_json
                  FROM sessions
                  WHERE id = ?1",
                 params![id],
@@ -249,15 +261,18 @@ impl SessionManager {
                             model: row.get(1)?,
                             updated_at: row.get(2)?,
                             system_prompt: row.get(3)?,
-                            num_ctx: row.get(4)?,
+                            active_skills: Vec::new(),
+                            num_ctx: row.get(5)?,
                             messages: Vec::new(),
                         },
-                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(4).unwrap_or_else(|_| "[]".into()),
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .with_context(|| format!("Session '{id}' not found in database"))?;
 
+        session.active_skills = serde_json::from_str(&active_skills_json).unwrap_or_default();
         session.messages = serde_json::from_str(&messages_json)
             .with_context(|| format!("Failed to parse messages JSON for session '{id}'"))?;
         Ok(session)
@@ -318,6 +333,7 @@ mod tests {
             "sess_1",
             "qwen3.8:27b",
             "System prompt",
+            &["codebase-architect".into()],
             32768,
             &[msg],
             &[("paste_123.png".into(), img_bytes.clone())],

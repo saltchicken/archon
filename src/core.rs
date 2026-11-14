@@ -5,6 +5,7 @@ pub mod logger;
 pub mod ollama;
 pub mod provider;
 pub mod session;
+pub mod skills;
 
 use crate::tools::{self, ToolCall};
 use attachments::{ImageAttachment, ImageStaging};
@@ -26,6 +27,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     pub system_prompt: String,
+    pub active_skills: Vec<String>,
     pub num_ctx: u32,
     pub enable_tools: bool,
 }
@@ -56,6 +58,7 @@ pub enum EngineCommand {
         max_tool_output_size: usize,
     },
     SetContextWindow(u32),
+    SetTurnConfig(TurnConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +73,7 @@ pub enum EngineEvent {
         queued_messages: Vec<ChatMessage>,
         num_ctx: u32,
         system_prompt: String,
+        active_skills: Vec<String>,
     },
     QueuedInterjectionsUpdated(Vec<ChatMessage>),
     StreamStarted,
@@ -145,6 +149,7 @@ impl CoreEngine {
         let client = provider.build_client(&config)?;
         let num_ctx = config.context_for_model(&model);
         let active_max_tool_output_size = config.max_tool_output_for_model(&model);
+        let default_skills = config.app.default_skills.clone();
 
         Ok(Self {
             model,
@@ -156,6 +161,7 @@ impl CoreEngine {
             session_id: SessionManager::new_id(),
             turn: TurnConfig {
                 system_prompt: String::new(),
+                active_skills: default_skills,
                 num_ctx,
                 enable_tools: true,
             },
@@ -238,11 +244,19 @@ impl CoreEngine {
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
+        let skill_rules = self
+            .turn
+            .active_skills
+            .iter()
+            .filter_map(|name| skills::find_skill(&self.config, name))
+            .flat_map(|s| s.auto_approve.iter());
+
         let all_rules = self
             .config
             .app
             .auto_approve
             .iter()
+            .chain(skill_rules)
             .chain(self.session_auto_approve.iter())
             .map(String::as_str);
         tools::is_auto_approved(call, all_rules)
@@ -331,7 +345,11 @@ impl CoreEngine {
         let mut modified = false;
 
         while let Some(call) = self.pending_tools.front() {
-            if !tools::is_tool_enabled(&call.function.name, &self.config) {
+            if !tools::is_tool_enabled_for_turn(
+                &call.function.name,
+                &self.config,
+                &self.turn.active_skills,
+            ) {
                 let call = self.pending_tools.pop_front().unwrap();
                 warn!(
                     "Rejecting disabled tool call '{}' without prompting",
@@ -655,6 +673,7 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
+                        self.turn.active_skills = data.active_skills;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -710,6 +729,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
+                self.turn.active_skills = self.config.app.default_skills.clone();
                 self.turn.num_ctx = self.config.context_for_model(&self.model);
                 self.active_max_tool_output_size =
                     self.config.max_tool_output_for_model(&self.model);
@@ -776,6 +796,11 @@ impl CoreEngine {
                 self.save_session_bg(Vec::new()).await;
                 self.emit_model_config();
                 self.notify(format!("Context window set to {} tokens.", clamped), false);
+            }
+            EngineCommand::SetTurnConfig(new_turn) => {
+                self.turn = new_turn;
+                self.save_session_bg(Vec::new()).await;
+                self.emit_chat();
             }
         }
     }
@@ -853,6 +878,18 @@ impl CoreEngine {
             }
             EngineEvent::ToolCompleted { output, truncated } => {
                 self.finish_active_task();
+                let resolved_idx = self.messages.iter().rev().take_while(|m| m.role == "tool").count();
+                if let Some(assistant_msg) = self.messages.iter().rev().find(|m| m.role == "assistant")
+                    && let Some(call) = assistant_msg.tool_calls.as_ref().and_then(|c| c.get(resolved_idx))
+                    && call.function.name == "skill"
+                    && call.function.arguments.get("action").and_then(|v| v.as_str()) == Some("load")
+                    && let Some(skill_name) = call.function.arguments.get("name").and_then(|v| v.as_str())
+                    && let Some(skill) = skills::find_skill(&self.config, skill_name)
+                    && !self.turn.active_skills.iter().any(|s| s.eq_ignore_ascii_case(&skill.name))
+                {
+                    info!("Dynamically activating loaded skill '{}' for current session", skill.name);
+                    self.turn.active_skills.push(skill.name.clone());
+                }
                 self.messages.push(ChatMessage {
                     truncated,
                     ..ChatMessage::new("tool", output)
@@ -879,11 +916,14 @@ impl CoreEngine {
         let id = self.session_id.clone();
         let model = self.model.clone();
         let sys = self.turn.system_prompt.clone();
+        let active_skills = self.turn.active_skills.clone();
         let ctx = self.turn.num_ctx;
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images) {
+            if let Err(e) =
+                sessions.save(&id, &model, &sys, &active_skills, ctx, &msgs, &new_images)
+            {
                 error!("Failed to save session {id}: {e}");
             }
         }));
@@ -954,6 +994,7 @@ impl CoreEngine {
             queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,
             system_prompt: self.turn.system_prompt.clone(),
+            active_skills: self.turn.active_skills.clone(),
         });
     }
 
