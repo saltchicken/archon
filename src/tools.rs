@@ -367,7 +367,14 @@ impl ToolContext {
             if !combined.is_empty() {
                 combined.push('\n');
             }
-            combined.push_str("[STDERR]\n");
+            // Only label stderr on failure: a non-zero exit means the
+            // stderr text is the actual error and must not be mistaken for
+            // the command's output. Successful commands (e.g. git push
+            // printing "Everything up-to-date") write informational
+            // messages to stderr, so merge them without a label.
+            if !status.success() {
+                combined.push_str("[STDERR]\n");
+            }
             combined.push_str(&String::from_utf8_lossy(&err_bytes));
         }
         if !status.success() {
