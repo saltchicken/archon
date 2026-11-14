@@ -121,7 +121,7 @@ fn validate_extra_file(
     }
 
     Err(format!(
-        "Security violation: local .archon.toml cannot read external file '{raw_file}' outside the workspace."
+        "Security violation: local .archon/config.toml cannot read external file '{raw_file}' outside the workspace."
     ))
 }
 

@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
         .join("archon/config.toml");
 
-    let (config, config_err) = Config::load(&base_config_path, ".archon.toml");
+    let (config, config_err) = Config::load(&base_config_path, ".archon/config.toml");
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
