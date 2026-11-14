@@ -324,12 +324,14 @@ impl CoreEngine {
         });
 
         let cfg = self.config.clone();
+        let active_skills = self.turn.active_skills.clone();
         let max_out = self.active_max_tool_output_size;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.internal_rx = Some(rx);
 
         self.active_task = Some(tokio::spawn(async move {
-            let (mut output, truncated) = tools::execute(&call, &cfg, max_out).await;
+            let (mut output, truncated) =
+                tools::execute(&call, &cfg, &active_skills, max_out).await;
             if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
                 output.push_str(&format!("\n\n[User attached a message]: {fb}"));
             }

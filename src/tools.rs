@@ -44,6 +44,7 @@ const COMMAND_TIMEOUT_SECS: u64 = 30;
 
 const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "**/.git/**",
+    "**/.archon/skills/**",
     "**/*.venv/**",
     "**/node_modules/**",
     "**/target/**",
@@ -82,16 +83,18 @@ pub(super) struct ToolContext {
     pub max_output_size: usize,
     pub snapshot: WorkspaceSnapshotSettings,
     pub allowed_commands: Vec<String>,
+    pub active_skills: Vec<String>,
     pub config: Config,
 }
 
 impl ToolContext {
-    fn new(config: &Config, max_output_size: usize) -> Result<Self> {
+    fn new(config: &Config, active_skills: &[String], max_output_size: usize) -> Result<Self> {
         Ok(Self {
             root: workspace_root()?,
             max_output_size,
             snapshot: config.workspace_snapshot.clone(),
             allowed_commands: config.app.allowed_commands.clone(),
+            active_skills: active_skills.to_vec(),
             config: config.clone(),
         })
     }
@@ -102,6 +105,7 @@ impl ToolContext {
             max_output_size: 0,
             snapshot: WorkspaceSnapshotSettings::default(),
             allowed_commands: Vec::new(),
+            active_skills: Vec::new(),
             config: Config::default(),
         })
     }
@@ -142,20 +146,55 @@ impl ToolContext {
 
     pub fn resolve_readable_path(&self, raw: &str) -> Result<PathBuf> {
         let trimmed = raw.trim();
-        let expanded = expand_tilde(trimmed);
-        let skills_root = expand_tilde(&self.config.app.skills_dir);
-
-        if expanded.is_absolute() && skills_root.exists() {
-            let canon_skills = dunce::canonicalize(&skills_root).unwrap_or(skills_root);
-            if expanded.starts_with(&canon_skills) {
-                if !expanded.exists() {
-                    bail!("Target path does not exist: '{trimmed}'");
-                }
-                return ensure_within_root(&expanded, &canon_skills, trimmed);
-            }
+        if trimmed.is_empty() {
+            bail!("Security violation: path cannot be empty");
         }
 
-        self.resolve_existing_path(trimmed)
+        let expanded = expand_tilde(trimmed);
+        let candidate = if expanded.is_absolute() {
+            expanded
+        } else {
+            self.root.join(validate_relative_path(trimmed)?)
+        };
+
+        if !candidate.exists() {
+            bail!("Target path does not exist: '{trimmed}'");
+        }
+        let canon = dunce::canonicalize(&candidate)?;
+
+        let global_skills_root = expand_tilde(&self.config.app.skills_dir);
+        let canon_global =
+            dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
+        let local_skills_root = self.root.join(".archon/skills");
+        let canon_local =
+            dunce::canonicalize(&local_skills_root).unwrap_or(local_skills_root);
+
+        if canon.starts_with(&canon_global) || canon.starts_with(&canon_local) {
+            let allowed = self
+                .active_skills
+                .iter()
+                .filter_map(|name| crate::core::skills::find_skill(&self.config, name))
+                .filter_map(|s| s.dir_path.as_deref())
+                .filter(|d| d.is_dir())
+                .any(|dir| {
+                    let abs_dir = if dir.is_absolute() {
+                        dir.to_path_buf()
+                    } else {
+                        self.root.join(dir)
+                    };
+                    let canon_dir = dunce::canonicalize(&abs_dir).unwrap_or(abs_dir);
+                    canon.starts_with(&canon_dir)
+                });
+
+            if !allowed {
+                bail!(
+                    "Security violation: cannot read skill file '{trimmed}' because its skill is not active."
+                );
+            }
+            return Ok(canon);
+        }
+
+        self.ensure_within_workspace(&canon, trimmed)
     }
 
     pub fn resolve_new_path(&self, raw: &str) -> Result<PathBuf> {
@@ -914,12 +953,13 @@ macro_rules! register_tools {
             name: &str,
             args: &Value,
             config: &Config,
+            active_skills: &[String],
             max_output_size: usize,
         ) -> Result<String> {
             if !is_tool_available_or_skill_scoped(name, config) {
                 bail!("Unknown tool: '{name}'");
             }
-            let ctx = ToolContext::new(config, max_output_size)?;
+            let ctx = ToolContext::new(config, active_skills, max_output_size)?;
             match name {
                 $( $mod::Tool::NAME => register_tools!(@run $kind, $mod::Tool, args, ctx), )*
                 _ => bail!("Unknown tool: '{name}'"),
@@ -958,13 +998,18 @@ register_tools! {
     blocking: workspace_snapshot,
 }
 
-pub async fn execute(call: &ToolCall, config: &Config, max_size: usize) -> (String, bool) {
+pub async fn execute(
+    call: &ToolCall,
+    config: &Config,
+    active_skills: &[String],
+    max_size: usize,
+) -> (String, bool) {
     let name = &call.function.name;
     let args = &call.function.arguments;
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(name, args, config, max_size).await {
+    match dispatch_tool(name, args, config, active_skills, max_size).await {
         Ok(mut out) => {
             let truncated = out.len() > max_size;
             if truncated {

@@ -282,8 +282,13 @@ impl AsyncTool for Tool {
                 }
 
                 info!("Sub-agent ({model}) step {step}/{max_steps} executing: {sig}");
-                let (output, truncated) =
-                    Box::pin(super::execute(&call, &ctx.config, max_tool_out)).await;
+                let (output, truncated) = Box::pin(super::execute(
+                    &call,
+                    &ctx.config,
+                    &active_skill_names,
+                    max_tool_out,
+                ))
+                .await;
                 let first_line = output.lines().next().unwrap_or("(no output)").trim();
                 execution_log.push(format!(
                     "[Step {step}] {sig} -> {}{}",
