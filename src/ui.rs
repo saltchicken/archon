@@ -581,17 +581,24 @@ impl TuiApp {
             return false;
         }
 
-        if let Some(shell_cmd) = raw_prompt.strip_prefix('!') {
-            let shell_cmd = shell_cmd.trim();
+        if let Some(rest) = raw_prompt.strip_prefix('!') {
+            let (include_in_context, shell_cmd) = match rest.strip_prefix('!') {
+                Some(ctx_cmd) => (true, ctx_cmd.trim()),
+                None => (false, rest.trim()),
+            };
             if shell_cmd.is_empty() {
-                self.status_bar = ("Usage: !<command> (e.g. !git push)".into(), true);
+                self.status_bar = (
+                    "Usage: !<command> (local) or !!<command> (insert into context)".into(),
+                    true,
+                );
                 return false;
             }
             self.text_area = create_text_area();
             self.scroll_to_bottom();
-            let _ = self
-                .cmd_tx
-                .send(EngineCommand::RunShellCommand(shell_cmd.to_string()));
+            let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
+                command: shell_cmd.to_string(),
+                include_in_context,
+            });
             return false;
         }
 
@@ -602,16 +609,28 @@ impl TuiApp {
             };
             match SlashCommand::from_name(cmd_token) {
                 Some(SlashCommand::Run) => {
-                    if args.is_empty() {
-                        self.status_bar =
-                            ("Usage: /run <command> (e.g. /run git push)".into(), true);
+                    let (include_in_context, cmd_args) =
+                        if let Some(rest_args) = args
+                            .strip_prefix("-c ")
+                            .or_else(|| args.strip_prefix("--context "))
+                        {
+                            (true, rest_args.trim())
+                        } else {
+                            (false, args)
+                        };
+                    if cmd_args.is_empty() {
+                        self.status_bar = (
+                            "Usage: /run [-c|--context] <command> (e.g. /run -c git status)".into(),
+                            true,
+                        );
                         return false;
                     }
                     self.text_area = create_text_area();
                     self.scroll_to_bottom();
-                    let _ = self
-                        .cmd_tx
-                        .send(EngineCommand::RunShellCommand(args.to_string()));
+                    let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
+                        command: cmd_args.to_string(),
+                        include_in_context,
+                    });
                     return false;
                 }
                 Some(SlashCommand::Intel) => {

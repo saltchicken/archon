@@ -205,7 +205,19 @@ pub fn sanitize_messages_for_turn(
                     out.push(m);
                 }
             }
-            "local" => {}
+            "local" => {
+                if m.include_in_context {
+                    active_call_mask.clear();
+                    tool_idx = 0;
+                    out.push(ChatMessage::new(
+                        "user",
+                        format!(
+                            "<shell_command_output>\n{}\n</shell_command_output>",
+                            m.content
+                        ),
+                    ));
+                }
+            }
             _ => {
                 active_call_mask.clear();
                 tool_idx = 0;

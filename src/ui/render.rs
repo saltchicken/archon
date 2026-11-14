@@ -648,7 +648,14 @@ impl TuiApp {
             let (header_label, color) = match m.role.as_str() {
                 "user" => (format!("USER{}", image_badge(m)), Color::Cyan),
                 "assistant" => ("ARCHON".to_string(), Color::Green),
-                "local" => ("SHELL".to_string(), Color::Magenta),
+                "local" => {
+                    let label = if m.include_in_context {
+                        "SHELL [+CTX]"
+                    } else {
+                        "SHELL"
+                    };
+                    (label.to_string(), Color::Magenta)
+                }
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
                         .map_or_else(|| "tool".to_string(), format_tool_call_summary);
@@ -815,8 +822,16 @@ impl TuiApp {
                     .collect();
                 (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
             }
+        } else if first_trimmed.starts_with("!!") {
+            Some(
+                " Prompt — Shell in Context: !!<command> (runs in workspace root & adds output to context) "
+                    .into(),
+            )
         } else if first_trimmed.starts_with('!') {
-            Some(" Prompt — Shell Escape: !<command> (runs in workspace root) ".into())
+            Some(
+                " Prompt — Shell Escape: !<command> (local only; use !!<command> to add to context) "
+                    .into(),
+            )
         } else {
             None
         };

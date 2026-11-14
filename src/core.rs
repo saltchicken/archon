@@ -61,7 +61,10 @@ pub enum EngineCommand {
     },
     SetTurnConfig(TurnConfig),
     SetPersonalIntelligence(PersonalIntelligence),
-    RunShellCommand(String),
+    RunShellCommand {
+        command: String,
+        include_in_context: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +105,7 @@ pub enum EngineEvent {
         output: String,
         truncated: bool,
         is_error: bool,
+        include_in_context: bool,
     },
     ToolApprovalRequested {
         formatted_preview: String,
@@ -893,7 +897,10 @@ impl CoreEngine {
                     }
                 }
             }
-            EngineCommand::RunShellCommand(raw_cmd) => {
+            EngineCommand::RunShellCommand {
+                command: raw_cmd,
+                include_in_context,
+            } => {
                 if self.is_turn_active() {
                     self.notify(
                         "Cannot run shell command while a turn or tool is active.",
@@ -908,10 +915,11 @@ impl CoreEngine {
                     return;
                 };
 
-                info!("Executing manual shell command: {cmd_str}");
+                let prefix = if include_in_context { "!!" } else { "!" };
+                info!("Executing manual shell command ({prefix}): {cmd_str}");
                 self.executing_tool = true;
                 let _ = self.tx.send(EngineEvent::ToolStarted {
-                    summary: format!("! {cmd_str}"),
+                    summary: format!("{prefix} {cmd_str}"),
                     index: 1,
                     total: 1,
                 });
@@ -929,6 +937,7 @@ impl CoreEngine {
                         output,
                         truncated,
                         is_error,
+                        include_in_context,
                     });
                 }));
             }
@@ -1039,10 +1048,12 @@ impl CoreEngine {
                 output,
                 truncated,
                 is_error,
+                include_in_context,
             } => {
                 self.finish_active_task();
                 let mut msg = ChatMessage::new("local", format!("$ {command}\n{output}"));
                 msg.truncated = truncated;
+                msg.include_in_context = include_in_context;
                 self.messages.push(msg);
                 self.save_and_emit_chat(Vec::new()).await;
                 let _ = self.tx.send(EngineEvent::ToolCompleted {
