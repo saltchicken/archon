@@ -13,7 +13,9 @@ mod system;
 mod web_search;
 mod workspace_snapshot;
 
-use crate::core::config::{Config, WorkspaceSnapshotSettings, expand_tilde};
+use crate::core::config::{
+    Config, ExecuteCommandSettings, WorkspaceSnapshotSettings, expand_tilde,
+};
 use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -81,7 +83,7 @@ pub(super) struct ToolContext {
     pub root: PathBuf,
     pub max_output_size: usize,
     pub snapshot: WorkspaceSnapshotSettings,
-    pub allowed_commands: Vec<String>,
+    pub execute_command: ExecuteCommandSettings,
     pub active_skill: Option<String>,
     pub config: Config,
 }
@@ -92,7 +94,7 @@ impl ToolContext {
             root: workspace_root()?,
             max_output_size,
             snapshot: config.workspace_snapshot.clone(),
-            allowed_commands: config.app.allowed_commands.clone(),
+            execute_command: config.execute_command.clone(),
             active_skill: active_skill.map(String::from),
             config: config.clone(),
         })
@@ -103,7 +105,7 @@ impl ToolContext {
             root: workspace_root()?,
             max_output_size: 0,
             snapshot: WorkspaceSnapshotSettings::default(),
-            allowed_commands: Vec::new(),
+            execute_command: ExecuteCommandSettings::default(),
             active_skill: None,
             config: Config::default(),
         })

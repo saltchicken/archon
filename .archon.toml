@@ -3,6 +3,7 @@ enabled_tools = [
     "cargo",
     "create_file",
     "edit_file",
+    "execute_command",
     "fetch_url",
     "fs",
     "git",

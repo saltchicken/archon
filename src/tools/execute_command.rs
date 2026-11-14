@@ -41,7 +41,12 @@ impl AsyncTool for Tool {
             bail!("Empty parsed command");
         };
 
-        if !ctx.allowed_commands.iter().any(|c| c == base) {
+        if !ctx
+            .execute_command
+            .allowed_commands
+            .iter()
+            .any(|c| c == base)
+        {
             bail!("Command '{base}' is not in allowlist");
         }
 

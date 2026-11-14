@@ -47,6 +47,7 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
+    pub execute_command: ExecuteCommandSettings,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
@@ -64,8 +65,13 @@ pub struct AppSettings {
     pub history_dir: String,
     pub skills_dir: String,
     pub enabled_tools: Vec<String>,
-    pub allowed_commands: Vec<String>,
     pub auto_approve: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExecuteCommandSettings {
+    pub allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,9 +135,6 @@ impl Default for AppSettings {
                 .iter()
                 .map(|&s| String::from(s))
                 .collect(),
-            allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
-                .map(String::from)
-                .into(),
             auto_approve: [
                 "read_file",
                 "search",
@@ -155,6 +158,16 @@ impl Default for AppSettings {
             ]
             .map(String::from)
             .into(),
+        }
+    }
+}
+
+impl Default for ExecuteCommandSettings {
+    fn default() -> Self {
+        Self {
+            allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
+                .map(String::from)
+                .into(),
         }
     }
 }
@@ -184,6 +197,7 @@ impl Default for Config {
         };
         Self {
             app: AppSettings::default(),
+            execute_command: ExecuteCommandSettings::default(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: EndpointSettings {
                 api_key: String::new(),
