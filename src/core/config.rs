@@ -219,6 +219,7 @@ pub struct ExecuteCommandSettings {
 #[serde(default)]
 pub struct WorkspaceSnapshotSettings {
     pub git_root: bool,
+    pub tree_only: bool,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub include_in_tree: Vec<String>,
@@ -321,6 +322,7 @@ impl Default for WorkspaceSnapshotSettings {
     fn default() -> Self {
         Self {
             git_root: true,
+            tree_only: false,
             include: vec!["**/*".into()],
             exclude: ["target/**", "node_modules/**", "Cargo.lock"]
                 .map(String::from)
@@ -559,6 +561,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"web_search\", \"workspace_snapshot\"]\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
+            "# tree_only = false\n",
             "# include = [\"**/*\"]\n",
             "# exclude = [\"target/**\", \"node_modules/**\", \"Cargo.lock\"]\n",
         ),

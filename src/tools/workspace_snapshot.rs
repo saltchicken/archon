@@ -21,7 +21,11 @@ use std::{
 pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
-pub struct WorkspaceSnapshotArgs {}
+pub struct WorkspaceSnapshotArgs {
+    /// If true, only output the workspace directory tree without reading or dumping file contents.
+    #[serde(default)]
+    pub tree_only: Option<bool>,
+}
 
 struct FileEntry {
     path: PathBuf,
@@ -204,11 +208,12 @@ fn validate_extra_file(
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "workspace_snapshot";
-    const DESCRIPTION: &'static str = "Generates a full workspace directory tree and dumps complete file contents as configured in config.toml. For navigating medium-to-large codebases without exhausting context, prefer `repo_map`.";
+    const DESCRIPTION: &'static str = "Generates a workspace directory tree and optionally dumps file contents as configured in config.toml (pass `tree_only: true` to only show the directory tree). For navigating medium-to-large codebases with code signatures, prefer `repo_map`.";
     type Args = WorkspaceSnapshotArgs;
 
-    fn execute(_args: Self::Args, ctx: &ToolContext) -> Result<String> {
+    fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let settings = &ctx.snapshot;
+        let tree_only = args.tree_only.unwrap_or(settings.tree_only);
         let max_output_size = ctx.max_output_size;
         let (base_root, scan_root) =
             ctx.resolve_scan_roots("", "target_path escapes workspace root")?;
@@ -260,7 +265,7 @@ impl BlockingTool for Tool {
                 display_path: relative.to_string_lossy().into_owned(),
                 depth: relative.components().count(),
                 is_dir,
-                include_content: !is_dir && matches_include && !matches_tree,
+                include_content: !tree_only && !is_dir && matches_include && !matches_tree,
             });
         }
 
@@ -278,7 +283,7 @@ impl BlockingTool for Tool {
                 .unwrap_or(&entry.display_path);
             let marker = if entry.is_dir {
                 "/"
-            } else if !entry.include_content {
+            } else if !tree_only && !entry.include_content {
                 " (content excluded)"
             } else {
                 ""
@@ -350,7 +355,7 @@ impl BlockingTool for Tool {
                     record_extra(
                         raw_file.clone(),
                         " (invalid glob)",
-                        Some(FileOutcome::Error(glob_err)),
+                        (!tree_only).then_some(FileOutcome::Error(glob_err)),
                     );
                     continue;
                 }
@@ -378,10 +383,13 @@ impl BlockingTool for Tool {
                             record_extra(
                                 display_path,
                                 " (not found)",
-                                Some(FileOutcome::Error("File does not exist.".into())),
+                                (!tree_only)
+                                    .then(|| FileOutcome::Error("File does not exist.".into())),
                             );
                         } else if valid_path.is_dir() {
                             record_extra(display_path, "/", None);
+                        } else if tree_only {
+                            record_extra(display_path, "", None);
                         } else {
                             let outcome = read_to_outcome(
                                 &valid_path,
@@ -397,7 +405,7 @@ impl BlockingTool for Tool {
                         record_extra(
                             shrink_tilde(&candidate),
                             " (blocked)",
-                            Some(FileOutcome::Error(sec_err)),
+                            (!tree_only).then_some(FileOutcome::Error(sec_err)),
                         );
                     }
                 }
