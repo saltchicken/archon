@@ -801,7 +801,7 @@ impl TuiApp {
                     } else {
                         &s.command
                     };
-                    format!("@{trigger} ({})", truncate_str(&s.description, 45))
+                    format!("@{trigger}")
                 })
                 .take(4)
                 .collect();
