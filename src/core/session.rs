@@ -146,6 +146,9 @@ impl SessionManager {
              CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
                  ON sessions(updated_at DESC);
 
+             CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated_at
+                 ON sessions(workspace, updated_at DESC);
+
              CREATE TABLE IF NOT EXISTS session_images (
                  session_id TEXT NOT NULL,
                  name TEXT NOT NULL,
@@ -155,25 +158,6 @@ impl SessionManager {
              );",
         )
         .context("Failed to initialize database schema")?;
-
-        let has_workspace_col: bool = conn
-            .prepare("PRAGMA table_info(sessions)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .flatten()
-            .any(|col| col == "workspace");
-
-        if !has_workspace_col {
-            conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN workspace TEXT NOT NULL DEFAULT '';",
-            )
-            .context("Failed to migrate sessions table with workspace column")?;
-        }
-
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated_at
-                 ON sessions(workspace, updated_at DESC);",
-        )
-        .context("Failed to create workspace index on sessions table")?;
 
         Ok(Self {
             conn: Mutex::new(conn),
