@@ -150,9 +150,8 @@ impl TuiApp {
             })
             .collect();
 
-        let widget = List::new(items).block(chat_block(
-            " Saved Sessions (⏎=Load, D=Delete, Esc=Close) ",
-        ));
+        let widget =
+            List::new(items).block(chat_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
         render_modal(f, 70, 60, widget);
     }
 
@@ -218,7 +217,10 @@ impl TuiApp {
         render_modal_at(f, area, widget);
     }
 
-    pub(super) fn draw_system_prompt_modal(&self, f: &mut Frame) {
+    pub(super) fn draw_system_prompt_modal(&mut self, f: &mut Frame) {
+        self.sys_prompt_area.set_cursor_style(super::cursor_style(
+            self.term_focused && self.cursor_blink_on,
+        ));
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
         let header = Line::from(vec![
             Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
@@ -239,7 +241,10 @@ impl TuiApp {
         );
     }
 
-    pub(super) fn draw_personal_intelligence_modal(&self, f: &mut Frame) {
+    pub(super) fn draw_personal_intelligence_modal(&mut self, f: &mut Frame) {
+        self.pi_area.set_cursor_style(super::cursor_style(
+            self.term_focused && self.cursor_blink_on,
+        ));
         let (status_label, status_color) = if self.pi_enabled_draft {
             ("ENABLED", Color::Green)
         } else {

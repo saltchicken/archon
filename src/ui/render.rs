@@ -770,6 +770,10 @@ impl TuiApp {
                 .set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
         }
 
+        let prompt_cursor_visible =
+            self.term_focused && self.modal == ActiveModal::None && self.cursor_blink_on;
+        self.text_area
+            .set_cursor_style(super::cursor_style(prompt_cursor_visible));
         f.render_widget(&self.text_area, chunks[1]);
     }
 }

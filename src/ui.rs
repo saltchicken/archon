@@ -11,9 +11,9 @@ use crate::core::{
 use anyhow::Result;
 use crossterm::{
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, EventStream, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -26,7 +26,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Padding},
 };
@@ -43,7 +43,8 @@ pub fn restore_terminal<W: io::Write>(out: &mut W, keyboard_enhanced: bool) {
         out,
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableFocusChange
     );
     if keyboard_enhanced {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
@@ -140,6 +141,8 @@ pub struct TuiApp {
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
+    pub(super) term_focused: bool,
+    pub(super) cursor_blink_on: bool,
 
     pub(super) modal: ActiveModal,
     pub(super) file_path_input: String,
@@ -157,7 +160,16 @@ fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
     };
     ta.set_block(titled_block(title).border_style(Style::default().fg(Color::Cyan)));
     ta.set_cursor_line_style(Style::default());
+    ta.set_cursor_style(cursor_style(true));
     ta
+}
+
+pub(super) fn cursor_style(visible: bool) -> Style {
+    if visible {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    }
 }
 
 pub(super) fn create_text_area() -> TextArea<'static> {
@@ -235,6 +247,8 @@ impl TuiApp {
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
+            term_focused: true,
+            cursor_blink_on: true,
             modal: ActiveModal::None,
             file_path_input: String::new(),
             sessions: Vec::new(),
@@ -264,9 +278,13 @@ impl TuiApp {
 
     fn handle_term_event(&mut self, event: Event) -> bool {
         match event {
-            Event::Key(key) => return self.handle_key(key),
+            Event::Key(key) => {
+                self.cursor_blink_on = true;
+                return self.handle_key(key);
+            }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Paste(text) => {
+                self.cursor_blink_on = true;
                 let single_line = text.replace(['\r', '\n'], "");
                 match self.modal {
                     ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
@@ -283,6 +301,14 @@ impl TuiApp {
                     ActiveModal::Sessions | ActiveModal::ModelSelect => {}
                 }
             }
+            Event::FocusGained => {
+                self.term_focused = true;
+                self.cursor_blink_on = true;
+            }
+            Event::FocusLost => {
+                self.term_focused = false;
+                self.cursor_blink_on = false;
+            }
             _ => {}
         }
         false
@@ -297,7 +323,8 @@ impl TuiApp {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            EnableBracketedPaste
+            EnableBracketedPaste,
+            EnableFocusChange
         )?;
         if keyboard_enhanced {
             execute!(
@@ -313,6 +340,10 @@ impl TuiApp {
         let mut render_tick = tokio::time::interval(Duration::from_millis(16));
         render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // 500ms cursor blink ticker so the cursor blinks reliably across all terminal emulators
+        let mut blink_tick = tokio::time::interval(Duration::from_millis(500));
+        blink_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         let mut dirty = true;
 
         'main_loop: loop {
@@ -323,6 +354,12 @@ impl TuiApp {
 
             tokio::select! {
                 _ = render_tick.tick() => {}
+                _ = blink_tick.tick() => {
+                    if self.term_focused {
+                        self.cursor_blink_on = !self.cursor_blink_on;
+                        dirty = true;
+                    }
+                }
                 maybe_term = term_events.next() => {
                     match maybe_term {
                         Some(Ok(event)) => {
@@ -334,6 +371,9 @@ impl TuiApp {
                                 if self.handle_term_event(next_ev) {
                                     break 'main_loop;
                                 }
+                            }
+                            if self.cursor_blink_on {
+                                blink_tick.reset();
                             }
                         }
                         Some(Err(_)) => {}
