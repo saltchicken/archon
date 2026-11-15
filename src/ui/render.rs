@@ -465,7 +465,14 @@ impl TuiApp {
             .constraints([Constraint::Length(10), Constraint::Min(6)])
             .split(area);
 
-        let (pct, ctx_color) = self.ctx_usage(Color::Cyan);
+        let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
+        let ctx_color = if pct >= 90.0 {
+            Color::Red
+        } else if pct >= 75.0 {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        };
         let settings_text = vec![
             Line::from(vec![
                 Span::raw("Model:   "),
@@ -684,20 +691,9 @@ impl TuiApp {
             visible_lines[0] = sticky;
         }
 
-        let (pct, ctx_color) = self.ctx_usage(Color::DarkGray);
-        let title_line = Line::from(vec![
-            Span::raw(format!(" Conversation [{}] ", self.model)),
-            Span::styled(
-                format!(
-                    "[Ctx: {} / {} ({pct:.0}%)] ",
-                    self.used_tokens, self.num_ctx
-                ),
-                Style::default().fg(ctx_color).add_modifier(Modifier::BOLD),
-            ),
-        ]);
-
         f.render_widget(
-            Paragraph::new(visible_lines).block(titled_block(title_line)),
+            Paragraph::new(visible_lines)
+                .block(titled_block(format!(" Conversation [{}] ", self.model))),
             chunks[0],
         );
 

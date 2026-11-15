@@ -169,7 +169,6 @@ pub async fn stream_chat(
     let _ = tx.send(EngineEvent::StreamDone {
         prompt_tokens,
         eval_tokens,
-        done_reason,
         tool_calls: collected_tools,
         thoughts: Vec::new(),
     });

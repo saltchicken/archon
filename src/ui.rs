@@ -251,18 +251,6 @@ impl TuiApp {
         self.chat_scroll = usize::MAX;
     }
 
-    pub(super) fn ctx_usage(&self, default_color: Color) -> (f64, Color) {
-        let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
-        let color = if pct >= 90.0 {
-            Color::Red
-        } else if pct >= 75.0 {
-            Color::Yellow
-        } else {
-            default_color
-        };
-        (pct, color)
-    }
-
     fn handle_term_event(&mut self, event: Event) -> bool {
         match event {
             Event::Key(key) => return self.handle_key(key),
@@ -366,9 +354,6 @@ impl TuiApp {
 
     fn handle_engine_event(&mut self, ev: EngineEvent) {
         match ev {
-            EngineEvent::Notification { message, is_error } => {
-                let _ = (message, is_error);
-            }
             EngineEvent::AttachmentsUpdated(list) => self.attachments = list,
             EngineEvent::ChatUpdated {
                 messages,

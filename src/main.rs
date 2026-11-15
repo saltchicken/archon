@@ -4,7 +4,7 @@ mod ui;
 
 use anyhow::Result;
 use core::{
-    CoreEngine, EngineEvent,
+    CoreEngine,
     config::{Config, archon_config_root, ensure_workspace_config, load_dotenv},
     provider::Provider,
 };
@@ -61,13 +61,6 @@ async fn main() -> Result<()> {
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-
-    if let Some(err) = config_err {
-        let _ = ev_tx.send(EngineEvent::Notification {
-            message: err,
-            is_error: true,
-        });
-    }
 
     let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
     let engine_handle = tokio::spawn(engine.run(cmd_rx));

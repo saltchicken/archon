@@ -69,10 +69,6 @@ pub enum EngineCommand {
 
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
-    Notification {
-        message: String,
-        is_error: bool,
-    },
     AttachmentsUpdated(Vec<ImageAttachment>),
     ChatUpdated {
         messages: Vec<ChatMessage>,
@@ -86,7 +82,6 @@ pub enum EngineEvent {
     StreamDone {
         prompt_tokens: u64,
         eval_tokens: u64,
-        done_reason: Option<String>,
         tool_calls: Vec<ToolCall>,
         thoughts: Vec<ThoughtPart>,
     },
@@ -104,7 +99,6 @@ pub enum EngineEvent {
         command: String,
         output: String,
         truncated: bool,
-        is_error: bool,
         include_in_context: bool,
     },
     ToolApprovalRequested {
@@ -423,7 +417,7 @@ impl CoreEngine {
         self.spawn_model_turn(&turn).await;
     }
 
-    async fn update_attachments<F>(&self, op: F, success_msg: impl Into<String>)
+    async fn update_attachments<F>(&self, op: F)
     where
         F: FnOnce(&ImageStaging) -> anyhow::Result<PathBuf> + Send + 'static,
     {
@@ -431,9 +425,8 @@ impl CoreEngine {
         if let Ok((res, list)) =
             tokio::task::spawn_blocking(move || (op(&staging), staging.list_attachments())).await
         {
-            match res {
-                Ok(_) => self.notify(success_msg, false),
-                Err(e) => self.notify(e.to_string(), true),
+            if let Err(e) = res {
+                warn!("Attachment operation failed: {e}");
             }
             let _ = self.tx.send(EngineEvent::AttachmentsUpdated(list));
         }
@@ -513,47 +506,26 @@ impl CoreEngine {
         match cmd {
             EngineCommand::PasteClipboard => {
                 info!("Pasting image from clipboard");
-                self.update_attachments(|s| s.paste_clipboard(), "Image pasted from clipboard.")
-                    .await;
+                self.update_attachments(|s| s.paste_clipboard()).await;
             }
             EngineCommand::ImportFile(path) => {
                 info!("Importing file: {}", path.display());
-                let msg = format!("Added {}", path.display());
-                self.update_attachments(move |s| s.import_file(&path), msg)
-                    .await;
+                self.update_attachments(move |s| s.import_file(&path)).await;
             }
             EngineCommand::ClearImages => {
                 info!("Clearing attached images");
                 self.clear_attachments().await;
-                self.notify("Cleared attached images.", false);
             }
             EngineCommand::SendPrompt { prompt, turn } => {
                 if let Some(ref skill_name) = turn.active_skill {
                     let Some(skill) = skills::find_skill(&self.config, skill_name) else {
-                        self.notify(format!("Skill '{skill_name}' not found."), true);
                         return;
                     };
                     if !skill.tools.is_empty() && !turn.enable_tools {
-                        self.notify(
-                            format!(
-                                "Skill '{}' requires tools ({}), but tools are currently disabled (^T).",
-                                skill.name,
-                                skill.tools.join(", ")
-                            ),
-                            true,
-                        );
                         return;
                     }
                     let missing = skills::missing_skill_tools(skill, &self.config);
                     if !missing.is_empty() {
-                        self.notify(
-                            format!(
-                                "Skill '{}' cannot proceed: required tool(s) not enabled in config: {}",
-                                skill.name,
-                                missing.join(", ")
-                            ),
-                            true,
-                        );
                         return;
                     }
                 }
@@ -583,14 +555,7 @@ impl CoreEngine {
                         new_images: new_image_blobs,
                         turn,
                     });
-                    let queued_total = self.queued_interjections.len();
                     self.emit_queued_interjections();
-                    self.notify(
-                        format!(
-                            "Interjection queued ({queued_total}). Will send as soon as current step finishes (Esc to send now)."
-                        ),
-                        false,
-                    );
                     return;
                 }
 
@@ -629,10 +594,6 @@ impl CoreEngine {
                 let closed = self.close_unresolved_tool_calls("Cancelled by user.");
 
                 if self.flush_queued_interjections().await {
-                    self.notify(
-                        "Interrupted active step — sending queued interjection...",
-                        false,
-                    );
                     return;
                 }
 
@@ -640,14 +601,6 @@ impl CoreEngine {
                     self.save_session_bg(Vec::new()).await;
                 }
                 self.emit_chat();
-                self.notify(
-                    if was_tool || closed > 0 {
-                        "Tool execution cancelled."
-                    } else {
-                        "Stream cancelled."
-                    },
-                    false,
-                );
             }
             EngineCommand::ResolveTool {
                 approved,
@@ -669,10 +622,6 @@ impl CoreEngine {
                 if approved && always_approve {
                     info!("Adding '{}' to session auto-approve rules", sig);
                     self.session_auto_approve.insert(sig.clone());
-                    self.notify(
-                        format!("Auto-approving '{sig}' for the rest of this session."),
-                        false,
-                    );
                 }
 
                 info!(
@@ -759,7 +708,6 @@ impl CoreEngine {
                         self.emit_model_config();
                         self.messages = data.messages;
                         self.emit_chat();
-                        self.notify(format!("Loaded session: {}", data.title), false);
 
                         if let Some(calls) = self
                             .messages
@@ -773,11 +721,9 @@ impl CoreEngine {
                     }
                     Ok(Err(e)) => {
                         error!("Failed to load session: {e}");
-                        self.notify(format!("Failed to load session: {e}"), true);
                     }
                     Err(e) => {
                         error!("Session load task panicked: {e}");
-                        self.notify(format!("Session load failed: {e}"), true);
                     }
                 }
             }
@@ -801,7 +747,6 @@ impl CoreEngine {
                 self.emit_model_config();
                 self.messages.clear();
                 self.emit_chat();
-                self.notify("Started new chat session.", false);
             }
             EngineCommand::SwitchModel {
                 model,
@@ -812,10 +757,6 @@ impl CoreEngine {
                     || !self.pending_tools.is_empty()
                     || !self.queued_interjections.is_empty()
                 {
-                    self.notify(
-                        "Cannot switch model while a turn or tool approval is active. Cancel first.",
-                        true,
-                    );
                     return;
                 }
 
@@ -827,12 +768,10 @@ impl CoreEngine {
 
                 if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
                     error!("Hot-swap preflight failed for '{}': {}", model, e);
-                    self.notify(format!("Model switch failed: {e}"), true);
                     return;
                 }
 
                 let Ok(new_client) = new_provider.build_client(&self.config) else {
-                    self.notify("Failed to build HTTP client for new model.", true);
                     return;
                 };
 
@@ -844,15 +783,6 @@ impl CoreEngine {
 
                 self.save_session_bg(Vec::new()).await;
                 self.emit_model_config();
-                self.notify(
-                    format!(
-                        "Switched to {} (Ctx: {}, Tool Max: {}KB)",
-                        self.model,
-                        self.turn.num_ctx,
-                        self.active_max_tool_output_size / 1024
-                    ),
-                    false,
-                );
             }
             EngineCommand::SetTurnConfig(new_turn) => {
                 let active_skill = self.turn.active_skill.take();
@@ -886,10 +816,6 @@ impl CoreEngine {
                     Ok(Err(e)) => {
                         error!("Failed to persist Personal Intelligence: {e}");
                         self.config.personal_intelligence = pi;
-                        self.notify(
-                            format!("Updated in memory, but failed to save to config.toml: {e}"),
-                            true,
-                        );
                     }
                     Err(e) => {
                         error!("Personal Intelligence save task panicked: {e}");
@@ -902,16 +828,11 @@ impl CoreEngine {
                 include_in_context,
             } => {
                 if self.is_turn_active() {
-                    self.notify(
-                        "Cannot run shell command while a turn or tool is active.",
-                        true,
-                    );
                     return;
                 }
 
                 let cmd_str = raw_cmd.trim().to_string();
                 let Some(parts) = shlex::split(&cmd_str).filter(|p| !p.is_empty()) else {
-                    self.notify("Invalid or empty shell command.", true);
                     return;
                 };
 
@@ -930,13 +851,12 @@ impl CoreEngine {
                 self.internal_rx = Some(rx);
 
                 self.active_task = Some(tokio::spawn(async move {
-                    let (output, truncated, is_error) =
+                    let (output, truncated) =
                         tools::run_manual_command(&parts[0], &parts[1..], &cfg, max_out).await;
                     let _ = tx.send(EngineEvent::ShellCommandCompleted {
                         command: cmd_str,
                         output,
                         truncated,
-                        is_error,
                         include_in_context,
                     });
                 }));
@@ -953,19 +873,11 @@ impl CoreEngine {
             EngineEvent::StreamDone {
                 prompt_tokens,
                 eval_tokens,
-                ref done_reason,
                 ref tool_calls,
                 ref thoughts,
             } => {
                 self.finish_active_task();
                 let final_text = std::mem::take(&mut self.stream_buffer);
-                let total_used = prompt_tokens + eval_tokens;
-                let ctx_limit = self.turn.num_ctx as u64;
-                let usage_pct = (total_used as f64 / ctx_limit.max(1) as f64) * 100.0;
-                let hit_length = done_reason.as_deref() == Some("length");
-                let is_near_limit = hit_length
-                    || usage_pct >= 90.0
-                    || prompt_tokens >= ctx_limit.saturating_sub(256);
 
                 if !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty() {
                     self.messages.push(ChatMessage {
@@ -974,30 +886,11 @@ impl CoreEngine {
                         ..ChatMessage::new("assistant", final_text)
                     });
                     self.save_and_emit_chat(Vec::new()).await;
-
-                    let prefix = match (hit_length, is_near_limit) {
-                        (true, _) => "⚠ CTX MAXED OUT (Truncated) — ",
-                        (false, true) => "⚠ CTX LIMIT NEAR — ",
-                        _ => "",
-                    };
-
-                    self.notify(
-                        format!(
-                            "{prefix}Context: {total_used}/{ctx_limit} ({usage_pct:.1}%) [Prompt: {prompt_tokens} | Eval: {eval_tokens}]"
-                        ),
-                        is_near_limit,
-                    );
                 } else {
                     warn!(
                         "Stream finished with empty content and no tool calls (Prompt: {prompt_tokens}, Eval: {eval_tokens})"
                     );
                     self.emit_chat();
-                    self.notify(
-                        format!(
-                            "Model returned an empty response (Context: {total_used}/{ctx_limit} | Prompt: {prompt_tokens} | Eval: {eval_tokens})"
-                        ),
-                        true,
-                    );
                 }
 
                 let _ = self.tx.send(ev.clone());
@@ -1011,7 +904,7 @@ impl CoreEngine {
             EngineEvent::StreamError(ref err) => {
                 self.finish_active_task();
                 self.stream_buffer.clear();
-                self.notify(format!("API Error: {err}"), true);
+                error!("API Error: {err}");
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
             }
@@ -1047,7 +940,6 @@ impl CoreEngine {
                 command,
                 output,
                 truncated,
-                is_error,
                 include_in_context,
             } => {
                 self.finish_active_task();
@@ -1060,12 +952,6 @@ impl CoreEngine {
                     output: String::new(),
                     truncated,
                 });
-                let status = if is_error {
-                    format!("Command failed: {command}")
-                } else {
-                    format!("Command completed: {command}")
-                };
-                self.notify(status, is_error);
                 self.flush_queued_interjections().await;
             }
             other => {
@@ -1161,13 +1047,6 @@ impl CoreEngine {
             queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,
             system_prompt: self.turn.system_prompt.clone(),
-        });
-    }
-
-    fn notify(&self, msg: impl Into<String>, is_error: bool) {
-        let _ = self.tx.send(EngineEvent::Notification {
-            message: msg.into(),
-            is_error,
         });
     }
 }
