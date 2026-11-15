@@ -265,7 +265,7 @@ impl BlockingTool for Tool {
                 display_path: relative.to_string_lossy().into_owned(),
                 depth: relative.components().count(),
                 is_dir,
-                include_content: !tree_only && !is_dir && matches_include && !matches_tree,
+                include_content: !is_dir && matches_include && !matches_tree,
             });
         }
 
@@ -283,7 +283,7 @@ impl BlockingTool for Tool {
                 .unwrap_or(&entry.display_path);
             let marker = if entry.is_dir {
                 "/"
-            } else if !tree_only && !entry.include_content {
+            } else if !entry.include_content {
                 " (content excluded)"
             } else {
                 ""
@@ -293,15 +293,17 @@ impl BlockingTool for Tool {
 
         let mut used_bytes = tree_out.len() + 128;
 
-        for entry in entries.iter().filter(|e| e.include_content) {
-            let outcome = read_to_outcome(
-                &entry.path,
-                entry.display_path.len(),
-                settings.max_size,
-                &mut used_bytes,
-                max_output_size,
-            );
-            files.push((entry.display_path.clone(), outcome));
+        if !tree_only {
+            for entry in entries.iter().filter(|e| e.include_content) {
+                let outcome = read_to_outcome(
+                    &entry.path,
+                    entry.display_path.len(),
+                    settings.max_size,
+                    &mut used_bytes,
+                    max_output_size,
+                );
+                files.push((entry.display_path.clone(), outcome));
+            }
         }
 
         let mut trusted_global_files = HashSet::new();
