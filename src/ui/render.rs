@@ -591,7 +591,7 @@ impl TuiApp {
                     } else {
                         "SHELL"
                     };
-                    (label.to_string(), Color::Magenta)
+                    (label.to_string(), Color::Blue)
                 }
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
