@@ -385,7 +385,11 @@ impl TuiApp {
         };
 
         let mut header_spans = vec![Span::styled(
-            format!("━━ {header_label} "),
+            if header_label.starts_with("⚙ TOOL") {
+                format!("  {header_label} ")
+            } else {
+                format!("━━ {header_label} ")
+            },
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )];
         if truncated {
