@@ -57,12 +57,14 @@ impl TuiApp {
             return;
         }
 
-        if !self.chat_area.contains(Position::new(x, y)) {
+        let pos = Position::new(x, y);
+        if !self.chat_area.contains(pos) {
             return;
         }
 
         let is_on_scrollbar = x >= self.chat_area.x + self.chat_area.width.saturating_sub(2);
-        let inner_y = usize::from(y.saturating_sub(self.chat_area.y + 1));
+        let inner = self.chat_inner_area();
+        let inner_y = usize::from(y.saturating_sub(inner.y));
         let visual_y = inner_y + self.chat_scroll;
 
         match mouse.kind {
@@ -93,7 +95,7 @@ impl TuiApp {
                     self.follow_tail = self.chat_scroll >= max_scroll;
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            MouseEventKind::Down(MouseButton::Left) if inner.contains(pos) => {
                 if inner_y == 0
                     && let Some(sticky_idx) = self.find_sticky_header_msg()
                     && let Some(state) = self.msg_states.get_mut(sticky_idx)
@@ -279,7 +281,7 @@ impl TuiApp {
     fn handle_main_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let page_step = self.chat_area.height.saturating_sub(4).max(3) as isize;
+        let page_step = self.chat_view_height().saturating_sub(2).max(3) as isize;
 
         match key.code {
             KeyCode::Esc

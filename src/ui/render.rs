@@ -1,4 +1,4 @@
-use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, titled_block};
+use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, chat_block, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::ToolCall,
@@ -8,7 +8,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
 };
 use textwrap::core::display_width;
 
@@ -496,7 +498,8 @@ impl TuiApp {
             Line::from(format!("Intel:   {} (^P)", self.current_pi_label())),
         ];
         f.render_widget(
-            Paragraph::new(settings_text).block(titled_block(" Config ")),
+            Paragraph::new(settings_text)
+                .block(titled_block(" Config ").padding(Padding::uniform(1))),
             chunks[0],
         );
 
@@ -514,10 +517,10 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items).block(titled_block(format!(
-                " Images ({}) ",
-                self.attachments.len()
-            ))),
+            List::new(items).block(
+                titled_block(format!(" Images ({}) ", self.attachments.len()))
+                    .padding(Padding::uniform(1)),
+            ),
             chunks[1],
         );
     }
@@ -529,7 +532,7 @@ impl TuiApp {
             .split(area);
 
         self.chat_area = chunks[0];
-        let available_width = chunks[0].width.saturating_sub(4).max(1) as usize;
+        let available_width = self.chat_inner_area().width.saturating_sub(2).max(1) as usize;
 
         self.msg_states.resize(
             self.messages.len() + 1 + self.queued_messages.len(),
@@ -693,7 +696,7 @@ impl TuiApp {
 
         f.render_widget(
             Paragraph::new(visible_lines)
-                .block(titled_block(format!(" Conversation [{}] ", self.model))),
+                .block(chat_block(format!(" Conversation [{}] ", self.model))),
             chunks[0],
         );
 

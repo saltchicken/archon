@@ -1,4 +1,4 @@
-use super::{TuiApp, render::sanitize_line, titled_block};
+use super::{TuiApp, chat_block, render::sanitize_line, titled_block};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -103,7 +103,7 @@ impl TuiApp {
             "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
             sanitize_line(&self.file_path_input)
         ))
-        .block(titled_block(" Add Image File "));
+        .block(chat_block(" Add Image File "));
         render_modal(f, 60, 20, widget);
     }
 
@@ -123,7 +123,7 @@ impl TuiApp {
             })
             .collect();
 
-        let widget = List::new(items).block(titled_block(
+        let widget = List::new(items).block(chat_block(
             " Saved Sessions (⏎=Load, D=Delete, Esc=Close) ",
         ));
         render_modal(f, 70, 60, widget);
@@ -151,7 +151,7 @@ impl TuiApp {
             })
             .collect();
 
-        let widget = List::new(items).block(titled_block(" Select Model (⏎=Switch, Esc=Cancel) "));
+        let widget = List::new(items).block(chat_block(" Select Model (⏎=Switch, Esc=Cancel) "));
         render_modal(f, 65, 45, widget);
     }
 
@@ -182,7 +182,7 @@ impl TuiApp {
             .wrap(Wrap { trim: false })
             .scroll((self.tool_scroll, 0))
             .block(
-                titled_block(format!(
+                chat_block(format!(
                     " ⚠ Tool Execution Approval Required ({idx}/{total}) "
                 ))
                 .border_style(Style::default().fg(Color::Yellow)),

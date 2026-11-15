@@ -28,7 +28,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::Line,
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, Padding},
 };
 use ratatui_textarea::TextArea;
 use std::{io, time::Duration};
@@ -176,7 +176,14 @@ pub(super) fn create_pi_area(initial: &str) -> TextArea<'static> {
 }
 
 pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
-    Block::default().borders(Borders::ALL).title(title)
+    Block::default()
+        .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
+        .title(title)
+}
+
+pub(super) fn chat_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
+    titled_block(title).padding(Padding::symmetric(2, 1))
 }
 
 pub(super) fn preset_label(presets: &[Preset], idx: usize) -> &str {
@@ -237,8 +244,12 @@ impl TuiApp {
         }
     }
 
+    pub(super) fn chat_inner_area(&self) -> Rect {
+        chat_block("").inner(self.chat_area)
+    }
+
     pub(super) fn chat_view_height(&self) -> usize {
-        usize::from(self.chat_area.height.saturating_sub(2))
+        usize::from(self.chat_inner_area().height)
     }
 
     pub(super) fn max_chat_scroll(&self) -> usize {
