@@ -164,8 +164,6 @@ impl TuiApp {
             KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
             KeyCode::Enter => {
                 if let Some(s) = self.sessions.get(self.session_idx) {
-                    self.prompt_history.clear();
-                    self.prompt_history_idx = None;
                     let _ = self.cmd_tx.send(EngineCommand::LoadSession(s.id.clone()));
                     self.modal = ActiveModal::None;
                 }
@@ -312,7 +310,9 @@ impl TuiApp {
                 }
             }
             KeyCode::Down if !ctrl && !shift => {
-                if let Some(idx) = self.prompt_history_idx {
+                if !self.is_prompt_empty()
+                    && let Some(idx) = self.prompt_history_idx
+                {
                     if idx + 1 < self.prompt_history.len() {
                         let next_idx = idx + 1;
                         self.prompt_history_idx = Some(next_idx);
@@ -334,7 +334,6 @@ impl TuiApp {
             }
             KeyCode::Enter => return self.submit_prompt(),
             KeyCode::Char('c') if ctrl => {
-                self.prompt_history_idx = None;
                 self.text_area = super::create_text_area();
             }
             KeyCode::Char('v') if ctrl => {
