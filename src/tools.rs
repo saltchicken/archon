@@ -16,9 +16,7 @@ pub(crate) mod utils;
 mod web_search;
 mod workspace_snapshot;
 
-use crate::core::config::{
-    Config, ExecuteCommandSettings, WorkspaceSnapshotSettings, expand_tilde,
-};
+use crate::core::config::{Config, expand_tilde};
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
 use ignore::{DirEntry, WalkBuilder};
@@ -29,6 +27,7 @@ use serde_json::{Map, Value, json};
 use similar::TextDiff;
 use std::{
     ffi::OsStr,
+    fmt::Write as _,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -77,8 +76,6 @@ pub(super) trait AsyncTool {
 pub(super) struct ToolContext {
     pub root: PathBuf,
     pub max_output_size: usize,
-    pub snapshot: WorkspaceSnapshotSettings,
-    pub execute_command: ExecuteCommandSettings,
     pub active_skill: Option<String>,
     pub config: Config,
 }
@@ -88,8 +85,6 @@ impl ToolContext {
         Ok(Self {
             root: workspace_root()?,
             max_output_size,
-            snapshot: config.workspace_snapshot.clone(),
-            execute_command: config.execute_command.clone(),
             active_skill: active_skill.map(String::from),
             config: config.clone(),
         })
@@ -107,8 +102,6 @@ impl ToolContext {
         Ok(Self {
             root,
             max_output_size: 0,
-            snapshot: WorkspaceSnapshotSettings::default(),
-            execute_command: ExecuteCommandSettings::default(),
             active_skill: None,
             config,
         })
@@ -235,7 +228,7 @@ impl ToolContext {
         target_path: &str,
         escape_label: &str,
     ) -> Result<(PathBuf, PathBuf)> {
-        let base_root = if self.snapshot.git_root {
+        let base_root = if self.config.workspace_snapshot.git_root {
             self.root
                 .ancestors()
                 .find(|a| a.join(".git").exists())
@@ -250,7 +243,7 @@ impl ToolContext {
     }
 
     pub fn build_walker(&self, scan_root: &Path) -> impl Iterator<Item = DirEntry> {
-        let use_git_ignore = self.snapshot.git_root;
+        let use_git_ignore = self.config.workspace_snapshot.git_root;
         WalkBuilder::new(scan_root)
             .hidden(false)
             .git_ignore(use_git_ignore)
@@ -268,7 +261,7 @@ impl ToolContext {
         let patterns: Vec<String> = DEFAULT_EXCLUDE_PATTERNS
             .iter()
             .map(|&s| String::from(s))
-            .chain(self.snapshot.exclude.iter().cloned())
+            .chain(self.config.workspace_snapshot.exclude.iter().cloned())
             .chain(call_exclude.iter().cloned())
             .collect();
         build_globset(&patterns, allow_recursive_shorthand)
@@ -302,7 +295,7 @@ impl ToolContext {
 
         let mut files = Vec::new();
         for entry in self.build_walker(scan_root) {
-            if files.len() >= self.snapshot.max_files {
+            if files.len() >= self.config.workspace_snapshot.max_files {
                 break;
             }
             let path = entry.path();
@@ -515,6 +508,16 @@ fn format_kv(k: &str, v: &Value) -> String {
     }
 }
 
+fn append_filtered_kvs(out: &mut String, obj: &Map<String, Value>, skip: &[&str]) {
+    for (k, v) in obj.iter().filter(|(k, _)| !skip.contains(&k.as_str())) {
+        out.push_str(&format_kv(k, v));
+    }
+}
+
+fn append_warning(out: &mut String, err: &anyhow::Error) {
+    let _ = write!(out, "\n--- WARNING ---\n{err}! Execution will fail.\n");
+}
+
 fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) {
     let diff = TextDiff::from_lines(old, new)
         .unified_diff()
@@ -530,29 +533,33 @@ fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) 
     });
 }
 
+fn append_diff_result(out: &mut String, res: Result<(String, String, String, Option<usize>)>) {
+    match res {
+        Ok((display, original, updated, hunk_count)) => {
+            if let Some(n) = hunk_count.filter(|&n| n > 0) {
+                let _ = writeln!(out, "  hunks: {n}");
+            }
+            append_unified_diff(out, &display, &original, &updated);
+        }
+        Err(e) => append_warning(out, &e),
+    }
+}
+
 fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
     let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
-    out.push_str(&format!("  file_path: {file_path}\n"));
-    for (k, v) in obj
-        .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "file_path" | "edits"))
-    {
-        out.push_str(&format_kv(k, v));
-    }
+    let _ = writeln!(out, "  file_path: {file_path}");
+    append_filtered_kvs(&mut out, obj, &["file_path", "edits"]);
 
-    let preview =
-        parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME).and_then(|parsed| {
-            let ctx = ToolContext::from_cwd()?;
-            edit_file::preview_edits(&parsed, &ctx)
-        });
+    let preview = parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
+        .and_then(|parsed| edit_file::preview_edits(&parsed, &ToolContext::from_cwd()?));
 
     match preview {
         Ok((_, original, updated, hunk_count)) => {
-            out.push_str(&format!("  hunks: {hunk_count}\n"));
+            let _ = writeln!(out, "  hunks: {hunk_count}");
             append_unified_diff(&mut out, file_path, &original, &updated);
         }
         Err(e) => {
-            out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
+            append_warning(&mut out, &e);
             let (raw_search, raw_replace) =
                 parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
                     .map(|parsed| edit_file::fallback_hunk_preview(&parsed))
@@ -564,52 +571,35 @@ fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>)
 }
 
 fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    for (k, v) in obj {
-        out.push_str(&format_kv(k, v));
-    }
-    let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME).and_then(|parsed| {
-        let ctx = ToolContext::from_cwd()?;
-        fs::preview_action(&parsed, &ctx)
-    });
+    append_filtered_kvs(&mut out, obj, &[]);
+    let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME)
+        .and_then(|parsed| fs::preview_action(&parsed, &ToolContext::from_cwd()?));
     match preview {
         Ok((summary, maybe_diff)) => {
-            out.push_str(&format!("\n--- OPERATION ---\n{summary}\n"));
+            let _ = write!(out, "\n--- OPERATION ---\n{summary}\n");
             if let Some((file_path, deleted_content)) = maybe_diff {
                 append_unified_diff(&mut out, &file_path, &deleted_content, "");
             }
         }
-        Err(e) => out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n")),
+        Err(e) => append_warning(&mut out, &e),
     }
     out.trim_end().to_string()
 }
 
 fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    for (k, v) in obj
-        .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "edits" | "content"))
-    {
-        out.push_str(&format_kv(k, v));
-    }
+    append_filtered_kvs(&mut out, obj, &["edits", "content"]);
 
     if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) {
         match parsed.action {
-            dotfiles::DotfilesAction::Edit => match dotfiles::preview_edit(&parsed) {
-                Ok((_, display, original, updated, hunk_count)) => {
-                    out.push_str(&format!("  hunks: {hunk_count}\n"));
-                    append_unified_diff(&mut out, &display, &original, &updated);
-                }
-                Err(e) => {
-                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-                }
-            },
-            dotfiles::DotfilesAction::Create => match dotfiles::preview_create(&parsed) {
-                Ok((_, display)) => {
-                    append_unified_diff(&mut out, &display, "", &parsed.content);
-                }
-                Err(e) => {
-                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-                }
-            },
+            dotfiles::DotfilesAction::Edit => append_diff_result(
+                &mut out,
+                dotfiles::preview_edit(&parsed).map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
+            ),
+            dotfiles::DotfilesAction::Create => append_diff_result(
+                &mut out,
+                dotfiles::preview_create(&parsed)
+                    .map(|(_, d)| (d, String::new(), parsed.content, None)),
+            ),
             _ => {}
         }
     }
@@ -617,36 +607,20 @@ fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Val
 }
 
 fn format_skill_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    for (k, v) in obj
-        .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "edits" | "content" | "prompt"))
-    {
-        out.push_str(&format_kv(k, v));
-    }
+    append_filtered_kvs(&mut out, obj, &["edits", "content", "prompt"]);
 
     if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
         && let Ok(ctx) = ToolContext::from_cwd()
     {
         match parsed.action {
-            skill::SkillAction::Modify => match skill::preview_modify(&parsed, &ctx) {
-                Ok((_, display, original, updated, hunk_count)) => {
-                    if hunk_count > 0 {
-                        out.push_str(&format!("  hunks: {hunk_count}\n"));
-                    }
-                    append_unified_diff(&mut out, &display, &original, &updated);
-                }
-                Err(e) => {
-                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-                }
-            },
-            skill::SkillAction::Create => match skill::preview_create(&parsed, &ctx) {
-                Ok((_, display, rendered)) => {
-                    append_unified_diff(&mut out, &display, "", &rendered);
-                }
-                Err(e) => {
-                    out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-                }
-            },
+            skill::SkillAction::Modify => append_diff_result(
+                &mut out,
+                skill::preview_modify(&parsed, &ctx).map(|(_, d, o, u, n)| (d, o, u, Some(n))),
+            ),
+            skill::SkillAction::Create => append_diff_result(
+                &mut out,
+                skill::preview_create(&parsed, &ctx).map(|(_, d, r)| (d, String::new(), r, None)),
+            ),
             _ => {}
         }
     }
@@ -658,32 +632,23 @@ fn format_personal_intelligence_approval(
     args: &Value,
     obj: &Map<String, Value>,
 ) -> String {
-    for (k, v) in obj {
-        out.push_str(&format_kv(k, v));
-    }
+    append_filtered_kvs(&mut out, obj, &[]);
 
     if let Ok(parsed) = parse_args::<personal_intelligence::PersonalIntelligenceArgs>(
         args,
         personal_intelligence::Tool::NAME,
     ) && let Ok(ctx) = ToolContext::from_cwd()
-    {
-        match parsed.action {
-            personal_intelligence::PersonalIntelligenceAction::Add
-            | personal_intelligence::PersonalIntelligenceAction::Remove
-            | personal_intelligence::PersonalIntelligenceAction::Set
-            | personal_intelligence::PersonalIntelligenceAction::Clear => {
-                match personal_intelligence::preview_mutation(&parsed, &ctx) {
-                    Ok((_, display, original, updated, _)) => {
-                        append_unified_diff(&mut out, &display, &original, &updated);
-                    }
-                    Err(e) => {
-                        out.push_str(&format!("\n--- WARNING ---\n{e}! Execution will fail.\n"));
-                    }
-                }
-            }
+        && !matches!(
+            parsed.action,
             personal_intelligence::PersonalIntelligenceAction::List
-            | personal_intelligence::PersonalIntelligenceAction::Read => {}
-        }
+                | personal_intelligence::PersonalIntelligenceAction::Read
+        )
+    {
+        append_diff_result(
+            &mut out,
+            personal_intelligence::preview_mutation(&parsed, &ctx)
+                .map(|(_, d, o, u, _)| (d, o, u, None)),
+        );
     }
     out.trim_end().to_string()
 }
@@ -817,6 +782,20 @@ register_tools! {
     blocking: workspace_snapshot,
 }
 
+fn truncate_tool_output(mut out: String, max_size: usize) -> (String, bool) {
+    let truncated = out.len() > max_size;
+    if truncated {
+        let truncate_at = out.floor_char_boundary(max_size);
+        let dropped = out.len() - truncate_at;
+        out.truncate(truncate_at);
+        let _ = write!(
+            out,
+            "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
+        );
+    }
+    (out, truncated)
+}
+
 pub async fn run_manual_command(
     program: &str,
     args: &[String],
@@ -832,18 +811,7 @@ pub async fn run_manual_command(
         .run_command(program, args, "(Command completed with no output)")
         .await
     {
-        Ok(mut out) => {
-            let truncated = out.len() > max_size;
-            if truncated {
-                let truncate_at = out.floor_char_boundary(max_size);
-                let dropped = out.len() - truncate_at;
-                out.truncate(truncate_at);
-                out.push_str(&format!(
-                    "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
-                ));
-            }
-            (out, truncated)
-        }
+        Ok(out) => truncate_tool_output(out, max_size),
         Err(e) => (format!("Error: {e}"), false),
     }
 }
@@ -860,16 +828,8 @@ pub async fn execute(
     debug!("Tool arguments: {args}");
 
     match dispatch_tool(name, args, config, active_skill, max_size).await {
-        Ok(mut out) => {
-            let truncated = out.len() > max_size;
-            if truncated {
-                let truncate_at = out.floor_char_boundary(max_size);
-                let dropped = out.len() - truncate_at;
-                out.truncate(truncate_at);
-                out.push_str(&format!(
-                    "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
-                ));
-            }
+        Ok(out) => {
+            let (out, truncated) = truncate_tool_output(out, max_size);
             info!("Tool '{name}' executed successfully. Truncated: {truncated}");
             debug!(
                 "Tool output snippet: {}",

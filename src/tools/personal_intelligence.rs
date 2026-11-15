@@ -1,9 +1,7 @@
 use super::{BlockingTool, ToolContext, utils::fs::atomic_write_file};
-use crate::core::{
-    config::{
-        PersonalIntelligence, archon_config_root, clean_pi_item, workspace_config_dir_for,
-    },
-    skills::format_skill_path_for_read,
+use crate::core::config::{
+    PersonalIntelligence, archon_config_root, clean_pi_item, format_tilde_path,
+    load_scoped_pi_table, serialize_table_with_pi, workspace_config_dir_for,
 };
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
@@ -81,50 +79,14 @@ fn target_config_path(scope: PersonalIntelligenceScope, ctx: &ToolContext) -> Pa
     }
 }
 
-fn read_scoped_pi(cfg_path: &Path, is_global: bool) -> Result<(String, toml::Table, PersonalIntelligence)> {
-    if !cfg_path.exists() {
-        let pi = if is_global {
-            PersonalIntelligence::default()
-        } else {
-            PersonalIntelligence::new(Vec::new(), true)
-        };
-        return Ok((String::new(), toml::Table::new(), pi));
-    }
-
-    let raw = fs::read_to_string(cfg_path)
-        .with_context(|| format!("Failed to read {}", cfg_path.display()))?;
-    let table: toml::Table = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse TOML in {}", cfg_path.display()))?;
-
-    let pi = match table.get("personal_intelligence") {
-        Some(val) => val
-            .clone()
-            .try_into::<PersonalIntelligence>()
-            .unwrap_or_default(),
-        None if is_global => PersonalIntelligence::default(),
-        None => PersonalIntelligence::new(Vec::new(), true),
-    };
-
-    Ok((raw, table, pi))
-}
-
 fn collect_input_items(args: &PersonalIntelligenceArgs) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in args.item.lines() {
-        let cleaned = clean_pi_item(line);
-        if !cleaned.is_empty() {
-            out.push(cleaned.to_string());
-        }
-    }
-    for entry in &args.items {
-        for line in entry.lines() {
-            let cleaned = clean_pi_item(line);
-            if !cleaned.is_empty() {
-                out.push(cleaned.to_string());
-            }
-        }
-    }
-    out
+    std::iter::once(args.item.as_str())
+        .chain(args.items.iter().map(String::as_str))
+        .flat_map(str::lines)
+        .map(clean_pi_item)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 pub fn preview_mutation(
@@ -133,8 +95,8 @@ pub fn preview_mutation(
 ) -> Result<(PathBuf, String, String, String, PersonalIntelligence)> {
     let is_global = matches!(args.scope, PersonalIntelligenceScope::Global);
     let cfg_path = target_config_path(args.scope, ctx);
-    let display = format_skill_path_for_read(&cfg_path);
-    let (original, mut table, mut pi) = read_scoped_pi(&cfg_path, is_global)?;
+    let display = format_tilde_path(&cfg_path);
+    let (original, table, mut pi) = load_scoped_pi_table(&cfg_path, is_global)?;
 
     match args.action {
         PersonalIntelligenceAction::Add => {
@@ -178,11 +140,12 @@ pub fn preview_mutation(
             if incoming.is_empty() && args.enabled.is_none() {
                 bail!("Provide `item` / `items` or `enabled` when `action` is `set`");
             }
-            let items = if incoming.is_empty() && args.item.trim().is_empty() && args.items.is_empty() {
-                pi.items
-            } else {
-                incoming
-            };
+            let items =
+                if incoming.is_empty() && args.item.trim().is_empty() && args.items.is_empty() {
+                    pi.items
+                } else {
+                    incoming
+                };
             let enabled = args.enabled.unwrap_or(pi.enabled);
             pi = PersonalIntelligence::new(items, enabled);
         }
@@ -197,11 +160,7 @@ pub fn preview_mutation(
         }
     }
 
-    let pi_val = toml::Value::try_from(&pi)
-        .context("Failed to serialize personal_intelligence to TOML value")?;
-    table.insert("personal_intelligence".into(), pi_val);
-    let updated =
-        toml::to_string_pretty(&table).context("Failed to serialize updated config.toml")?;
+    let updated = serialize_table_with_pi(table, &pi)?;
 
     Ok((cfg_path, display, original, updated, pi))
 }
@@ -209,8 +168,8 @@ pub fn preview_mutation(
 fn execute_read(ctx: &ToolContext) -> Result<String> {
     let global_path = target_config_path(PersonalIntelligenceScope::Global, ctx);
     let ws_path = target_config_path(PersonalIntelligenceScope::Workspace, ctx);
-    let (_, _, global_pi) = read_scoped_pi(&global_path, true)?;
-    let (_, _, ws_pi) = read_scoped_pi(&ws_path, false)?;
+    let (_, _, global_pi) = load_scoped_pi_table(&global_path, true)?;
+    let (_, _, ws_pi) = load_scoped_pi_table(&ws_path, false)?;
 
     let mut combined = global_pi.items.clone();
     combined.extend(ws_pi.items.clone());
@@ -220,18 +179,14 @@ fn execute_read(ctx: &ToolContext) -> Result<String> {
     let _ = writeln!(
         out,
         "Personal Intelligence Status: {}",
-        if effective.enabled { "ENABLED" } else { "DISABLED" }
+        if effective.enabled {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        }
     );
-    let _ = writeln!(
-        out,
-        "Global config:    {}",
-        format_skill_path_for_read(&global_path)
-    );
-    let _ = writeln!(
-        out,
-        "Workspace config: {}\n",
-        format_skill_path_for_read(&ws_path)
-    );
+    let _ = writeln!(out, "Global config:    {}", format_tilde_path(&global_path));
+    let _ = writeln!(out, "Workspace config: {}\n", format_tilde_path(&ws_path));
 
     if effective.items.is_empty() {
         let _ = writeln!(out, "No Personal Intelligence items configured.");

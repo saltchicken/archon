@@ -7,10 +7,10 @@ use super::{
     },
 };
 use crate::core::{
-    config::{expand_tilde, workspace_config_dir_for},
+    config::{expand_tilde, format_tilde_path, workspace_config_dir_for},
     skills::{
-        SkillDefinition, format_skill_path_for_read, list_skill_reference_paths,
-        parse_skill_markdown, scan_skills_dir, split_toml_frontmatter,
+        SkillDefinition, list_skill_reference_paths, parse_skill_markdown, scan_skills_dir,
+        split_toml_frontmatter,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -106,6 +106,14 @@ fn skill_roots(ctx: &ToolContext) -> (PathBuf, PathBuf) {
     (ws_dir, global_dir)
 }
 
+fn create_root_dir(scope: SkillScope, ctx: &ToolContext) -> PathBuf {
+    let (ws_dir, global_dir) = skill_roots(ctx);
+    match scope {
+        SkillScope::Global => global_dir,
+        SkillScope::Auto | SkillScope::Workspace => ws_dir,
+    }
+}
+
 fn clean_skill_query(raw: &str) -> &str {
     raw.trim().trim_start_matches(['@', '/']).trim()
 }
@@ -138,6 +146,38 @@ fn validate_reference_subpath(raw_file: &str) -> Result<&Path> {
         bail!("Security violation: skill reference file path cannot contain '.git'");
     }
     Ok(rel)
+}
+
+fn resolve_existing_reference(
+    resolved: &ResolvedSkill,
+    raw_file: &str,
+    create_hint: bool,
+) -> Result<(PathBuf, String)> {
+    let rel = validate_reference_subpath(raw_file)?;
+    let candidate = resolved.skill_dir.join(rel);
+    if !candidate.exists() {
+        let hint = if create_hint {
+            ". Use action: \"create\" to create it."
+        } else {
+            ""
+        };
+        bail!(
+            "Reference file '{}' does not exist in skill '{}'{hint}",
+            rel.display(),
+            resolved.definition.name
+        );
+    }
+    let canon = dunce::canonicalize(&candidate)?;
+    let canon_skill_dir =
+        dunce::canonicalize(&resolved.skill_dir).unwrap_or_else(|_| resolved.skill_dir.clone());
+    if !canon.starts_with(&canon_skill_dir) {
+        bail!(
+            "Security violation: '{}' escapes skill directory",
+            rel.display()
+        );
+    }
+    let display = format_tilde_path(&canon);
+    Ok((canon, display))
 }
 
 fn locate_skill_in_dir(
@@ -295,20 +335,67 @@ fn check_unknown_tools(tools: &[String]) -> Option<String> {
     }
 }
 
+fn normalize_doc_newlines(raw: &str) -> String {
+    let mut normalized = raw.replace("\r\n", "\n");
+    if !normalized.ends_with('\n') {
+        normalized.push('\n');
+    }
+    normalized
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_and_format_skill_doc(
+    args: &SkillArgs,
+    table: &toml::Table,
+    fallback_name: &str,
+    fallback_desc: &str,
+    fallback_cmd: &str,
+    fallback_tools: &[String],
+    body: &str,
+    validate_cmd: bool,
+) -> Result<String> {
+    let name = table_string(table, "name").unwrap_or_else(|| fallback_name.to_string());
+    let desc = args
+        .description
+        .clone()
+        .or_else(|| table_string(table, "description"))
+        .unwrap_or_else(|| fallback_desc.to_string());
+    let cmd = args
+        .command
+        .clone()
+        .or_else(|| table_string(table, "command"))
+        .unwrap_or_else(|| fallback_cmd.to_string());
+    if validate_cmd && !cmd.is_empty() {
+        validate_skill_slug(&cmd, "command")?;
+    }
+    let tools = args
+        .tools
+        .clone()
+        .or_else(|| table_string_vec(table, "tools"))
+        .unwrap_or_else(|| fallback_tools.to_vec());
+    format_skill_document(&name, &desc, &cmd, &tools, Some(table), body)
+}
+
+fn append_unknown_tools_note(msg: &mut String, args: &SkillArgs, doc: &str, path: &Path) {
+    if is_skill_md_target(&args.file)
+        && let Ok((table, _)) = validate_and_parse_skill_doc(doc, path)
+        && let Some(tools) = table_string_vec(&table, "tools")
+        && let Some(note) = check_unknown_tools(&tools)
+    {
+        let _ = write!(msg, "\n{note}");
+    }
+}
+
 pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, String, String)> {
     let slug = validate_skill_slug(&args.name, "name")?;
-    let (ws_dir, global_dir) = skill_roots(ctx);
-    let root_dir = match args.scope {
-        SkillScope::Global => global_dir,
-        SkillScope::Auto | SkillScope::Workspace => ws_dir,
-    };
+    let root_dir = create_root_dir(args.scope, ctx);
     let skill_dir = root_dir.join(&slug);
 
     if !is_skill_md_target(&args.file) {
         let rel = validate_reference_subpath(&args.file)?;
         let target_path = skill_dir.join(rel);
+        let display = format_tilde_path(&target_path);
         if target_path.exists() {
-            let display = format_skill_path_for_read(&target_path);
             bail!("File already exists: {display}. Use action: \"modify\" instead.");
         }
         if let Some(existing_anc) = target_path.ancestors().find(|p| p.exists())
@@ -328,7 +415,6 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         if body.trim().is_empty() {
             bail!("'content' (or 'prompt') is required when creating a reference file");
         }
-        let display = format_skill_path_for_read(&target_path);
         return Ok((target_path, display, body.to_string()));
     }
 
@@ -342,7 +428,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         };
         bail!(
             "Skill '{slug}' already exists at {}. Use action: \"modify\" instead.",
-            format_skill_path_for_read(existing)
+            format_tilde_path(existing)
         );
     }
 
@@ -358,30 +444,10 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             || args.prompt.is_some();
 
         if has_overrides {
-            let name = table_string(&table, "name").unwrap_or_else(|| slug.clone());
-            let desc = args
-                .description
-                .clone()
-                .or_else(|| table_string(&table, "description"))
-                .unwrap_or_default();
-            let cmd = args
-                .command
-                .clone()
-                .or_else(|| table_string(&table, "command"))
-                .unwrap_or_else(|| slug.clone());
-            let tools = args
-                .tools
-                .clone()
-                .or_else(|| table_string_vec(&table, "tools"))
-                .unwrap_or_default();
             let prompt_body = args.prompt.as_deref().unwrap_or(&body);
-            format_skill_document(&name, &desc, &cmd, &tools, Some(&table), prompt_body)?
+            merge_and_format_skill_doc(args, &table, &slug, "", &slug, &[], prompt_body, false)?
         } else {
-            let mut normalized = raw_content.replace("\r\n", "\n");
-            if !normalized.ends_with('\n') {
-                normalized.push('\n');
-            }
-            normalized
+            normalize_doc_newlines(raw_content)
         }
     } else {
         let prompt_body = args
@@ -420,7 +486,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         format_skill_document(&slug, desc, cmd, tools, None, prompt_body)?
     };
 
-    let display = format_skill_path_for_read(&target_path);
+    let display = format_tilde_path(&target_path);
     Ok((target_path, display, rendered))
 }
 
@@ -431,25 +497,7 @@ pub fn preview_modify(
     let resolved = resolve_existing_skill(&args.name, args.scope, ctx)?;
 
     if !is_skill_md_target(&args.file) {
-        let rel = validate_reference_subpath(&args.file)?;
-        let candidate = resolved.skill_dir.join(rel);
-        if !candidate.exists() {
-            bail!(
-                "Reference file '{}' does not exist in skill '{}'. Use action: \"create\" to create it.",
-                rel.display(),
-                resolved.definition.name
-            );
-        }
-        let canon = dunce::canonicalize(&candidate)?;
-        let canon_skill_dir =
-            dunce::canonicalize(&resolved.skill_dir).unwrap_or_else(|_| resolved.skill_dir.clone());
-        if !canon.starts_with(&canon_skill_dir) {
-            bail!(
-                "Security violation: '{}' escapes skill directory",
-                rel.display()
-            );
-        }
-        let display = format_skill_path_for_read(&canon);
+        let (canon, display) = resolve_existing_reference(&resolved, &args.file, true)?;
         let original = fs::read_to_string(&canon).context("Error reading skill reference file")?;
 
         if !args.edits.is_empty() {
@@ -465,7 +513,7 @@ pub fn preview_modify(
     }
 
     let target_path = resolved.skill_md_path;
-    let display = format_skill_path_for_read(&target_path);
+    let display = format_tilde_path(&target_path);
     let original = fs::read_to_string(&target_path).context("Error reading SKILL.md")?;
 
     let mut working = if !args.edits.is_empty() {
@@ -487,68 +535,36 @@ pub fn preview_modify(
         );
     }
 
+    let mut body_override = args.prompt.as_deref();
     if let Some(raw_content) = args.content.as_deref() {
         if raw_content
             .trim_start_matches('\u{feff}')
             .starts_with("+++")
         {
-            working = raw_content.replace("\r\n", "\n");
-            if !working.ends_with('\n') {
-                working.push('\n');
-            }
-        } else if args.prompt.is_none() {
-            let (table, _) = validate_and_parse_skill_doc(&working, &resolved.skill_dir)?;
-            let name =
-                table_string(&table, "name").unwrap_or_else(|| resolved.definition.name.clone());
-            let desc = args
-                .description
-                .clone()
-                .or_else(|| table_string(&table, "description"))
-                .unwrap_or_else(|| resolved.definition.description.clone());
-            let cmd = args
-                .command
-                .clone()
-                .or_else(|| table_string(&table, "command"))
-                .unwrap_or_else(|| resolved.definition.command.clone());
-            if !cmd.is_empty() {
-                validate_skill_slug(&cmd, "command")?;
-            }
-            let tools = args
-                .tools
-                .clone()
-                .or_else(|| table_string_vec(&table, "tools"))
-                .unwrap_or_else(|| resolved.definition.tools.clone());
-            working = format_skill_document(&name, &desc, &cmd, &tools, Some(&table), raw_content)?;
+            working = normalize_doc_newlines(raw_content);
+        } else if body_override.is_none() {
+            body_override = Some(raw_content);
         }
     }
 
     if args.description.is_some()
         || args.command.is_some()
         || args.tools.is_some()
-        || args.prompt.is_some()
+        || body_override.is_some()
     {
         let (table, current_body) = validate_and_parse_skill_doc(&working, &resolved.skill_dir)?;
-        let name = table_string(&table, "name").unwrap_or_else(|| resolved.definition.name.clone());
-        let desc = args
-            .description
-            .clone()
-            .or_else(|| table_string(&table, "description"))
-            .unwrap_or_else(|| resolved.definition.description.clone());
-        let cmd = args
-            .command
-            .clone()
-            .or_else(|| table_string(&table, "command"))
-            .unwrap_or_else(|| resolved.definition.command.clone());
-        if !cmd.is_empty() {
-            validate_skill_slug(&cmd, "command")?;
-        }
-        let tools = args
-            .tools
-            .clone()
-            .or_else(|| table_string_vec(&table, "tools"))
-            .unwrap_or_else(|| resolved.definition.tools.clone());
-        let body = args.prompt.as_deref().unwrap_or(&current_body);
-        working = format_skill_document(&name, &desc, &cmd, &tools, Some(&table), body)?;
+        let def = &resolved.definition;
+        let body = body_override.unwrap_or(&current_body);
+        working = merge_and_format_skill_doc(
+            args,
+            &table,
+            &def.name,
+            &def.description,
+            &def.command,
+            &def.tools,
+            body,
+            true,
+        )?;
     } else {
         validate_and_parse_skill_doc(&working, &resolved.skill_dir)?;
     }
@@ -593,8 +609,8 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let _ = writeln!(
         out,
         "Skill directories:\n  workspace: {}\n  global:    {}\n",
-        format_skill_path_for_read(&ws_dir),
-        format_skill_path_for_read(&global_dir),
+        format_tilde_path(&ws_dir),
+        format_tilde_path(&global_dir),
     );
 
     if entries.is_empty() {
@@ -628,11 +644,7 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
             .as_deref()
             .map(|d| {
                 let md = d.join("SKILL.md");
-                if md.is_file() {
-                    format_skill_path_for_read(&md)
-                } else {
-                    format_skill_path_for_read(d)
-                }
+                format_tilde_path(if md.is_file() { &md } else { d })
             })
             .unwrap_or_default();
         let refs = list_skill_reference_paths(skill);
@@ -659,25 +671,7 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let resolved = resolve_existing_skill(&args.name, args.scope, ctx)?;
 
     if !is_skill_md_target(&args.file) {
-        let rel = validate_reference_subpath(&args.file)?;
-        let candidate = resolved.skill_dir.join(rel);
-        if !candidate.exists() {
-            bail!(
-                "Reference file '{}' does not exist in skill '{}'",
-                rel.display(),
-                resolved.definition.name
-            );
-        }
-        let canon = dunce::canonicalize(&candidate)?;
-        let canon_skill_dir =
-            dunce::canonicalize(&resolved.skill_dir).unwrap_or_else(|_| resolved.skill_dir.clone());
-        if !canon.starts_with(&canon_skill_dir) {
-            bail!(
-                "Security violation: '{}' escapes skill directory",
-                rel.display()
-            );
-        }
-        let display = format_skill_path_for_read(&canon);
+        let (canon, display) = resolve_existing_reference(&resolved, &args.file, false)?;
         return read_file_contents(
             &canon,
             &display,
@@ -687,7 +681,7 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         );
     }
 
-    let display = format_skill_path_for_read(&resolved.skill_md_path);
+    let display = format_tilde_path(&resolved.skill_md_path);
     let content = read_file_contents(
         &resolved.skill_md_path,
         &display,
@@ -725,11 +719,7 @@ impl BlockingTool for Tool {
             SkillAction::Read => execute_read(&args, ctx),
             SkillAction::Create => {
                 let (target_path, display, rendered) = preview_create(&args, ctx)?;
-                let (ws_dir, global_dir) = skill_roots(ctx);
-                let root_dir = match args.scope {
-                    SkillScope::Global => global_dir,
-                    SkillScope::Auto | SkillScope::Workspace => ws_dir,
-                };
+                let root_dir = create_root_dir(args.scope, ctx);
                 fs::create_dir_all(&root_dir).with_context(|| {
                     format!("Failed to create skills root {}", root_dir.display())
                 })?;
@@ -737,13 +727,7 @@ impl BlockingTool for Tool {
                 atomic_write_file(&target_path, &rendered).context("Error writing skill file")?;
 
                 let mut msg = format!("Successfully created {display}");
-                if is_skill_md_target(&args.file)
-                    && let Ok((table, _)) = validate_and_parse_skill_doc(&rendered, &target_path)
-                    && let Some(tools) = table_string_vec(&table, "tools")
-                    && let Some(note) = check_unknown_tools(&tools)
-                {
-                    let _ = write!(msg, "\n{note}");
-                }
+                append_unknown_tools_note(&mut msg, &args, &rendered, &target_path);
                 Ok(msg)
             }
             SkillAction::Modify => {
@@ -755,13 +739,7 @@ impl BlockingTool for Tool {
                 } else {
                     format!("Successfully modified {display}")
                 };
-                if is_skill_md_target(&args.file)
-                    && let Ok((table, _)) = validate_and_parse_skill_doc(&updated, &target_path)
-                    && let Some(tools) = table_string_vec(&table, "tools")
-                    && let Some(note) = check_unknown_tools(&tools)
-                {
-                    let _ = write!(msg, "\n{note}");
-                }
+                append_unknown_tools_note(&mut msg, &args, &updated, &target_path);
                 Ok(msg)
             }
         }

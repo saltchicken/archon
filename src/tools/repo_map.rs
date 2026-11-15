@@ -1172,15 +1172,14 @@ impl BlockingTool for Tool {
             );
         }
 
+        let snapshot = &ctx.config.workspace_snapshot;
         match args.action {
-            RepoMapAction::Map => {
-                execute_map(args, candidate_files, &ctx.snapshot, ctx.max_output_size)
-            }
+            RepoMapAction::Map => execute_map(args, candidate_files, snapshot, ctx.max_output_size),
             RepoMapAction::Definition => {
-                execute_definition(&args, candidate_files, &ctx.snapshot, ctx.max_output_size)
+                execute_definition(&args, candidate_files, snapshot, ctx.max_output_size)
             }
             RepoMapAction::References => {
-                execute_references(&args, candidate_files, &ctx.snapshot, ctx.max_output_size)
+                execute_references(&args, candidate_files, snapshot, ctx.max_output_size)
             }
         }
     }

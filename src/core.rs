@@ -268,6 +268,22 @@ impl CoreEngine {
         });
     }
 
+    fn update_turn_preserving_skill(&mut self, new_turn: TurnConfig) {
+        let active_skill = self.turn.active_skill.take();
+        let skill_args = self.turn.skill_args.take();
+        self.turn = new_turn;
+        self.turn.active_skill = active_skill;
+        self.turn.skill_args = skill_args;
+    }
+
+    fn reset_skill_and_sync_model_limits(&mut self) {
+        self.turn.active_skill = None;
+        self.turn.skill_args = None;
+        self.turn.num_ctx = self.config.context_for_model(&self.model);
+        self.active_max_tool_output_size = self.config.max_tool_output_for_model(&self.model);
+        self.emit_model_config();
+    }
+
     fn active_turn_skill(&self) -> Option<&str> {
         self.turn.active_skill.as_deref()
     }
@@ -517,17 +533,10 @@ impl CoreEngine {
                 self.clear_attachments().await;
             }
             EngineCommand::SendPrompt { prompt, turn } => {
-                if let Some(ref skill_name) = turn.active_skill {
-                    let Some(skill) = skills::find_skill(&self.config, skill_name) else {
-                        return;
-                    };
-                    if !skill.tools.is_empty() && !turn.enable_tools {
-                        return;
-                    }
-                    let missing = skills::missing_skill_tools(skill, &self.config);
-                    if !missing.is_empty() {
-                        return;
-                    }
+                if let Some(ref skill_name) = turn.active_skill
+                    && !skills::can_activate_skill(skill_name, turn.enable_tools, &self.config)
+                {
+                    return;
                 }
 
                 info!(
@@ -608,11 +617,7 @@ impl CoreEngine {
                 feedback,
                 turn,
             } => {
-                let active_skill = self.turn.active_skill.take();
-                let skill_args = self.turn.skill_args.take();
-                self.turn = turn;
-                self.turn.active_skill = active_skill;
-                self.turn.skill_args = skill_args;
+                self.update_turn_preserving_skill(turn);
                 let (index, total) = self.tool_batch_progress();
                 let Some(call) = self.pending_tools.pop_front() else {
                     return;
@@ -689,8 +694,6 @@ impl CoreEngine {
 
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
-                        self.turn.active_skill = None;
-                        self.turn.skill_args = None;
 
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
@@ -701,11 +704,7 @@ impl CoreEngine {
                             }
                         }
 
-                        self.turn.num_ctx = self.config.context_for_model(&self.model);
-                        self.active_max_tool_output_size =
-                            self.config.max_tool_output_for_model(&self.model);
-
-                        self.emit_model_config();
+                        self.reset_skill_and_sync_model_limits();
                         self.messages = data.messages;
                         self.emit_chat();
 
@@ -739,12 +738,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
-                self.turn.active_skill = None;
-                self.turn.skill_args = None;
-                self.turn.num_ctx = self.config.context_for_model(&self.model);
-                self.active_max_tool_output_size =
-                    self.config.max_tool_output_for_model(&self.model);
-                self.emit_model_config();
+                self.reset_skill_and_sync_model_limits();
                 self.messages.clear();
                 self.emit_chat();
             }
@@ -785,11 +779,7 @@ impl CoreEngine {
                 self.emit_model_config();
             }
             EngineCommand::SetTurnConfig(new_turn) => {
-                let active_skill = self.turn.active_skill.take();
-                let skill_args = self.turn.skill_args.take();
-                self.turn = new_turn;
-                self.turn.active_skill = active_skill;
-                self.turn.skill_args = skill_args;
+                self.update_turn_preserving_skill(new_turn);
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
             }

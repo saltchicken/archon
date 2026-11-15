@@ -452,7 +452,7 @@ impl BlockingTool for Tool {
                         .build()
                         .flatten()
                     {
-                        if candidate_files.len() >= ctx.snapshot.max_files {
+                        if candidate_files.len() >= ctx.config.workspace_snapshot.max_files {
                             break;
                         }
                         let path = entry.path();
@@ -489,7 +489,7 @@ impl BlockingTool for Tool {
                         case_sensitive: args.case_sensitive,
                         context_lines: args.context_lines,
                         max_results: args.max_results,
-                        max_file_size: ctx.snapshot.max_size,
+                        max_file_size: ctx.config.workspace_snapshot.max_size,
                         max_output_size: ctx.max_output_size,
                     },
                 )

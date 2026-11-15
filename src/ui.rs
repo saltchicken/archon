@@ -149,30 +149,30 @@ pub struct TuiApp {
     pub(super) tool_feedback: String,
 }
 
-pub(super) fn create_text_area() -> TextArea<'static> {
-    let mut ta = TextArea::default();
-    ta.set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
+fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
+    let mut ta = if initial.is_empty() {
+        TextArea::default()
+    } else {
+        TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>())
+    };
+    ta.set_block(titled_block(title).border_style(Style::default().fg(Color::Cyan)));
     ta.set_cursor_line_style(Style::default());
     ta
+}
+
+pub(super) fn create_text_area() -> TextArea<'static> {
+    create_editor_area(" Prompt ", "")
 }
 
 pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
-    let mut ta = TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>());
-    ta.set_block(
-        titled_block(" Edit System Message ").border_style(Style::default().fg(Color::Cyan)),
-    );
-    ta.set_cursor_line_style(Style::default());
-    ta
+    create_editor_area(" Edit System Message ", initial)
 }
 
 pub(super) fn create_pi_area(initial: &str) -> TextArea<'static> {
-    let mut ta = TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>());
-    ta.set_block(
-        titled_block(" Persistent Facts / Environment Context (One per line) ")
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-    ta.set_cursor_line_style(Style::default());
-    ta
+    create_editor_area(
+        " Persistent Facts / Environment Context (One per line) ",
+        initial,
+    )
 }
 
 pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
@@ -532,6 +532,18 @@ impl TuiApp {
         self.modal = ActiveModal::PersonalIntelligence;
     }
 
+    fn dispatch_shell_command(&mut self, command: &str, include_in_context: bool) {
+        if command.is_empty() {
+            return;
+        }
+        self.text_area = create_text_area();
+        self.scroll_to_bottom();
+        let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
+            command: command.to_string(),
+            include_in_context,
+        });
+    }
+
     pub(super) fn submit_prompt(&mut self) -> bool {
         let raw_prompt = self.text_area.lines().join("\n").trim().to_string();
         if raw_prompt.is_empty() {
@@ -543,15 +555,7 @@ impl TuiApp {
                 Some(ctx_cmd) => (true, ctx_cmd.trim()),
                 None => (false, rest.trim()),
             };
-            if shell_cmd.is_empty() {
-                return false;
-            }
-            self.text_area = create_text_area();
-            self.scroll_to_bottom();
-            let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
-                command: shell_cmd.to_string(),
-                include_in_context,
-            });
+            self.dispatch_shell_command(shell_cmd, include_in_context);
             return false;
         }
 
@@ -570,15 +574,7 @@ impl TuiApp {
                     } else {
                         (false, args)
                     };
-                    if cmd_args.is_empty() {
-                        return false;
-                    }
-                    self.text_area = create_text_area();
-                    self.scroll_to_bottom();
-                    let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
-                        command: cmd_args.to_string(),
-                        include_in_context,
-                    });
+                    self.dispatch_shell_command(cmd_args, include_in_context);
                     return false;
                 }
                 Some(SlashCommand::Intel) => {
@@ -627,14 +623,12 @@ impl TuiApp {
         let prompt = if let Some((skill_name, user_prompt)) =
             crate::core::skills::expand_at_command(&raw_prompt, &self.config)
         {
-            if let Some(skill) = crate::core::skills::find_skill(&self.config, &skill_name) {
-                if !skill.tools.is_empty() && !self.enable_tools {
-                    return false;
-                }
-                let missing = crate::core::skills::missing_skill_tools(skill, &self.config);
-                if !missing.is_empty() {
-                    return false;
-                }
+            if !crate::core::skills::can_activate_skill(
+                &skill_name,
+                self.enable_tools,
+                &self.config,
+            ) {
+                return false;
             }
             let args = raw_prompt
                 .trim()

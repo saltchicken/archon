@@ -42,6 +42,7 @@ impl AsyncTool for Tool {
         };
 
         if !ctx
+            .config
             .execute_command
             .allowed_commands
             .iter()

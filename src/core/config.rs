@@ -18,6 +18,23 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         .into()
 }
 
+pub fn format_tilde_path(path: &Path) -> String {
+    if path.is_relative() {
+        return path.to_string_lossy().into_owned();
+    }
+    if let Some(home) = dirs::home_dir()
+        && let Ok(stripped) = path.strip_prefix(&home)
+    {
+        let s = stripped.to_string_lossy();
+        return if s.is_empty() {
+            "~".into()
+        } else {
+            format!("~/{s}")
+        };
+    }
+    path.to_string_lossy().into_owned()
+}
+
 /// Loads `.env` from the current directory into process environment variables
 /// without overwriting variables already set in the shell environment.
 pub fn load_dotenv(path: impl AsRef<Path>) {
@@ -87,19 +104,13 @@ impl<'de> Deserialize<'de> for PersonalIntelligence {
         match RawPi::deserialize(deserializer)? {
             RawPi::Table {
                 enabled,
-                items,
+                mut items,
                 prompt,
             } => {
-                let mut merged = items;
                 if let Some(p) = prompt {
-                    merged.extend(
-                        p.lines()
-                            .map(clean_pi_item)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from),
-                    );
+                    items.push(p);
                 }
-                Ok(Self::new(merged, enabled))
+                Ok(Self::new(items, enabled))
             }
             RawPi::List(items) => Ok(Self::new(items, true)),
             RawPi::Text(text) => Ok(Self::from_editor_text(&text, true)),
@@ -123,7 +134,9 @@ impl PersonalIntelligence {
             for line in raw.lines() {
                 let cleaned = clean_pi_item(line);
                 if !cleaned.is_empty()
-                    && !items.iter().any(|existing| existing.eq_ignore_ascii_case(cleaned))
+                    && !items
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(cleaned))
                 {
                     items.push(cleaned.to_string());
                 }
@@ -149,13 +162,7 @@ impl PersonalIntelligence {
     }
 
     pub fn from_editor_text(raw: &str, enabled: bool) -> Self {
-        let lines = raw
-            .lines()
-            .map(clean_pi_item)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        Self::new(lines, enabled)
+        Self::new(vec![raw.to_string()], enabled)
     }
 
     pub fn format_for_prompt(&self) -> Option<String> {
@@ -395,30 +402,54 @@ pub fn archon_config_root() -> PathBuf {
         .join("archon")
 }
 
-pub fn save_personal_intelligence_to(
+pub fn load_scoped_pi_table(
     cfg_path: &Path,
+    is_global: bool,
+) -> Result<(String, toml::Table, PersonalIntelligence)> {
+    if !cfg_path.exists() {
+        let pi = if is_global {
+            PersonalIntelligence::default()
+        } else {
+            PersonalIntelligence::new(Vec::new(), true)
+        };
+        return Ok((String::new(), toml::Table::new(), pi));
+    }
+
+    let raw = fs::read_to_string(cfg_path)
+        .with_context(|| format!("Failed to read {}", cfg_path.display()))?;
+    let table: toml::Table = toml::from_str(&raw)
+        .with_context(|| format!("Failed to parse TOML in {}", cfg_path.display()))?;
+
+    let pi = match table.get("personal_intelligence") {
+        Some(val) => val
+            .clone()
+            .try_into::<PersonalIntelligence>()
+            .unwrap_or_default(),
+        None if is_global => PersonalIntelligence::default(),
+        None => PersonalIntelligence::new(Vec::new(), true),
+    };
+
+    Ok((raw, table, pi))
+}
+
+pub fn serialize_table_with_pi(
+    mut table: toml::Table,
     pi: &PersonalIntelligence,
 ) -> Result<String> {
+    let pi_val = toml::Value::try_from(pi)
+        .context("Failed to serialize personal_intelligence to TOML value")?;
+    table.insert("personal_intelligence".into(), pi_val);
+    toml::to_string_pretty(&table).context("Failed to serialize updated config.toml")
+}
+
+pub fn save_personal_intelligence_to(cfg_path: &Path, pi: &PersonalIntelligence) -> Result<String> {
     if let Some(parent) = cfg_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;
     }
 
-    let mut table: toml::Table = if cfg_path.exists() {
-        let raw = fs::read_to_string(cfg_path)
-            .with_context(|| format!("Failed to read {}", cfg_path.display()))?;
-        toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse TOML in {}", cfg_path.display()))?
-    } else {
-        toml::Table::new()
-    };
-
-    let pi_val = toml::Value::try_from(pi)
-        .context("Failed to serialize personal_intelligence to TOML value")?;
-    table.insert("personal_intelligence".into(), pi_val);
-
-    let rendered =
-        toml::to_string_pretty(&table).context("Failed to serialize updated config.toml")?;
+    let (_, table, _) = load_scoped_pi_table(cfg_path, true)?;
+    let rendered = serialize_table_with_pi(table, pi)?;
     crate::tools::utils::fs::atomic_write_file(cfg_path, &rendered)
         .with_context(|| format!("Failed to write {}", cfg_path.display()))?;
     Ok(rendered)
@@ -456,7 +487,9 @@ pub fn reload_personal_intelligence(current_config: &Config) -> PersonalIntellig
         return global_pi;
     };
     let local_config_path = ws_dir.join("config.toml");
-    let Ok(merged_cfg) = base_figment.merge(Toml::file(&local_config_path)).extract::<Config>()
+    let Ok(merged_cfg) = base_figment
+        .merge(Toml::file(&local_config_path))
+        .extract::<Config>()
     else {
         return global_pi;
     };
@@ -484,41 +517,25 @@ pub fn workspace_config_dir_for(workspace: &Path) -> PathBuf {
         .filter(|s| !s.is_empty())
         .unwrap_or("root");
 
-    let primary = base_root.join(name);
-    let primary_cfg = primary.join("config.toml");
-    if !primary_cfg.exists() {
-        return primary;
-    }
-    if read_bound_workspace(&primary_cfg).is_none_or(|bound| bound == canon) {
-        return primary;
-    }
-
-    if let Some(parent) = canon
+    let parent = canon
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
-        .filter(|s| !s.is_empty())
-    {
-        let disambiguated = base_root.join(format!("{parent}-{name}"));
-        let disambiguated_cfg = disambiguated.join("config.toml");
-        if !disambiguated_cfg.exists()
-            || read_bound_workspace(&disambiguated_cfg).is_none_or(|bound| bound == canon)
-        {
-            return disambiguated;
+        .filter(|s| !s.is_empty());
+
+    let candidates = std::iter::once(name.to_string())
+        .chain(parent.map(|p| format!("{p}-{name}")))
+        .chain((2..1000).map(|idx| format!("{name}-{idx}")));
+
+    for folder in candidates {
+        let dir = base_root.join(folder);
+        let cfg = dir.join("config.toml");
+        if !cfg.exists() || read_bound_workspace(&cfg).is_none_or(|bound| bound == canon) {
+            return dir;
         }
     }
 
-    for idx in 2..1000 {
-        let candidate = base_root.join(format!("{name}-{idx}"));
-        let candidate_cfg = candidate.join("config.toml");
-        if !candidate_cfg.exists()
-            || read_bound_workspace(&candidate_cfg).is_none_or(|bound| bound == canon)
-        {
-            return candidate;
-        }
-    }
-
-    primary
+    base_root.join(name)
 }
 
 pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
@@ -652,10 +669,8 @@ impl Config {
                 cfg.workspace_snapshot.global_files = global_files;
                 let mut merged_pi_items = global_pi.items;
                 merged_pi_items.extend(cfg.personal_intelligence.items);
-                cfg.personal_intelligence = PersonalIntelligence::new(
-                    merged_pi_items,
-                    cfg.personal_intelligence.enabled,
-                );
+                cfg.personal_intelligence =
+                    PersonalIntelligence::new(merged_pi_items, cfg.personal_intelligence.enabled);
                 cfg.skills = crate::core::skills::discover_skills(
                     &cfg.app.skills_dir,
                     Some(ws_skills_dir.as_path()),

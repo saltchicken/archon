@@ -63,7 +63,7 @@ impl BlockingTool for Tool {
                 case_sensitive: args.case_sensitive,
                 context_lines: args.context_lines,
                 max_results: args.max_results,
-                max_file_size: ctx.snapshot.max_size,
+                max_file_size: ctx.config.workspace_snapshot.max_size,
                 max_output_size: ctx.max_output_size,
             },
         )

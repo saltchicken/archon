@@ -1,4 +1,4 @@
-use crate::core::config::{Config, expand_tilde};
+use crate::core::config::{Config, expand_tilde, format_tilde_path};
 use serde::Deserialize;
 use std::{
     fmt::Write as _,
@@ -211,16 +211,11 @@ pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<Stri
     missing
 }
 
-pub(crate) fn format_skill_path_for_read(path: &Path) -> String {
-    if path.is_relative() {
-        return path.to_string_lossy().into_owned();
-    }
-    if let Some(home) = dirs::home_dir()
-        && let Ok(stripped) = path.strip_prefix(&home)
-    {
-        return format!("~/{}", stripped.to_string_lossy());
-    }
-    path.to_string_lossy().into_owned()
+pub fn can_activate_skill(skill_name: &str, enable_tools: bool, config: &Config) -> bool {
+    let Some(skill) = find_skill(config, skill_name) else {
+        return false;
+    };
+    (skill.tools.is_empty() || enable_tools) && missing_skill_tools(skill, config).is_empty()
 }
 
 pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
@@ -237,7 +232,7 @@ pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
             if p.is_dir() {
                 walk(&p, out);
             } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
-                out.push(format_skill_path_for_read(&p));
+                out.push(format_tilde_path(&p));
             }
         }
     }

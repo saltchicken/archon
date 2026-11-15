@@ -191,20 +191,8 @@ impl TuiApp {
     }
 
     pub(super) fn draw_system_prompt_modal(&self, f: &mut Frame) {
-        let area = centered_rect(75, 60, f.area());
-        f.render_widget(Clear, area);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(6),
-                Constraint::Length(2),
-            ])
-            .split(area);
-
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
-        let header = Paragraph::new(Line::from(vec![
+        let header = Line::from(vec![
             Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
             Span::raw("(Invoked @skill context is appended per turn) │ "),
             Span::styled(
@@ -213,39 +201,23 @@ impl TuiApp {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]))
-        .block(titled_block(" System Message Control (^Y) "));
-        f.render_widget(header, chunks[0]);
-
-        f.render_widget(&self.sys_prompt_area, chunks[1]);
-
-        let footer = Paragraph::new(Line::from(Span::styled(
+        ]);
+        draw_editor_modal(
+            f,
+            " System Message Control (^Y) ",
+            header,
+            &self.sys_prompt_area,
             " [^P] Cycle Preset   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Apply   [Esc] Cancel",
-            Style::default().fg(Color::Yellow),
-        )));
-        f.render_widget(footer, chunks[2]);
+        );
     }
 
     pub(super) fn draw_personal_intelligence_modal(&self, f: &mut Frame) {
-        let area = centered_rect(75, 60, f.area());
-        f.render_widget(Clear, area);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(6),
-                Constraint::Length(2),
-            ])
-            .split(area);
-
         let (status_label, status_color) = if self.pi_enabled_draft {
             ("ENABLED", Color::Green)
         } else {
             ("DISABLED", Color::Red)
         };
-
-        let header = Paragraph::new(Line::from(vec![
+        let header = Line::from(vec![
             Span::styled(
                 "Persistent Personal Intelligence ",
                 Style::default().fg(Color::Cyan),
@@ -257,16 +229,46 @@ impl TuiApp {
                     .fg(status_color)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]))
-        .block(titled_block(" Personal Intelligence (^P) "));
-        f.render_widget(header, chunks[0]);
-
-        f.render_widget(&self.pi_area, chunks[1]);
-
-        let footer = Paragraph::new(Line::from(Span::styled(
+        ]);
+        draw_editor_modal(
+            f,
+            " Personal Intelligence (^P) ",
+            header,
+            &self.pi_area,
             " [^E] Toggle ON/OFF   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Persist   [Esc] Cancel",
-            Style::default().fg(Color::Yellow),
-        )));
-        f.render_widget(footer, chunks[2]);
+        );
     }
+}
+
+fn draw_editor_modal(
+    f: &mut Frame,
+    title: &'static str,
+    header_line: Line<'_>,
+    editor: &ratatui_textarea::TextArea<'static>,
+    footer_text: &'static str,
+) {
+    let area = centered_rect(75, 60, f.area());
+    f.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    f.render_widget(
+        Paragraph::new(header_line).block(titled_block(title)),
+        chunks[0],
+    );
+    f.render_widget(editor, chunks[1]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            footer_text,
+            Style::default().fg(Color::Yellow),
+        ))),
+        chunks[2],
+    );
 }
