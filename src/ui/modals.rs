@@ -199,7 +199,23 @@ impl TuiApp {
             Line::from(format!("> {}", sanitize_line(&self.tool_feedback))),
             Line::from(""),
             Line::from(Span::styled(
-                "[⏎] Approve Once    [^A] Always (Session)    [Esc] Decline    [⇧Esc] Cancel All    [↑/↓/PgUp/PgDn] Scroll",
+                "[⏎] Approve Once",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[^A] Always (Session)",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[Esc] Decline",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[⇧Esc] Cancel All",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[↑/↓/PgUp/PgDn] Scroll",
                 Style::default().fg(Color::Yellow),
             )),
         ]);
@@ -344,13 +360,35 @@ impl TuiApp {
             Line::from(format!("> {}", sanitize_line(&self.truncated_guide_prompt))),
             Line::from(""),
             Line::from(Span::styled(
-                format!(
-                    "[⏎] Proceed Truncated ({max_kb}KB)    [^F] Proceed Full ({captured_full_kb}KB)    [^C] Condense Truncated    [^G] Condense Full"
-                ),
+                format!("[⏎] Proceed Truncated ({max_kb}KB)"),
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(Span::styled(
-                "[Esc/^D] Discard Output    [⇧Esc] Cancel All    [Tab/Click] Fold/Unfold    [↑/↓/PgUp/PgDn] Scroll",
+                format!("[^F] Proceed Full ({captured_full_kb}KB)"),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[^C] Condense Truncated",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[^G] Condense Full",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[Esc/^D] Discard Output",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[⇧Esc] Cancel All",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[Tab/Click] Fold/Unfold",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[↑/↓/PgUp/PgDn] Scroll",
                 Style::default().fg(Color::Yellow),
             )),
         ]);
