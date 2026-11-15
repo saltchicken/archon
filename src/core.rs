@@ -9,7 +9,7 @@ pub mod skills;
 
 use crate::tools::{self, ToolCall};
 use attachments::{ImageAttachment, ImageStaging};
-use config::{Config, PersonalIntelligence};
+use config::{Config, Memory};
 use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
@@ -60,7 +60,7 @@ pub enum EngineCommand {
         max_tool_output_size: usize,
     },
     SetTurnConfig(TurnConfig),
-    SetPersonalIntelligence(PersonalIntelligence),
+    SetMemory(Memory),
     RunShellCommand {
         command: String,
         include_in_context: bool,
@@ -109,7 +109,7 @@ pub enum EngineEvent {
     },
     SessionsListed(Vec<SessionSummary>),
     SkillsUpdated(Vec<SkillDefinition>),
-    PersonalIntelligenceUpdated(PersonalIntelligence),
+    MemoryUpdated(Memory),
     ModelConfigUpdated {
         model: String,
         num_ctx: u32,
@@ -849,33 +849,31 @@ impl CoreEngine {
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
             }
-            EngineCommand::SetPersonalIntelligence(pi) => {
+            EngineCommand::SetMemory(mem) => {
                 info!(
-                    "Updating Personal Intelligence (enabled: {}, items: {})",
-                    pi.enabled,
-                    pi.items.len()
+                    "Updating Memory (enabled: {}, items: {})",
+                    mem.enabled,
+                    mem.items.len()
                 );
-                let pi_to_save = pi.clone();
-                let save_res = tokio::task::spawn_blocking(move || {
-                    config::save_global_personal_intelligence(&pi_to_save)
-                })
-                .await;
+                let mem_to_save = mem.clone();
+                let save_res =
+                    tokio::task::spawn_blocking(move || config::save_global_memory(&mem_to_save))
+                        .await;
 
                 match save_res {
                     Ok(Ok(_)) => {
-                        self.config.personal_intelligence =
-                            config::reload_personal_intelligence(&self.config);
-                        let _ = self.tx.send(EngineEvent::PersonalIntelligenceUpdated(
-                            self.config.personal_intelligence.clone(),
-                        ));
+                        self.config.memory = config::reload_memory(&self.config);
+                        let _ = self
+                            .tx
+                            .send(EngineEvent::MemoryUpdated(self.config.memory.clone()));
                     }
                     Ok(Err(e)) => {
-                        error!("Failed to persist Personal Intelligence: {e}");
-                        self.config.personal_intelligence = pi;
+                        error!("Failed to persist Memory: {e}");
+                        self.config.memory = mem;
                     }
                     Err(e) => {
-                        error!("Personal Intelligence save task panicked: {e}");
-                        self.config.personal_intelligence = pi;
+                        error!("Memory save task panicked: {e}");
+                        self.config.memory = mem;
                     }
                 }
             }
@@ -991,12 +989,11 @@ impl CoreEngine {
                     let _ = self
                         .tx
                         .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
-                } else if tool_name == "personal_intelligence" {
-                    self.config.personal_intelligence =
-                        config::reload_personal_intelligence(&self.config);
-                    let _ = self.tx.send(EngineEvent::PersonalIntelligenceUpdated(
-                        self.config.personal_intelligence.clone(),
-                    ));
+                } else if tool_name == "memory" {
+                    self.config.memory = config::reload_memory(&self.config);
+                    let _ = self
+                        .tx
+                        .send(EngineEvent::MemoryUpdated(self.config.memory.clone()));
                 }
                 self.messages
                     .push(ChatMessage::new_tool(tool_name, output, truncated));

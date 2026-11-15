@@ -5,7 +5,9 @@ mod render;
 use crate::core::{
     EngineCommand, EngineEvent, TurnConfig,
     attachments::ImageAttachment,
-    config::{Config, PersonalIntelligence, Preset, clean_pi_item},
+    config::{
+        Config, Memory, Preset, clean_memory_item, global_memory_path, load_scoped_memory_file,
+    },
     session::{ChatMessage, SessionSummary},
 };
 use anyhow::Result;
@@ -59,13 +61,13 @@ pub(super) enum ActiveModal {
     ToolApproval,
     ModelSelect,
     SystemPrompt,
-    PersonalIntelligence,
+    Memory,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
     Exit,
-    Intel,
+    Memory,
     Reset,
     Run,
 }
@@ -73,7 +75,7 @@ pub(super) enum SlashCommand {
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
         ("exit", Self::Exit),
-        ("intel", Self::Intel),
+        ("memory", Self::Memory),
         ("reset", Self::Reset),
         ("run", Self::Run),
     ];
@@ -179,8 +181,8 @@ pub struct TuiApp {
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) sys_prompt_area: TextArea<'static>,
-    pub(super) pi_area: TextArea<'static>,
-    pub(super) pi_enabled_draft: bool,
+    pub(super) memory_area: TextArea<'static>,
+    pub(super) memory_enabled_draft: bool,
     pub(super) enable_tools: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
@@ -251,7 +253,7 @@ pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
     create_editor_area(" Edit System Message ", initial)
 }
 
-pub(super) fn create_pi_area(initial: &str) -> TextArea<'static> {
+pub(super) fn create_memory_area(initial: &str) -> TextArea<'static> {
     create_editor_area(
         " Persistent Facts / Environment Context (One per line) ",
         initial,
@@ -282,8 +284,8 @@ impl TuiApp {
             .iter()
             .position(|m| m.name == model)
             .unwrap_or(0);
-        let pi_initial = config.personal_intelligence.to_editor_text();
-        let pi_enabled_draft = config.personal_intelligence.enabled;
+        let memory_initial = config.memory.to_editor_text();
+        let memory_enabled_draft = config.memory.enabled;
 
         Self {
             model,
@@ -303,8 +305,8 @@ impl TuiApp {
             sys_preset_idx: 0,
             custom_system_prompt: None,
             sys_prompt_area: create_sys_prompt_area(""),
-            pi_area: create_pi_area(&pi_initial),
-            pi_enabled_draft,
+            memory_area: create_memory_area(&memory_initial),
+            memory_enabled_draft,
             enable_tools: true,
             num_ctx,
             max_tool_output_size,
@@ -368,8 +370,8 @@ impl TuiApp {
                     ActiveModal::SystemPrompt => {
                         self.sys_prompt_area.insert_str(text.replace('\r', ""));
                     }
-                    ActiveModal::PersonalIntelligence => {
-                        self.pi_area.insert_str(text.replace('\r', ""));
+                    ActiveModal::Memory => {
+                        self.memory_area.insert_str(text.replace('\r', ""));
                     }
                     ActiveModal::None => {
                         self.prompt_history_idx = None;
@@ -606,8 +608,8 @@ impl TuiApp {
             EngineEvent::SkillsUpdated(skills) => {
                 self.config.skills = skills;
             }
-            EngineEvent::PersonalIntelligenceUpdated(pi) => {
-                self.config.personal_intelligence = pi;
+            EngineEvent::MemoryUpdated(mem) => {
+                self.config.memory = mem;
             }
             EngineEvent::ModelConfigUpdated {
                 model,
@@ -686,9 +688,9 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn current_pi_label(&self) -> String {
-        let count = self.config.personal_intelligence.count();
-        if !self.config.personal_intelligence.enabled {
+    pub(super) fn current_memory_label(&self) -> String {
+        let count = self.config.memory.count();
+        if !self.config.memory.enabled {
             format!("OFF ({count})")
         } else if count == 0 {
             "Empty".into()
@@ -699,10 +701,13 @@ impl TuiApp {
         }
     }
 
-    pub(super) fn open_personal_intelligence_modal(&mut self) {
-        self.pi_area = create_pi_area(&self.config.personal_intelligence.to_editor_text());
-        self.pi_enabled_draft = self.config.personal_intelligence.enabled;
-        self.modal = ActiveModal::PersonalIntelligence;
+    pub(super) fn open_memory_modal(&mut self) {
+        let global_mem = load_scoped_memory_file(&global_memory_path(), true)
+            .map(|(_, m)| m)
+            .unwrap_or_else(|_| self.config.memory.clone());
+        self.memory_area = create_memory_area(&global_mem.to_editor_text());
+        self.memory_enabled_draft = self.config.memory.enabled;
+        self.modal = ActiveModal::Memory;
     }
 
     pub(super) fn is_prompt_empty(&self) -> bool {
@@ -772,34 +777,36 @@ impl TuiApp {
                     self.dispatch_shell_command(&raw_prompt, cmd_args, include_in_context);
                     return false;
                 }
-                Some(SlashCommand::Intel) => {
+                Some(SlashCommand::Memory) => {
                     self.record_prompt_and_clear(&raw_prompt);
                     if args.is_empty() {
-                        self.open_personal_intelligence_modal();
+                        self.open_memory_modal();
                         return false;
                     }
-                    let mut pi = self.config.personal_intelligence.clone();
+                    let mut mem = load_scoped_memory_file(&global_memory_path(), true)
+                        .map(|(_, m)| m)
+                        .unwrap_or_else(|_| self.config.memory.clone());
                     match args.to_ascii_lowercase().as_str() {
                         "clear" => {
-                            pi.items.clear();
+                            mem.items.clear();
                         }
                         "on" | "enable" => {
-                            pi.enabled = true;
+                            mem.enabled = true;
                         }
                         "off" | "disable" => {
-                            pi.enabled = false;
+                            mem.enabled = false;
                         }
                         _ => {
-                            let fact = clean_pi_item(args.strip_prefix("add ").unwrap_or(args));
+                            let fact = clean_memory_item(args.strip_prefix("add ").unwrap_or(args));
                             if !fact.is_empty() {
-                                let mut items = pi.items;
+                                let mut items = mem.items;
                                 items.push(fact.to_string());
-                                pi = PersonalIntelligence::new(items, true);
+                                mem = Memory::new(items, true);
                             }
                         }
                     }
-                    self.config.personal_intelligence = pi.clone();
-                    let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
+                    self.config.memory = mem.clone();
+                    let _ = self.cmd_tx.send(EngineCommand::SetMemory(mem));
                     return false;
                 }
                 Some(_) if !args.is_empty() => return false,

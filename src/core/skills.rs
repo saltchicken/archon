@@ -283,8 +283,8 @@ pub fn compose_system_prompt(
         sections.push(base_system_prompt.trim().to_string());
     }
 
-    if let Some(pi_block) = config.personal_intelligence.format_for_prompt() {
-        sections.push(pi_block);
+    if let Some(mem_block) = config.memory.format_for_prompt() {
+        sections.push(mem_block);
     }
 
     if let Some(skill_name) = active_skill

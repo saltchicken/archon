@@ -472,7 +472,7 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
-            ActiveModal::PersonalIntelligence => self.draw_personal_intelligence_modal(f),
+            ActiveModal::Memory => self.draw_memory_modal(f),
             ActiveModal::None => {}
         }
 
@@ -515,7 +515,7 @@ impl TuiApp {
             )),
             Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
-            Line::from(format!("Intel:   {} (^P)", self.current_pi_label())),
+            Line::from(format!("Memory:  {} (^P)", self.current_memory_label())),
         ];
         f.render_widget(
             Paragraph::new(settings_text)

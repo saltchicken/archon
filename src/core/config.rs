@@ -62,13 +62,14 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PersonalIntelligence {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Memory {
     pub enabled: bool,
     pub items: Vec<String>,
 }
 
-impl Default for PersonalIntelligence {
+impl Default for Memory {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -77,62 +78,28 @@ impl Default for PersonalIntelligence {
     }
 }
 
-impl<'de> Deserialize<'de> for PersonalIntelligence {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum RawPi {
-            Table {
-                #[serde(default = "default_true")]
-                enabled: bool,
-                #[serde(default, alias = "facts", alias = "data", alias = "entries")]
-                items: Vec<String>,
-                #[serde(default, alias = "content", alias = "notes")]
-                prompt: Option<String>,
-            },
-            List(Vec<String>),
-            Text(String),
-        }
-
-        fn default_true() -> bool {
-            true
-        }
-
-        match RawPi::deserialize(deserializer)? {
-            RawPi::Table {
-                enabled,
-                mut items,
-                prompt,
-            } => {
-                if let Some(p) = prompt {
-                    items.push(p);
-                }
-                Ok(Self::new(items, enabled))
-            }
-            RawPi::List(items) => Ok(Self::new(items, true)),
-            RawPi::Text(text) => Ok(Self::from_editor_text(&text, true)),
-        }
-    }
-}
-
-pub fn clean_pi_item(raw: &str) -> &str {
+pub fn clean_memory_item(raw: &str) -> &str {
     let trimmed = raw.trim();
-    trimmed
+    if trimmed.starts_with('#') {
+        return "";
+    }
+    let unbulleted = trimmed
         .strip_prefix("- ")
         .or_else(|| trimmed.strip_prefix("* "))
         .or_else(|| trimmed.strip_prefix("• "))
-        .map_or(trimmed, str::trim)
+        .map_or(trimmed, str::trim);
+    if unbulleted.starts_with('#') {
+        return "";
+    }
+    unbulleted
 }
 
-impl PersonalIntelligence {
+impl Memory {
     pub fn new(raw_items: Vec<String>, enabled: bool) -> Self {
         let mut items: Vec<String> = Vec::new();
         for raw in raw_items {
             for line in raw.lines() {
-                let cleaned = clean_pi_item(line);
+                let cleaned = clean_memory_item(line);
                 if !cleaned.is_empty()
                     && !items
                         .iter()
@@ -148,14 +115,14 @@ impl PersonalIntelligence {
     pub fn count(&self) -> usize {
         self.items
             .iter()
-            .filter(|s| !clean_pi_item(s).is_empty())
+            .filter(|s| !clean_memory_item(s).is_empty())
             .count()
     }
 
     pub fn to_editor_text(&self) -> String {
         self.items
             .iter()
-            .map(|s| clean_pi_item(s))
+            .map(|s| clean_memory_item(s))
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n")
@@ -165,22 +132,60 @@ impl PersonalIntelligence {
         Self::new(vec![raw.to_string()], enabled)
     }
 
+    pub fn from_markdown(raw: &str) -> Self {
+        let (fm_opt, body) = crate::core::skills::split_toml_frontmatter(raw);
+        let mut enabled = true;
+
+        if let Some(fm) = fm_opt {
+            #[derive(Deserialize)]
+            struct MemoryFrontmatter {
+                #[serde(default = "default_true")]
+                enabled: bool,
+            }
+            fn default_true() -> bool {
+                true
+            }
+            if let Ok(parsed) = toml::from_str::<MemoryFrontmatter>(fm) {
+                enabled = parsed.enabled;
+            }
+        }
+
+        Self::new(vec![body.to_string()], enabled)
+    }
+
+    pub fn to_markdown_file(&self) -> String {
+        let mut out = String::new();
+        if !self.enabled {
+            out.push_str("+++\nenabled = false\n+++\n\n");
+        }
+        for item in self
+            .items
+            .iter()
+            .map(|s| clean_memory_item(s))
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str("- ");
+            out.push_str(item);
+            out.push('\n');
+        }
+        out
+    }
+
     pub fn format_for_prompt(&self) -> Option<String> {
         if !self.enabled {
             return None;
         }
-        let bullets: Vec<String> = self
-            .items
-            .iter()
-            .map(|s| clean_pi_item(s))
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("- {s}"))
-            .collect();
-        if bullets.is_empty() {
-            return None;
-        }
+        let today = chrono::Local::now().format("%A, %B %-d, %Y");
+        let mut bullets = vec![format!("- Current date: {today}")];
+        bullets.extend(
+            self.items
+                .iter()
+                .map(|s| clean_memory_item(s))
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("- {s}")),
+        );
         Some(format!(
-            "<personal_intelligence>\nPersistent user context and environment facts (always apply):\n{}\n</personal_intelligence>",
+            "<memory>\nPersistent user context and environment facts (always apply):\n{}\n</memory>",
             bullets.join("\n")
         ))
     }
@@ -190,7 +195,8 @@ impl PersonalIntelligence {
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
-    pub personal_intelligence: PersonalIntelligence,
+    #[serde(skip)]
+    pub memory: Memory,
     pub execute_command: ExecuteCommandSettings,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: EndpointSettings,
@@ -304,8 +310,8 @@ impl Default for AppSettings {
                 "dotfiles:read",
                 "dotfiles:search",
                 "dotfiles:validate",
-                "personal_intelligence:list",
-                "personal_intelligence:read",
+                "memory:list",
+                "memory:read",
                 "skill:list",
                 "skill:read",
             ]
@@ -351,7 +357,7 @@ impl Default for Config {
         };
         Self {
             app: AppSettings::default(),
-            personal_intelligence: PersonalIntelligence::default(),
+            memory: Memory::default(),
             execute_command: ExecuteCommandSettings::default(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: EndpointSettings {
@@ -402,101 +408,82 @@ pub fn archon_config_root() -> PathBuf {
         .join("archon")
 }
 
-pub fn load_scoped_pi_table(
-    cfg_path: &Path,
-    is_global: bool,
-) -> Result<(String, toml::Table, PersonalIntelligence)> {
-    if !cfg_path.exists() {
-        let pi = if is_global {
-            PersonalIntelligence::default()
+pub fn global_memory_path() -> PathBuf {
+    archon_config_root().join("MEMORY.md")
+}
+
+pub fn workspace_memory_path(ws_dir: &Path) -> PathBuf {
+    ws_dir.join("MEMORY.md")
+}
+
+pub fn load_scoped_memory_file(mem_path: &Path, is_global: bool) -> Result<(String, Memory)> {
+    if !mem_path.exists() {
+        let mem = if is_global {
+            Memory::default()
         } else {
-            PersonalIntelligence::new(Vec::new(), true)
+            Memory::new(Vec::new(), true)
         };
-        return Ok((String::new(), toml::Table::new(), pi));
+        return Ok((String::new(), mem));
     }
 
-    let raw = fs::read_to_string(cfg_path)
-        .with_context(|| format!("Failed to read {}", cfg_path.display()))?;
-    let table: toml::Table = toml::from_str(&raw)
-        .with_context(|| format!("Failed to parse TOML in {}", cfg_path.display()))?;
-
-    let pi = match table.get("personal_intelligence") {
-        Some(val) => val
-            .clone()
-            .try_into::<PersonalIntelligence>()
-            .unwrap_or_default(),
-        None if is_global => PersonalIntelligence::default(),
-        None => PersonalIntelligence::new(Vec::new(), true),
-    };
-
-    Ok((raw, table, pi))
+    let raw = fs::read_to_string(mem_path)
+        .with_context(|| format!("Failed to read {}", mem_path.display()))?;
+    let mem = Memory::from_markdown(&raw);
+    Ok((raw, mem))
 }
 
-pub fn serialize_table_with_pi(
-    mut table: toml::Table,
-    pi: &PersonalIntelligence,
-) -> Result<String> {
-    let pi_val = toml::Value::try_from(pi)
-        .context("Failed to serialize personal_intelligence to TOML value")?;
-    table.insert("personal_intelligence".into(), pi_val);
-    toml::to_string_pretty(&table).context("Failed to serialize updated config.toml")
-}
-
-pub fn save_personal_intelligence_to(cfg_path: &Path, pi: &PersonalIntelligence) -> Result<String> {
-    if let Some(parent) = cfg_path.parent() {
+pub fn save_memory_file(mem_path: &Path, mem: &Memory) -> Result<String> {
+    if let Some(parent) = mem_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;
     }
 
-    let (_, table, _) = load_scoped_pi_table(cfg_path, true)?;
-    let rendered = serialize_table_with_pi(table, pi)?;
-    crate::tools::utils::fs::atomic_write_file(cfg_path, &rendered)
-        .with_context(|| format!("Failed to write {}", cfg_path.display()))?;
+    let rendered = mem.to_markdown_file();
+    crate::tools::utils::fs::atomic_write_file(mem_path, &rendered)
+        .with_context(|| format!("Failed to write {}", mem_path.display()))?;
     Ok(rendered)
 }
 
-pub fn save_global_personal_intelligence(pi: &PersonalIntelligence) -> Result<String> {
-    let base_path = archon_config_root().join("config.toml");
-    save_personal_intelligence_to(&base_path, pi)
+pub fn save_global_memory(mem: &Memory) -> Result<String> {
+    save_memory_file(&global_memory_path(), mem)
 }
 
-pub fn reload_personal_intelligence(current_config: &Config) -> PersonalIntelligence {
-    let base_path = archon_config_root().join("config.toml");
-    let ws_dir = current_config
-        .workspace
-        .as_deref()
-        .map(Path::new)
-        .map(workspace_config_dir_for)
-        .or_else(|| {
-            current_config
-                .workspace_skills_dir
-                .as_deref()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-        });
-
-    let base_figment =
-        Figment::from(Serialized::defaults(Config::default())).merge(Toml::file(&base_path));
-    let global_pi = base_figment
-        .clone()
-        .extract::<Config>()
-        .map(|c| c.personal_intelligence)
-        .unwrap_or_default();
+pub fn load_merged_memory(ws_dir: Option<&Path>) -> Memory {
+    let global_path = global_memory_path();
+    let (_, global_mem) = load_scoped_memory_file(&global_path, true)
+        .unwrap_or_else(|_| (String::new(), Memory::default()));
 
     let Some(ws_dir) = ws_dir else {
-        return global_pi;
+        return global_mem;
     };
-    let local_config_path = ws_dir.join("config.toml");
-    let Ok(merged_cfg) = base_figment
-        .merge(Toml::file(&local_config_path))
-        .extract::<Config>()
-    else {
-        return global_pi;
+    let ws_path = workspace_memory_path(ws_dir);
+    if !ws_path.exists() {
+        return global_mem;
+    }
+
+    let Ok((_, ws_mem)) = load_scoped_memory_file(&ws_path, false) else {
+        return global_mem;
     };
 
-    let mut combined_items = global_pi.items;
-    combined_items.extend(merged_cfg.personal_intelligence.items);
-    PersonalIntelligence::new(combined_items, merged_cfg.personal_intelligence.enabled)
+    let mut combined_items = global_mem.items;
+    combined_items.extend(ws_mem.items);
+    Memory::new(combined_items, global_mem.enabled && ws_mem.enabled)
+}
+
+pub fn reload_memory(current_config: &Config) -> Memory {
+    let ws_dir = current_config
+        .workspace_skills_dir
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            current_config
+                .workspace
+                .as_deref()
+                .map(Path::new)
+                .map(workspace_config_dir_for)
+        });
+    load_merged_memory(ws_dir.as_deref())
 }
 
 fn read_bound_workspace(cfg_path: &Path) -> Option<PathBuf> {
@@ -633,23 +620,24 @@ impl Config {
             if let Ok(toml_str) = toml::to_string_pretty(&Self::default()) {
                 let _ = fs::write(base_path, toml_str);
             }
-        } else if let Ok(raw) = fs::read_to_string(base_path)
-            && let Ok(table) = toml::from_str::<toml::Table>(&raw)
-            && !table.contains_key("personal_intelligence")
-        {
-            let _ = save_personal_intelligence_to(base_path, &PersonalIntelligence::default());
+        }
+
+        let mem_path = global_memory_path();
+        if !mem_path.exists() {
+            let _ = save_memory_file(&mem_path, &Memory::default());
         }
 
         let ws_dir = workspace_config_dir.as_ref();
         let local_config_path = ws_dir.join("config.toml");
         let ws_skills_dir = ws_dir.join("skills");
+        let merged_memory = load_merged_memory(Some(ws_dir));
 
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
-        let (global_files, global_pi) = base_figment
+        let global_files = base_figment
             .clone()
             .extract::<Self>()
-            .map(|c| (c.workspace_snapshot.file, c.personal_intelligence))
+            .map(|c| c.workspace_snapshot.file)
             .unwrap_or_default();
 
         let bound_ws = read_bound_workspace(&local_config_path)
@@ -667,10 +655,7 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
-                let mut merged_pi_items = global_pi.items;
-                merged_pi_items.extend(cfg.personal_intelligence.items);
-                cfg.personal_intelligence =
-                    PersonalIntelligence::new(merged_pi_items, cfg.personal_intelligence.enabled);
+                cfg.memory = merged_memory;
                 cfg.skills = crate::core::skills::discover_skills(
                     &cfg.app.skills_dir,
                     Some(ws_skills_dir.as_path()),
@@ -691,6 +676,7 @@ impl Config {
             }
             Err(e) => {
                 let mut def = Self::default();
+                def.memory = merged_memory;
                 def.skills = crate::core::skills::discover_skills(
                     &def.app.skills_dir,
                     Some(ws_skills_dir.as_path()),

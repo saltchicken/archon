@@ -6,7 +6,7 @@ mod execute_command;
 mod fetch_url;
 mod fs;
 mod git;
-mod personal_intelligence;
+mod memory;
 mod read_file;
 mod repo_map;
 mod search;
@@ -445,14 +445,7 @@ pub fn call_signature(call: &ToolCall) -> String {
     let args = &call.function.arguments;
 
     let sub = match name {
-        "git"
-        | "cargo"
-        | "fs"
-        | "repo_map"
-        | "dotfiles"
-        | "system"
-        | "skill"
-        | "personal_intelligence" => {
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" | "memory" => {
             let raw = args
                 .get("action")
                 .and_then(Value::as_str)
@@ -460,8 +453,10 @@ pub fn call_signature(call: &ToolCall) -> String {
                 .trim();
             if name == "skill" && matches!(raw, "edit" | "update") {
                 "modify".to_string()
-            } else if name == "personal_intelligence" && raw == "get" {
+            } else if name == "memory" && raw == "get" {
                 "read".to_string()
+            } else if name == "memory" && matches!(raw, "delete" | "rm") {
+                "remove".to_string()
             } else {
                 raw.to_string()
             }
@@ -627,27 +622,19 @@ fn format_skill_approval(mut out: String, args: &Value, obj: &Map<String, Value>
     out.trim_end().to_string()
 }
 
-fn format_personal_intelligence_approval(
-    mut out: String,
-    args: &Value,
-    obj: &Map<String, Value>,
-) -> String {
+fn format_memory_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
     append_filtered_kvs(&mut out, obj, &[]);
 
-    if let Ok(parsed) = parse_args::<personal_intelligence::PersonalIntelligenceArgs>(
-        args,
-        personal_intelligence::Tool::NAME,
-    ) && let Ok(ctx) = ToolContext::from_cwd()
+    if let Ok(parsed) = parse_args::<memory::MemoryArgs>(args, memory::Tool::NAME)
+        && let Ok(ctx) = ToolContext::from_cwd()
         && !matches!(
             parsed.action,
-            personal_intelligence::PersonalIntelligenceAction::List
-                | personal_intelligence::PersonalIntelligenceAction::Read
+            memory::MemoryAction::List | memory::MemoryAction::Read
         )
     {
         append_diff_result(
             &mut out,
-            personal_intelligence::preview_mutation(&parsed, &ctx)
-                .map(|(_, d, o, u, _)| (d, o, u, None)),
+            memory::preview_mutation(&parsed, &ctx).map(|(_, d, o, u, _)| (d, o, u, None)),
         );
     }
     out.trim_end().to_string()
@@ -671,7 +658,7 @@ pub fn format_approval(call: &ToolCall) -> String {
         "fs" => return format_fs_approval(out, args, obj),
         "dotfiles" => return format_dotfiles_approval(out, args, obj),
         "skill" => return format_skill_approval(out, args, obj),
-        "personal_intelligence" => return format_personal_intelligence_approval(out, args, obj),
+        "memory" => return format_memory_approval(out, args, obj),
         _ => {}
     }
 
@@ -772,7 +759,7 @@ register_tools! {
     async: fetch_url,
     blocking: fs,
     async: git,
-    blocking: personal_intelligence,
+    blocking: memory,
     blocking: read_file,
     blocking: repo_map,
     blocking: search,

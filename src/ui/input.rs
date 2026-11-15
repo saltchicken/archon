@@ -2,8 +2,7 @@ use super::{
     ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
 };
 use crate::core::{
-    EngineCommand, attachments::copy_text_to_clipboard, config::PersonalIntelligence,
-    session::ChatMessage,
+    EngineCommand, attachments::copy_text_to_clipboard, config::Memory, session::ChatMessage,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
@@ -91,7 +90,7 @@ impl TuiApp {
                     .unwrap_or_default();
             }
             ActiveModal::SystemPrompt => return self.sys_prompt_area.lines().join("\n"),
-            ActiveModal::PersonalIntelligence => return self.pi_area.lines().join("\n"),
+            ActiveModal::Memory => return self.memory_area.lines().join("\n"),
             ActiveModal::AddFile => return self.file_path_input.clone(),
             ActiveModal::Sessions => {
                 return self
@@ -292,9 +291,7 @@ impl TuiApp {
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
-            ActiveModal::PersonalIntelligence => {
-                self.handle_personal_intelligence_key(key, ctrl, shift)
-            }
+            ActiveModal::Memory => self.handle_memory_key(key, ctrl, shift),
             ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
         false
@@ -443,27 +440,27 @@ impl TuiApp {
         }
     }
 
-    fn handle_personal_intelligence_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
+    fn handle_memory_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
         match key.code {
             KeyCode::Esc => self.modal = ActiveModal::None,
             KeyCode::Char('e') if ctrl => {
-                self.pi_enabled_draft = !self.pi_enabled_draft;
+                self.memory_enabled_draft = !self.memory_enabled_draft;
             }
             KeyCode::Char('x') if ctrl => {
-                self.pi_area = super::create_pi_area("");
+                self.memory_area = super::create_memory_area("");
             }
             KeyCode::Enter if shift => {
-                self.pi_area.insert_newline();
+                self.memory_area.insert_newline();
             }
             KeyCode::Enter => {
-                let raw_text = self.pi_area.lines().join("\n");
-                let pi = PersonalIntelligence::from_editor_text(&raw_text, self.pi_enabled_draft);
-                self.config.personal_intelligence = pi.clone();
+                let raw_text = self.memory_area.lines().join("\n");
+                let mem = Memory::from_editor_text(&raw_text, self.memory_enabled_draft);
+                self.config.memory = mem.clone();
                 self.modal = ActiveModal::None;
-                let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
+                let _ = self.cmd_tx.send(EngineCommand::SetMemory(mem));
             }
             _ => {
-                self.pi_area.input(key);
+                self.memory_area.input(key);
             }
         }
     }
@@ -564,7 +561,7 @@ impl TuiApp {
                 self.modal = ActiveModal::SystemPrompt;
             }
             KeyCode::Char('p') if ctrl => {
-                self.open_personal_intelligence_modal();
+                self.open_memory_modal();
             }
             _ => {
                 self.prompt_history_idx = None;

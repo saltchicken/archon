@@ -241,18 +241,18 @@ impl TuiApp {
         );
     }
 
-    pub(super) fn draw_personal_intelligence_modal(&mut self, f: &mut Frame) {
-        self.pi_area.set_cursor_style(super::cursor_style(
+    pub(super) fn draw_memory_modal(&mut self, f: &mut Frame) {
+        self.memory_area.set_cursor_style(super::cursor_style(
             self.term_focused && self.cursor_blink_on,
         ));
-        let (status_label, status_color) = if self.pi_enabled_draft {
+        let (status_label, status_color) = if self.memory_enabled_draft {
             ("ENABLED", Color::Green)
         } else {
             ("DISABLED", Color::Red)
         };
         let header = Line::from(vec![
             Span::styled(
-                "Persistent Personal Intelligence ",
+                "Persistent Memory (MEMORY.md) ",
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw("(Always passed to the model across all sessions) │ "),
@@ -265,9 +265,9 @@ impl TuiApp {
         ]);
         draw_editor_modal(
             f,
-            " Personal Intelligence (^P) ",
+            " Memory (^P) ",
             header,
-            &self.pi_area,
+            &self.memory_area,
             " [^E] Toggle ON/OFF   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Persist   [Esc] Cancel",
         );
     }
