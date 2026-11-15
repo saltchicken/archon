@@ -6,12 +6,16 @@ use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::SystemTime,
 };
 use tree_sitter::{Language, Node, Parser, Tree};
 
 const PAGERANK_ITERATIONS: usize = 25;
 const PAGERANK_DAMPING: f64 = 0.85;
+const MAX_PARSE_CACHE_ENTRIES: usize = 4096;
 
 pub struct Tool;
 
@@ -122,9 +126,21 @@ struct ParsedFile {
     lang: SupportedLang,
     total_lines: usize,
     defs: Vec<SymbolDef>,
-    ident_counts: HashMap<String, usize>,
+    ident_counts: Arc<HashMap<String, usize>>,
     pagerank: f64,
 }
+
+#[derive(Clone)]
+struct CachedParseEntry {
+    modified: SystemTime,
+    len: u64,
+    total_lines: usize,
+    defs: Vec<SymbolDef>,
+    ident_counts: Arc<HashMap<String, usize>>,
+}
+
+static PARSE_CACHE: LazyLock<Mutex<HashMap<PathBuf, CachedParseEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct SymbolMatch {
     display_path: String,
@@ -536,6 +552,29 @@ fn parse_source_file(
     lang: SupportedLang,
     max_file_size: u64,
 ) -> Option<ParsedFile> {
+    let meta = fs::metadata(abs_path).ok()?;
+    let len = meta.len();
+    if len == 0 || len > max_file_size {
+        return None;
+    }
+    let modified = meta.modified().ok();
+
+    if let Some(mtime) = modified
+        && let Ok(cache) = PARSE_CACHE.lock()
+        && let Some(cached) = cache.get(abs_path)
+        && cached.modified == mtime
+        && cached.len == len
+    {
+        return Some(ParsedFile {
+            display_path,
+            lang,
+            total_lines: cached.total_lines,
+            defs: cached.defs.clone(),
+            ident_counts: Arc::clone(&cached.ident_counts),
+            pagerank: 0.0,
+        });
+    }
+
     let (source, tree) = parse_ast_file(parser, abs_path, lang, max_file_size, None)?;
     let root = tree.root_node();
 
@@ -544,11 +583,31 @@ fn parse_source_file(
 
     let mut ident_counts = HashMap::new();
     collect_identifiers(root, &source, &mut ident_counts);
+    let ident_counts = Arc::new(ident_counts);
+    let total_lines = source.lines().count().max(1);
+
+    if let Some(mtime) = modified
+        && let Ok(mut cache) = PARSE_CACHE.lock()
+    {
+        if cache.len() >= MAX_PARSE_CACHE_ENTRIES && !cache.contains_key(abs_path) {
+            cache.clear();
+        }
+        cache.insert(
+            abs_path.to_path_buf(),
+            CachedParseEntry {
+                modified: mtime,
+                len,
+                total_lines,
+                defs: defs.clone(),
+                ident_counts: Arc::clone(&ident_counts),
+            },
+        );
+    }
 
     Some(ParsedFile {
         display_path,
         lang,
-        total_lines: source.lines().count().max(1),
+        total_lines,
         defs,
         ident_counts,
         pagerank: 0.0,
@@ -586,7 +645,7 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
     let mut cross_file_symbol_hits: HashMap<(usize, String), usize> = HashMap::new();
 
     for src_idx in 0..n {
-        for (ident, &count) in &files[src_idx].ident_counts {
+        for (ident, &count) in files[src_idx].ident_counts.iter() {
             let Some(definers) = symbol_definers.get(ident) else {
                 continue;
             };
