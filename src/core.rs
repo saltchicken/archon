@@ -442,8 +442,8 @@ impl CoreEngine {
         // Reserve at least 25% of the context window (minimum 2048 tokens) for prompt overhead and model response.
         let padding_tokens = (ctx_tokens / 4).max(2048);
         let avail_tokens = ctx_tokens.saturating_sub(padding_tokens).max(512);
-        // Roughly ~4 bytes per token, always at least active_max_tool_output_size.
-        (avail_tokens.saturating_mul(4)).max(self.active_max_tool_output_size)
+        // Roughly ~4 bytes per token, capped to fit within the context window budget.
+        avail_tokens.saturating_mul(4)
     }
 
     async fn complete_tool_result(&mut self, tool_name: String, output: String, truncated: bool) {

@@ -792,8 +792,7 @@ fn truncate_at_limit(mut out: String, limit: usize) -> (String, bool) {
 
 fn package_tool_output(raw: String, max_size: usize, full_cap: usize) -> ToolExecutionOutput {
     let raw_bytes = raw.len();
-    let effective_full_cap = full_cap.max(max_size);
-    let (full_output, _) = truncate_at_limit(raw.clone(), effective_full_cap);
+    let (full_output, _) = truncate_at_limit(raw.clone(), full_cap);
     let (truncated_output, truncated) = truncate_at_limit(raw, max_size);
     ToolExecutionOutput {
         truncated_output,
@@ -829,7 +828,7 @@ pub async fn run_manual_command(
         .run_command(program, args, "(Command completed with no output)")
         .await
     {
-        Ok(out) => package_tool_output(out, max_size, capture_limit),
+        Ok(out) => package_tool_output(out, max_size, full_cap),
         Err(e) => {
             let msg = format!("Error: {e}");
             let len = msg.len();
@@ -858,7 +857,7 @@ pub async fn execute(
 
     match dispatch_tool(name, args, config, active_skill, capture_limit).await {
         Ok(out) => {
-            let packaged = package_tool_output(out, max_size, capture_limit);
+            let packaged = package_tool_output(out, max_size, full_cap);
             info!(
                 "Tool '{name}' executed successfully. Raw bytes: {}, Truncated: {}",
                 packaged.raw_bytes, packaged.truncated
