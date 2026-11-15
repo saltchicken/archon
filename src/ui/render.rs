@@ -419,7 +419,7 @@ impl TuiApp {
 
                 if start > 0 {
                     lines.push(Line::from(Span::styled(
-                        format!("    ... ({start} lines above) ..."),
+                        format!("    ... ({start}) ..."),
                         Style::default().fg(Color::Blue),
                     )));
                 }
@@ -427,7 +427,7 @@ impl TuiApp {
                 if end < total_content {
                     lines.push(Line::from(Span::styled(
                         format!(
-                            "    ... ({} lines below - Click to unfold) ...",
+                            "    ... ({}) ...",
                             total_content - end
                         ),
                         Style::default().fg(Color::Blue),
