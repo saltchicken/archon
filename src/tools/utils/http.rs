@@ -103,25 +103,83 @@ pub fn build_pinned_client(url: &Url, addrs: &[SocketAddr]) -> Result<Client> {
     Ok(builder.build()?)
 }
 
+fn decode_entity_token(entity: &str) -> Option<char> {
+    let code = if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        entity.strip_prefix('#')?.parse::<u32>().ok()?
+    };
+
+    match char::from_u32(code)? {
+        '\0' => None,
+        '\u{00A0}' => Some(' '),
+        ch => Some(ch),
+    }
+}
+
+fn decode_named_entity(entity: &str) -> Option<&'static str> {
+    match entity {
+        "nbsp" => Some(" "),
+        "amp" => Some("\x26"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "quot" => Some("\""),
+        "apos" => Some("'"),
+        "mdash" => Some("—"),
+        "ndash" => Some("–"),
+        "hellip" => Some("…"),
+        "rsquo" => Some("’"),
+        "lsquo" => Some("‘"),
+        "rdquo" => Some("”"),
+        "ldquo" => Some("“"),
+        "copy" => Some("©"),
+        "reg" => Some("®"),
+        "trade" => Some("™"),
+        "bull" => Some("•"),
+        "rarr" => Some("->"),
+        "larr" => Some("<-"),
+        "times" => Some("×"),
+        "minus" => Some("−"),
+        _ => None,
+    }
+}
+
 pub fn decode_entities(s: &str) -> String {
-    // Using `\x26` for `&` prevents browsers/clipboards from decoding HTML entities when copying code
-    const ENTITIES: &[(&str, &str)] = &[
-        ("\x26nbsp;", " "),
-        ("\x26#160;", " "),
-        ("\x26amp;", "\x26"),
-        ("\x26lt;", "<"),
-        ("\x26gt;", ">"),
-        ("\x26quot;", "\""),
-        ("\x26#39;", "'"),
-        ("\x26#x27;", "'"),
-        ("\x26#x2F;", "/"),
-        ("\x26apos;", "'"),
-        ("\x26mdash;", "—"),
-        ("\x26ndash;", "–"),
-        ("\x26rarr;", "->"),
-        ("\x26larr;", "<-"),
-    ];
-    ENTITIES
-        .iter()
-        .fold(s.to_string(), |acc, (k, v)| acc.replace(k, v))
+    if !s.contains('\x26') {
+        return s.to_string();
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+
+    while let Some(amp_idx) = rest.find('\x26') {
+        out.push_str(&rest[..amp_idx]);
+        let after_amp = &rest[amp_idx + 1..];
+        let window = &after_amp[..after_amp.floor_char_boundary(12)];
+
+        if let Some(semi_idx) = window.find(';') {
+            let token = &window[..semi_idx];
+            if let Some(replacement) = decode_named_entity(token)
+                .or_else(|| decode_named_entity(&token.to_ascii_lowercase()))
+            {
+                out.push_str(replacement);
+                rest = &after_amp[semi_idx + 1..];
+                continue;
+            }
+            if let Some(ch) = decode_entity_token(token) {
+                out.push(ch);
+                rest = &after_amp[semi_idx + 1..];
+                continue;
+            }
+        }
+
+        out.push('\x26');
+        rest = after_amp;
+    }
+
+    out.push_str(rest);
+    out
 }
