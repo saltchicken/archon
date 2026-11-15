@@ -400,7 +400,7 @@ impl TuiApp {
         }
         if state.collapsed {
             header_spans.push(Span::styled(
-                format!("[+ {total_content} lines collapsed]"),
+                format!("[+ {total_content}]"),
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
