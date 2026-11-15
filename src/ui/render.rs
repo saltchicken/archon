@@ -473,6 +473,7 @@ impl TuiApp {
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::Memory => self.draw_memory_modal(f),
+            ActiveModal::PayloadInspector => self.draw_payload_inspector_modal(f),
             ActiveModal::None => {}
         }
 
@@ -484,7 +485,7 @@ impl TuiApp {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(10), Constraint::Min(6)])
+            .constraints([Constraint::Length(11), Constraint::Min(6)])
             .split(area);
 
         let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
@@ -516,6 +517,7 @@ impl TuiApp {
             Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
             Line::from(format!("System:  {} (^Y)", self.current_system_label())),
             Line::from(format!("Memory:  {} (^P)", self.current_memory_label())),
+            Line::from("Inspect: Payload (^G)"),
         ];
         f.render_widget(
             Paragraph::new(settings_text)

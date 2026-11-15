@@ -62,11 +62,13 @@ pub(super) enum ActiveModal {
     ModelSelect,
     SystemPrompt,
     Memory,
+    PayloadInspector,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
     Exit,
+    Inspect,
     Memory,
     Reset,
     Run,
@@ -75,6 +77,7 @@ pub(super) enum SlashCommand {
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
         ("exit", Self::Exit),
+        ("inspect", Self::Inspect),
         ("memory", Self::Memory),
         ("reset", Self::Reset),
         ("run", Self::Run),
@@ -214,6 +217,8 @@ pub struct TuiApp {
     pub(super) session_idx: usize,
     pub(super) pending_tool: Option<(String, usize, usize)>,
     pub(super) tool_feedback: String,
+    pub(super) last_payload_preview: String,
+    pub(super) payload_scroll: u16,
 }
 
 fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
@@ -333,6 +338,8 @@ impl TuiApp {
             session_idx: 0,
             pending_tool: None,
             tool_feedback: String::new(),
+            last_payload_preview: String::new(),
+            payload_scroll: 0,
         }
     }
 
@@ -377,7 +384,9 @@ impl TuiApp {
                         self.prompt_history_idx = None;
                         self.text_area.insert_str(text.replace('\r', ""));
                     }
-                    ActiveModal::Sessions | ActiveModal::ModelSelect => {}
+                    ActiveModal::Sessions
+                    | ActiveModal::ModelSelect
+                    | ActiveModal::PayloadInspector => {}
                 }
             }
             Event::FocusGained => {
@@ -623,6 +632,14 @@ impl TuiApp {
                     self.model_idx = idx;
                 }
             }
+            EngineEvent::PayloadCaptured(preview) => {
+                self.last_payload_preview = preview;
+            }
+            EngineEvent::PayloadInspectorOpened(preview) => {
+                self.last_payload_preview = preview;
+                self.payload_scroll = 0;
+                self.modal = ActiveModal::PayloadInspector;
+            }
         }
     }
 
@@ -708,6 +725,14 @@ impl TuiApp {
         self.memory_area = create_memory_area(&global_mem.to_editor_text());
         self.memory_enabled_draft = self.config.memory.enabled;
         self.modal = ActiveModal::Memory;
+    }
+
+    pub(super) fn request_payload_inspector(&mut self) {
+        let draft_prompt = self.text_area.lines().join("\n");
+        let _ = self.cmd_tx.send(EngineCommand::InspectPayload {
+            draft_prompt,
+            turn: self.current_turn_config(),
+        });
     }
 
     pub(super) fn is_prompt_empty(&self) -> bool {
@@ -811,6 +836,11 @@ impl TuiApp {
                 }
                 Some(_) if !args.is_empty() => return false,
                 Some(SlashCommand::Exit) => return true,
+                Some(SlashCommand::Inspect) => {
+                    self.record_prompt_and_clear(&raw_prompt);
+                    self.request_payload_inspector();
+                    return false;
+                }
                 Some(SlashCommand::Reset) => {
                     self.record_prompt_and_clear(&raw_prompt);
                     self.scroll_to_bottom();

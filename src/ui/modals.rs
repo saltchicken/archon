@@ -272,6 +272,38 @@ impl TuiApp {
         );
     }
 
+    pub(super) fn draw_payload_inspector_modal(&mut self, f: &mut Frame) {
+        let area = centered_rect(85, 80, f.area());
+        f.render_widget(Clear, area);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(6), Constraint::Length(2)])
+            .split(area);
+
+        let lines = format_tool_preview_lines(&self.last_payload_preview);
+        let inner_h = chunks[0].height.saturating_sub(2).max(1);
+        let max_scroll = (lines.len() as u16).saturating_sub(inner_h);
+        self.payload_scroll = self.payload_scroll.min(max_scroll);
+
+        let widget = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((self.payload_scroll, 0))
+            .block(
+                chat_block(" Outgoing Payload & System Prompt Inspector (^G / /inspect) ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            );
+        f.render_widget(widget, chunks[0]);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " [↑/↓/PgUp/PgDn/Home/End] Scroll   [C] Copy to Clipboard   [Esc/^G] Close",
+                Style::default().fg(Color::Yellow),
+            ))),
+            chunks[1],
+        );
+    }
+
     pub(super) fn draw_context_menu(&self, f: &mut Frame, menu: &super::ContextMenu) {
         let area = menu.rect(f.area());
         let items: Vec<ListItem> = menu

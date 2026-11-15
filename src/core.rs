@@ -65,6 +65,10 @@ pub enum EngineCommand {
         command: String,
         include_in_context: bool,
     },
+    InspectPayload {
+        draft_prompt: String,
+        turn: TurnConfig,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +119,8 @@ pub enum EngineEvent {
         num_ctx: u32,
         max_tool_output_size: usize,
     },
+    PayloadCaptured(String),
+    PayloadInspectorOpened(String),
 }
 
 struct QueuedInterjection {
@@ -914,6 +920,64 @@ impl CoreEngine {
                         include_in_context,
                     });
                 }));
+            }
+            EngineCommand::InspectPayload {
+                draft_prompt,
+                mut turn,
+            } => {
+                let mut preview_msgs = self
+                    .messages
+                    .iter()
+                    .map(ChatMessage::with_ui_image_placeholders)
+                    .collect::<Vec<_>>();
+
+                let trimmed_draft = draft_prompt.trim();
+                let effective_draft = if !trimmed_draft.is_empty()
+                    && !trimmed_draft.starts_with('/')
+                    && !trimmed_draft.starts_with('!')
+                {
+                    let user_content = if let Some((cmd_token, args_str)) =
+                        skills::parse_at_command(trimmed_draft)
+                    {
+                        if let Ok(skill_name) = skills::check_skill_activation(
+                            cmd_token,
+                            turn.enable_tools,
+                            &self.config,
+                        ) {
+                            turn.active_skill = Some(skill_name);
+                            turn.skill_args =
+                                (!args_str.is_empty()).then(|| args_str.to_string());
+                        }
+                        if args_str.is_empty() {
+                            trimmed_draft.to_string()
+                        } else {
+                            args_str.to_string()
+                        }
+                    } else {
+                        trimmed_draft.to_string()
+                    };
+                    preview_msgs.push(ChatMessage::new("user", user_content.clone()));
+                    Some(user_content)
+                } else {
+                    None
+                };
+
+                let (effective_sys, sanitized_msgs, payload) = self.provider.build_turn_payload(
+                    &self.model,
+                    &self.config,
+                    preview_msgs,
+                    &turn,
+                );
+                let formatted = provider::format_payload_inspection(
+                    self.provider,
+                    &self.model,
+                    &turn,
+                    &effective_sys,
+                    &sanitized_msgs,
+                    &payload,
+                    effective_draft.as_deref(),
+                );
+                let _ = self.tx.send(EngineEvent::PayloadInspectorOpened(formatted));
             }
         }
     }
