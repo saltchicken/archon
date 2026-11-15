@@ -26,10 +26,29 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     )
 }
 
-fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget: W) {
-    let area = centered_rect(percent_x, percent_y, f.area());
+fn top_right_rect(
+    percent_x: u16,
+    percent_y: u16,
+    min_width: u16,
+    min_height: u16,
+    r: Rect,
+) -> Rect {
+    let width = (r.width.saturating_mul(percent_x) / 100)
+        .max(min_width)
+        .min(r.width);
+    let height = (r.height.saturating_mul(percent_y) / 100)
+        .max(min_height)
+        .min(r.height);
+    Rect::new(r.x + r.width.saturating_sub(width), r.y, width, height)
+}
+
+fn render_modal_at<W: Widget>(f: &mut Frame, area: Rect, widget: W) {
     f.render_widget(Clear, area);
     f.render_widget(widget, area);
+}
+
+fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget: W) {
+    render_modal_at(f, centered_rect(percent_x, percent_y, f.area()), widget);
 }
 
 fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
@@ -187,7 +206,8 @@ impl TuiApp {
                 ))
                 .border_style(Style::default().fg(Color::Yellow)),
             );
-        render_modal(f, 80, 75, widget);
+        let area = top_right_rect(45, 45, 60, 16, f.area());
+        render_modal_at(f, area, widget);
     }
 
     pub(super) fn draw_system_prompt_modal(&self, f: &mut Frame) {
