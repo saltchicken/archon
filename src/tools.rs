@@ -2,7 +2,6 @@ mod cargo;
 mod create_file;
 mod dotfiles;
 mod edit_file;
-mod execute_command;
 mod fetch_url;
 mod fs;
 mod git;
@@ -461,11 +460,6 @@ pub fn call_signature(call: &ToolCall) -> String {
                 raw.to_string()
             }
         }
-        "execute_command" => {
-            shlex::split(args.get("command").and_then(Value::as_str).unwrap_or(""))
-                .and_then(|parts| parts.into_iter().next())
-                .unwrap_or_default()
-        }
         _ => String::new(),
     };
 
@@ -755,7 +749,6 @@ register_tools! {
     blocking: create_file,
     blocking: dotfiles,
     blocking: edit_file,
-    async: execute_command,
     async: fetch_url,
     blocking: fs,
     async: git,

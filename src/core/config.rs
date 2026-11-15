@@ -197,7 +197,6 @@ pub struct Config {
     pub app: AppSettings,
     #[serde(skip)]
     pub memory: Memory,
-    pub execute_command: ExecuteCommandSettings,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
@@ -220,12 +219,6 @@ pub struct AppSettings {
     pub skills_dir: String,
     pub enabled_tools: Vec<String>,
     pub auto_approve: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ExecuteCommandSettings {
-    pub allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,16 +314,6 @@ impl Default for AppSettings {
     }
 }
 
-impl Default for ExecuteCommandSettings {
-    fn default() -> Self {
-        Self {
-            allowed_commands: ["ls", "cat", "echo", "pwd", "grep", "head", "tail", "wc"]
-                .map(String::from)
-                .into(),
-        }
-    }
-}
-
 impl Default for WorkspaceSnapshotSettings {
     fn default() -> Self {
         Self {
@@ -358,7 +341,6 @@ impl Default for Config {
         Self {
             app: AppSettings::default(),
             memory: Memory::default(),
-            execute_command: ExecuteCommandSettings::default(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: EndpointSettings {
                 api_key: String::new(),
@@ -562,7 +544,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# Overrides ~/.config/archon/config.toml for this directory.\n",
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
-            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"execute_command\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"web_search\", \"workspace_snapshot\"]\n\n",
+            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"web_search\", \"workspace_snapshot\"]\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
             "# tree_only = false\n",
