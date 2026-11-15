@@ -33,13 +33,21 @@ fn top_right_rect(
     min_height: u16,
     r: Rect,
 ) -> Rect {
+    let margin_x = 3.min(r.width / 10);
+    let margin_y = 2.min(r.height / 10);
+    let avail_w = r.width.saturating_sub(margin_x * 2);
+    let avail_h = r.height.saturating_sub(margin_y * 2);
+
     let width = (r.width.saturating_mul(percent_x) / 100)
         .max(min_width)
-        .min(r.width);
+        .min(avail_w.max(1));
     let height = (r.height.saturating_mul(percent_y) / 100)
         .max(min_height)
-        .min(r.height);
-    Rect::new(r.x + r.width.saturating_sub(width), r.y, width, height)
+        .min(avail_h.max(1));
+
+    let x = r.x + r.width.saturating_sub(width.saturating_add(margin_x));
+    let y = r.y + margin_y.min(r.height.saturating_sub(height));
+    Rect::new(x, y, width, height)
 }
 
 fn render_modal_at<W: Widget>(f: &mut Frame, area: Rect, widget: W) {
@@ -206,7 +214,7 @@ impl TuiApp {
                 ))
                 .border_style(Style::default().fg(Color::Yellow)),
             );
-        let area = top_right_rect(45, 45, 60, 16, f.area());
+        let area = top_right_rect(55, 55, 72, 20, f.area());
         render_modal_at(f, area, widget);
     }
 
