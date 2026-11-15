@@ -24,13 +24,17 @@ enum CargoAction {
     Doc,
     /// Inspect workspace packages and resolved metadata (`cargo metadata --locked --no-deps --format-version 1`).
     Metadata,
+    /// Display information about a package in the registry or dependency graph (`cargo info --locked <package>`).
+    Info,
+    /// Display the dependency tree (`cargo tree --locked`).
+    Tree,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CargoArgs {
     /// The Cargo action to run.
     action: CargoAction,
-    /// Optional workspace package name (`--package <name>`).
+    /// Optional workspace package name (`--package <name>`), or crate name (required when `action` is `info`).
     #[serde(default)]
     package: String,
     /// Optional binary target name (`--bin <name>`).
@@ -60,7 +64,7 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
-    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata) within the workspace.";
+    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
     type Args = CargoArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -108,6 +112,18 @@ impl AsyncTool for Tool {
                     false,
                     "No metadata output.",
                 ),
+                CargoAction::Info => (
+                    &["info", "--locked", "--color", "never"],
+                    false,
+                    false,
+                    "No package information output.",
+                ),
+                CargoAction::Tree => (
+                    &["tree", "--locked", "--color", "never"],
+                    true,
+                    false,
+                    "No dependency tree output.",
+                ),
             };
 
         let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
@@ -118,6 +134,13 @@ impl AsyncTool for Tool {
             if allow_bin && let Some(bin) = validate_identifier(&args.bin, "bin")? {
                 cmd_args.extend(["--bin".into(), bin.into()]);
             }
+        }
+
+        if matches!(args.action, CargoAction::Info) {
+            let Some(pkg) = validate_identifier(&args.package, "package")? else {
+                bail!("'package' is required for cargo info");
+            };
+            cmd_args.push(pkg.into());
         }
 
         if matches!(args.action, CargoAction::Test) {
