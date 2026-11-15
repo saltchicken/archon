@@ -467,7 +467,17 @@ impl TuiApp {
                 self.finish_stream();
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
-            EngineEvent::StreamError(_) => self.finish_stream(),
+            EngineEvent::StreamError(err) => {
+                let partial = std::mem::take(&mut self.streaming_text);
+                self.finish_stream();
+                if !partial.trim().is_empty() {
+                    self.messages.push(ChatMessage::new(
+                        "assistant",
+                        format!("{partial}\n\n*[Stream interrupted]*"),
+                    ));
+                }
+                self.push_error_message(err);
+            }
             EngineEvent::ToolStarted {
                 summary,
                 index,
@@ -520,6 +530,19 @@ impl TuiApp {
         self.active_tool_status = None;
         self.styled_stream.clear();
         self.stream_dirty = false;
+    }
+
+    fn push_error_message(&mut self, err: String) {
+        self.messages.push(ChatMessage::new("error", err));
+        self.styled_messages.clear();
+        self.msg_states.resize(
+            self.messages.len() + 1 + self.queued_messages.len(),
+            MsgUiState::default(),
+        );
+        if let Some(last_idx) = self.messages.len().checked_sub(1) {
+            self.msg_states[last_idx].unfolded = true;
+        }
+        self.scroll_to_bottom();
     }
 
     fn sync_system_prompt(&mut self, system_prompt: &str) {
@@ -674,11 +697,12 @@ impl TuiApp {
         let prompt = if let Some((skill_name, user_prompt)) =
             crate::core::skills::expand_at_command(&raw_prompt, &self.config)
         {
-            if !crate::core::skills::can_activate_skill(
+            if let Err(reason) = crate::core::skills::check_skill_activation(
                 &skill_name,
                 self.enable_tools,
                 &self.config,
             ) {
+                self.push_error_message(reason);
                 return false;
             }
             let args = raw_prompt

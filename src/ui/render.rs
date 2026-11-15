@@ -585,6 +585,7 @@ impl TuiApp {
             let (header_label, color) = match m.role.as_str() {
                 "user" => (format!("USER{}", image_badge(m)), Color::LightGreen),
                 "assistant" => ("ARCHON".to_string(), Color::Green),
+                "error" => ("⚠ ERROR".to_string(), Color::LightRed),
                 "local" => {
                     let label = if m.include_in_context {
                         "SHELL [+CTX]"

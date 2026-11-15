@@ -534,8 +534,11 @@ impl CoreEngine {
             }
             EngineCommand::SendPrompt { prompt, turn } => {
                 if let Some(ref skill_name) = turn.active_skill
-                    && !skills::can_activate_skill(skill_name, turn.enable_tools, &self.config)
+                    && let Err(reason) =
+                        skills::check_skill_activation(skill_name, turn.enable_tools, &self.config)
                 {
+                    warn!("{reason}");
+                    let _ = self.tx.send(EngineEvent::StreamError(reason));
                     return;
                 }
 
@@ -751,6 +754,9 @@ impl CoreEngine {
                     || !self.pending_tools.is_empty()
                     || !self.queued_interjections.is_empty()
                 {
+                    let _ = self.tx.send(EngineEvent::StreamError(
+                        "Cannot switch models while a turn or tool approval is active.".into(),
+                    ));
                     return;
                 }
 
@@ -761,12 +767,20 @@ impl CoreEngine {
                 );
 
                 if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
-                    error!("Hot-swap preflight failed for '{}': {}", model, e);
+                    let msg = format!("Model switch to '{model}' failed preflight: {e}");
+                    error!("{msg}");
+                    let _ = self.tx.send(EngineEvent::StreamError(msg));
                     return;
                 }
 
-                let Ok(new_client) = new_provider.build_client(&self.config) else {
-                    return;
+                let new_client = match new_provider.build_client(&self.config) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let msg = format!("Failed to build HTTP client for '{model}': {e}");
+                        error!("{msg}");
+                        let _ = self.tx.send(EngineEvent::StreamError(msg));
+                        return;
+                    }
                 };
 
                 self.model = model;

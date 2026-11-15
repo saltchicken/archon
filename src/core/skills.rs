@@ -211,11 +211,29 @@ pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<Stri
     missing
 }
 
-pub fn can_activate_skill(skill_name: &str, enable_tools: bool, config: &Config) -> bool {
+pub fn check_skill_activation(
+    skill_name: &str,
+    enable_tools: bool,
+    config: &Config,
+) -> std::result::Result<(), String> {
     let Some(skill) = find_skill(config, skill_name) else {
-        return false;
+        return Err(format!("Skill '@{skill_name}' not found."));
     };
-    (skill.tools.is_empty() || enable_tools) && missing_skill_tools(skill, config).is_empty()
+    if !skill.tools.is_empty() && !enable_tools {
+        return Err(format!(
+            "Cannot activate skill '@{}': tools are currently disabled (press ^T to enable tools).",
+            skill.name
+        ));
+    }
+    let missing = missing_skill_tools(skill, config);
+    if !missing.is_empty() {
+        return Err(format!(
+            "Cannot activate skill '@{}': required tool(s) [{}] are not in `app.enabled_tools` in config.toml.",
+            skill.name,
+            missing.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
