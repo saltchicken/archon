@@ -407,7 +407,6 @@ impl TuiApp {
             ));
         }
         lines.push(Line::from(header_spans));
-        lines.push(Line::from(""));
 
         let is_truncated = !state.collapsed && total_content > max_lines;
 
@@ -422,20 +421,22 @@ impl TuiApp {
                         format!("    ... ({start}) ..."),
                         Style::default().fg(Color::Blue),
                     )));
+                } else {
+                    lines.push(Line::from(""));
                 }
                 lines.extend_from_slice(&styled_content[start..end]);
                 if end < total_content {
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            "    ... ({}) ...",
-                            total_content - end
-                        ),
+                        format!("    ... ({}) ...", total_content - end),
                         Style::default().fg(Color::Blue),
                     )));
                 }
             } else {
+                lines.push(Line::from(""));
                 lines.extend_from_slice(styled_content);
             }
+        } else {
+            lines.push(Line::from(""));
         }
 
         lines.push(Line::from(""));
