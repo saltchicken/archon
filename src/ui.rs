@@ -340,8 +340,8 @@ impl TuiApp {
         let mut render_tick = tokio::time::interval(Duration::from_millis(16));
         render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        // 500ms cursor blink ticker so the cursor blinks reliably across all terminal emulators
-        let mut blink_tick = tokio::time::interval(Duration::from_millis(500));
+        // 800ms cursor blink ticker so the cursor blinks reliably across all terminal emulators
+        let mut blink_tick = tokio::time::interval(Duration::from_millis(800));
         blink_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         let mut dirty = true;
