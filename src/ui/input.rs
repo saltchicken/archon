@@ -164,6 +164,8 @@ impl TuiApp {
             KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
             KeyCode::Enter => {
                 if let Some(s) = self.sessions.get(self.session_idx) {
+                    self.prompt_history.clear();
+                    self.prompt_history_idx = None;
                     let _ = self.cmd_tx.send(EngineCommand::LoadSession(s.id.clone()));
                     self.modal = ActiveModal::None;
                 }
@@ -295,9 +297,39 @@ impl TuiApp {
             KeyCode::PageDown => self.scroll_chat(page_step),
             KeyCode::Up if alt => self.scroll_chat(-3),
             KeyCode::Down if alt => self.scroll_chat(3),
+            KeyCode::Up if !ctrl && !shift => {
+                if self.is_prompt_empty() {
+                    if let Some(idx) = self.prompt_history.len().checked_sub(1) {
+                        self.prompt_history_idx = Some(idx);
+                        self.text_area = super::create_text_area_with(&self.prompt_history[idx]);
+                    }
+                } else if let Some(idx) = self.prompt_history_idx {
+                    let prev_idx = idx.saturating_sub(1);
+                    self.prompt_history_idx = Some(prev_idx);
+                    self.text_area = super::create_text_area_with(&self.prompt_history[prev_idx]);
+                } else {
+                    self.text_area.input(key);
+                }
+            }
+            KeyCode::Down if !ctrl && !shift => {
+                if let Some(idx) = self.prompt_history_idx {
+                    if idx + 1 < self.prompt_history.len() {
+                        let next_idx = idx + 1;
+                        self.prompt_history_idx = Some(next_idx);
+                        self.text_area =
+                            super::create_text_area_with(&self.prompt_history[next_idx]);
+                    } else {
+                        self.prompt_history_idx = None;
+                        self.text_area = super::create_text_area();
+                    }
+                } else {
+                    self.text_area.input(key);
+                }
+            }
             KeyCode::Home if ctrl => self.scroll_chat(isize::MIN),
             KeyCode::End if ctrl => self.scroll_to_bottom(),
             KeyCode::Enter if shift => {
+                self.prompt_history_idx = None;
                 self.text_area.insert_newline();
             }
             KeyCode::Enter => return self.submit_prompt(),
@@ -335,6 +367,7 @@ impl TuiApp {
                 self.open_personal_intelligence_modal();
             }
             _ => {
+                self.prompt_history_idx = None;
                 self.text_area.input(key);
             }
         }

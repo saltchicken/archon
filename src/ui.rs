@@ -30,7 +30,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Padding},
 };
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 use std::{io, time::Duration};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -129,6 +129,8 @@ pub struct TuiApp {
     pub(super) max_tool_output_size: usize,
     pub(super) used_tokens: u64,
     pub(super) text_area: TextArea<'static>,
+    pub(super) prompt_history: Vec<String>,
+    pub(super) prompt_history_idx: Option<usize>,
 
     pub(super) chat_scroll: usize,
     pub(super) follow_tail: bool,
@@ -174,6 +176,15 @@ pub(super) fn cursor_style(visible: bool) -> Style {
 
 pub(super) fn create_text_area() -> TextArea<'static> {
     create_editor_area(" Prompt ", "")
+}
+
+pub(super) fn create_text_area_with(initial: &str) -> TextArea<'static> {
+    let mut ta = create_editor_area(" Prompt ", initial);
+    if !initial.is_empty() {
+        ta.move_cursor(CursorMove::Bottom);
+        ta.move_cursor(CursorMove::End);
+    }
+    ta
 }
 
 pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
@@ -239,6 +250,8 @@ impl TuiApp {
             max_tool_output_size,
             used_tokens: 0,
             text_area: create_text_area(),
+            prompt_history: Vec::new(),
+            prompt_history_idx: None,
             chat_scroll: 0,
             follow_tail: true,
             tool_scroll: 0,
@@ -296,6 +309,7 @@ impl TuiApp {
                         self.pi_area.insert_str(text.replace('\r', ""));
                     }
                     ActiveModal::None => {
+                        self.prompt_history_idx = None;
                         self.text_area.insert_str(text.replace('\r', ""));
                     }
                     ActiveModal::Sessions | ActiveModal::ModelSelect => {}
@@ -414,6 +428,17 @@ impl TuiApp {
             } => {
                 if messages.is_empty() {
                     self.used_tokens = 0;
+                }
+                if self.prompt_history.is_empty() {
+                    for m in &messages {
+                        let trimmed = m.content.trim();
+                        if m.role == "user"
+                            && !trimmed.is_empty()
+                            && self.prompt_history.last().is_none_or(|last| last != trimmed)
+                        {
+                            self.prompt_history.push(trimmed.to_string());
+                        }
+                    }
                 }
                 self.messages = messages;
                 self.queued_messages = queued_messages;
@@ -606,11 +631,28 @@ impl TuiApp {
         self.modal = ActiveModal::PersonalIntelligence;
     }
 
-    fn dispatch_shell_command(&mut self, command: &str, include_in_context: bool) {
+    pub(super) fn is_prompt_empty(&self) -> bool {
+        self.text_area.lines().iter().all(String::is_empty)
+    }
+
+    fn record_prompt_and_clear(&mut self, raw_prompt: &str) {
+        self.prompt_history_idx = None;
+        if !raw_prompt.is_empty()
+            && self
+                .prompt_history
+                .last()
+                .is_none_or(|last| last != raw_prompt)
+        {
+            self.prompt_history.push(raw_prompt.to_string());
+        }
+        self.text_area = create_text_area();
+    }
+
+    fn dispatch_shell_command(&mut self, raw_prompt: &str, command: &str, include_in_context: bool) {
         if command.is_empty() {
             return;
         }
-        self.text_area = create_text_area();
+        self.record_prompt_and_clear(raw_prompt);
         self.scroll_to_bottom();
         let _ = self.cmd_tx.send(EngineCommand::RunShellCommand {
             command: command.to_string(),
@@ -629,7 +671,7 @@ impl TuiApp {
                 Some(ctx_cmd) => (true, ctx_cmd.trim()),
                 None => (false, rest.trim()),
             };
-            self.dispatch_shell_command(shell_cmd, include_in_context);
+            self.dispatch_shell_command(&raw_prompt, shell_cmd, include_in_context);
             return false;
         }
 
@@ -648,11 +690,11 @@ impl TuiApp {
                     } else {
                         (false, args)
                     };
-                    self.dispatch_shell_command(cmd_args, include_in_context);
+                    self.dispatch_shell_command(&raw_prompt, cmd_args, include_in_context);
                     return false;
                 }
                 Some(SlashCommand::Intel) => {
-                    self.text_area = create_text_area();
+                    self.record_prompt_and_clear(&raw_prompt);
                     if args.is_empty() {
                         self.open_personal_intelligence_modal();
                         return false;
@@ -684,7 +726,7 @@ impl TuiApp {
                 Some(_) if !args.is_empty() => return false,
                 Some(SlashCommand::Exit) => return true,
                 Some(SlashCommand::Reset) => {
-                    self.text_area = create_text_area();
+                    self.record_prompt_and_clear(&raw_prompt);
                     self.scroll_to_bottom();
                     let _ = self.cmd_tx.send(EngineCommand::ResetChat);
                     return false;
@@ -715,10 +757,10 @@ impl TuiApp {
             turn.skill_args = args;
             user_prompt
         } else {
-            raw_prompt
+            raw_prompt.clone()
         };
 
-        self.text_area = create_text_area();
+        self.record_prompt_and_clear(&raw_prompt);
         self.scroll_to_bottom();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt { prompt, turn });
         false
