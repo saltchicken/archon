@@ -466,7 +466,7 @@ impl TuiApp {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Length(3)])
+            .constraints([Constraint::Fill(1), Constraint::Length(3)])
             .split(area);
 
         let lines = format_tool_preview_lines(&self.last_payload_preview);
@@ -524,7 +524,11 @@ fn draw_editor_modal(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
-            Constraint::Min(6),
+            // `Fill(1)` has the lowest layout priority — the header/footer
+            // `Length` rows are satisfied first, then the editor absorbs only
+            // the remainder. `Min(6)` instead claims *all* leftover space,
+            // which on a short terminal can squeeze the hint bar to zero.
+            Constraint::Fill(1),
             Constraint::Length(5),
         ])
         .split(area);
