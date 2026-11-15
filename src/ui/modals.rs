@@ -47,7 +47,7 @@ fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
 }
 
 fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
-    let mut section_color = Color::White;
+    let mut section_color = Color::Blue;
     let mut in_diff = false;
 
     preview
