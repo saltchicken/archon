@@ -583,7 +583,7 @@ impl TuiApp {
 
             let m = &self.messages[i];
             let (header_label, color) = match m.role.as_str() {
-                "user" => (format!("USER{}", image_badge(m)), Color::Cyan),
+                "user" => (format!("USER{}", image_badge(m)), Color::LightGreen),
                 "assistant" => ("ARCHON".to_string(), Color::Green),
                 "local" => {
                     let label = if m.include_in_context {
