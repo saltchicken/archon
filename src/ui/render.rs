@@ -445,6 +445,9 @@ impl TuiApp {
             lines.push(Line::from(""));
         }
 
+        // Blank line(s) between the end of this message and the next header.
+        // Add/remove blank lines here to control the gap.
+        lines.push(Line::from(""));
         lines.push(Line::from(""));
         self.msg_visual_ranges
             .push((idx, start_visual, lines.len(), is_truncated));
