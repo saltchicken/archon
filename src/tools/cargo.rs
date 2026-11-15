@@ -14,8 +14,6 @@ enum CargoAction {
     Check,
     /// Run Clippy lints without modifying code (`cargo clippy --locked --all-targets`).
     Clippy,
-    /// Compile and run unit/integration tests (`cargo test --locked`). Set `no_run: true` to only compile tests.
-    Test,
     /// Verify code formatting without modifying files (`cargo fmt --all --check`).
     FmtCheck,
     /// Format all workspace Rust code in-place (`cargo fmt --all`).
@@ -40,12 +38,6 @@ pub struct CargoArgs {
     /// Optional binary target name (`--bin <name>`).
     #[serde(default)]
     bin: String,
-    /// Optional test name filter (only used when `action` is `test`).
-    #[serde(default)]
-    test_filter: String,
-    /// If true during `test`, compiles test binaries without executing them (`--no-run`).
-    #[serde(default)]
-    no_run: bool,
 }
 
 fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>> {
@@ -64,7 +56,7 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
-    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
+    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
     type Args = CargoArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -81,12 +73,6 @@ impl AsyncTool for Tool {
                     true,
                     true,
                     "cargo clippy passed with no warnings or errors.",
-                ),
-                CargoAction::Test => (
-                    &["test", "--locked", "--color", "never"],
-                    true,
-                    true,
-                    "cargo test completed successfully.",
                 ),
                 CargoAction::FmtCheck => (
                     &["fmt", "--all", "--check"],
@@ -141,18 +127,6 @@ impl AsyncTool for Tool {
                 bail!("'package' is required for cargo info");
             };
             cmd_args.push(pkg.into());
-        }
-
-        if matches!(args.action, CargoAction::Test) {
-            if args.no_run {
-                cmd_args.push("--no-run".into());
-            }
-            if let Some(filter) = validate_identifier(&args.test_filter, "test_filter")? {
-                cmd_args.push(filter.into());
-            }
-            if !args.no_run {
-                cmd_args.extend(["--".into(), "--nocapture".into()]);
-            }
         }
 
         ctx.run_command_with_timeout("cargo", &cmd_args, empty_msg, CARGO_TIMEOUT_SECS)
