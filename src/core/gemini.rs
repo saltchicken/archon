@@ -222,7 +222,20 @@ pub fn build_payload(
                     parts.push(json!({ "inlineData": { "mimeType": "image/png", "data": b64 } }));
                 }
                 if !parts.is_empty() {
-                    contents.push(json!({ "role": "user", "parts": parts }));
+                    let can_merge = contents.last().is_some_and(|last| {
+                        last["role"] == "user"
+                            && last["parts"].as_array().is_some_and(|p| {
+                                p.iter().all(|item| item.get("functionResponse").is_none())
+                            })
+                    });
+                    if can_merge
+                        && let Some(existing_parts) =
+                            contents.last_mut().and_then(|l| l["parts"].as_array_mut())
+                    {
+                        existing_parts.extend(parts);
+                    } else {
+                        contents.push(json!({ "role": "user", "parts": parts }));
+                    }
                 }
             }
             "assistant" => {
@@ -258,7 +271,14 @@ pub fn build_payload(
                     parts.push(part);
                 }
                 if !parts.is_empty() {
-                    contents.push(json!({ "role": "model", "parts": parts }));
+                    if contents.last().is_some_and(|last| last["role"] == "model")
+                        && let Some(existing_parts) =
+                            contents.last_mut().and_then(|l| l["parts"].as_array_mut())
+                    {
+                        existing_parts.extend(parts);
+                    } else {
+                        contents.push(json!({ "role": "model", "parts": parts }));
+                    }
                 }
             }
             "tool" => {
@@ -318,9 +338,17 @@ pub fn build_payload(
 
 #[derive(Deserialize)]
 struct GeminiStreamChunk {
+    error: Option<GeminiErrorDetail>,
     candidates: Option<Vec<GeminiCandidate>>,
     #[serde(rename = "usageMetadata")]
     usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Deserialize)]
+struct GeminiErrorDetail {
+    code: Option<i64>,
+    message: Option<String>,
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +470,18 @@ pub async fn stream_chat(
             error!("Failed to parse Gemini SSE chunk | Data: {data_str}");
             continue;
         };
+
+        if let Some(err) = chunk.error {
+            let status = err
+                .status
+                .or_else(|| err.code.map(|c| c.to_string()))
+                .unwrap_or_else(|| "UNKNOWN".into());
+            let message = err.message.unwrap_or_else(|| "Unknown error".into());
+            let msg = format!("Gemini stream error ({status}): {message}");
+            error!("{msg}");
+            let _ = tx.send(EngineEvent::StreamError(msg));
+            return;
+        }
 
         if let Some(usage) = chunk.usage_metadata {
             prompt_tokens = usage.prompt_token_count.unwrap_or(prompt_tokens);

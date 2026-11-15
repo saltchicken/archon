@@ -155,60 +155,24 @@ impl Provider {
 
 pub fn sanitize_messages_for_turn(
     messages: Vec<ChatMessage>,
-    config: &Config,
-    active_skill: Option<&str>,
+    _config: &Config,
+    _active_skill: Option<&str>,
 ) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len());
-    let mut active_call_mask: Vec<bool> = Vec::new();
-    let mut tool_idx = 0usize;
 
-    for mut m in messages {
+    for m in messages {
         match m.role.as_str() {
             "assistant" => {
-                active_call_mask.clear();
-                tool_idx = 0;
-
-                if let Some(calls) = m.tool_calls.take() {
-                    let mut kept_calls = Vec::with_capacity(calls.len());
-                    for tc in calls {
-                        let enabled = tools::is_tool_enabled_for_turn(
-                            &tc.function.name,
-                            config,
-                            active_skill,
-                        );
-                        active_call_mask.push(enabled);
-                        if enabled {
-                            kept_calls.push(tc);
-                        }
-                    }
-                    m.tool_calls = (!kept_calls.is_empty()).then_some(kept_calls);
-                }
-
                 let has_content = !m.content.trim().is_empty();
-                let has_tools = m.tool_calls.is_some();
+                let has_tools = m.tool_calls.as_ref().is_some_and(|t| !t.is_empty());
                 let has_thoughts = m.thoughts.as_ref().is_some_and(|t| !t.is_empty());
 
                 if has_content || has_tools || has_thoughts {
                     out.push(m);
                 }
             }
-            "tool" => {
-                let keep = if let Some(ref name) = m.tool_name {
-                    let positional_ok = active_call_mask.get(tool_idx).copied().unwrap_or(true);
-                    positional_ok && tools::is_tool_enabled_for_turn(name, config, active_skill)
-                } else {
-                    active_call_mask.get(tool_idx).copied().unwrap_or(false)
-                };
-                tool_idx += 1;
-
-                if keep {
-                    out.push(m);
-                }
-            }
             "local" => {
                 if m.include_in_context {
-                    active_call_mask.clear();
-                    tool_idx = 0;
                     out.push(ChatMessage::new(
                         "user",
                         format!(
@@ -219,8 +183,6 @@ pub fn sanitize_messages_for_turn(
                 }
             }
             _ => {
-                active_call_mask.clear();
-                tool_idx = 0;
                 out.push(m);
             }
         }
