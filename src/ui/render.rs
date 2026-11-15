@@ -403,6 +403,7 @@ impl TuiApp {
             ));
         }
         lines.push(Line::from(header_spans));
+        lines.push(Line::from(""));
 
         let is_truncated = !state.collapsed && total_content > max_lines;
 
