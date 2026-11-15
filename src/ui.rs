@@ -434,7 +434,10 @@ impl TuiApp {
                         let trimmed = m.content.trim();
                         if m.role == "user"
                             && !trimmed.is_empty()
-                            && self.prompt_history.last().is_none_or(|last| last != trimmed)
+                            && self
+                                .prompt_history
+                                .last()
+                                .is_none_or(|last| last != trimmed)
                         {
                             self.prompt_history.push(trimmed.to_string());
                         }
@@ -648,7 +651,12 @@ impl TuiApp {
         self.text_area = create_text_area();
     }
 
-    fn dispatch_shell_command(&mut self, raw_prompt: &str, command: &str, include_in_context: bool) {
+    fn dispatch_shell_command(
+        &mut self,
+        raw_prompt: &str,
+        command: &str,
+        include_in_context: bool,
+    ) {
         if command.is_empty() {
             return;
         }

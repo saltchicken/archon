@@ -333,6 +333,10 @@ impl TuiApp {
                 self.text_area.insert_newline();
             }
             KeyCode::Enter => return self.submit_prompt(),
+            KeyCode::Char('c') if ctrl => {
+                self.prompt_history_idx = None;
+                self.text_area = super::create_text_area();
+            }
             KeyCode::Char('v') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::PasteClipboard);
             }
