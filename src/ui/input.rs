@@ -158,7 +158,6 @@ impl TuiApp {
     fn handle_sessions_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => self.modal = ActiveModal::None,
-            KeyCode::Char('?') => self.show_help_bar = !self.show_help_bar,
             KeyCode::Up => self.session_idx = self.session_idx.saturating_sub(1),
             KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
             KeyCode::Enter => {
@@ -245,10 +244,6 @@ impl TuiApp {
                 let _ = self
                     .cmd_tx
                     .send(EngineCommand::SetTurnConfig(self.current_turn_config()));
-                self.status_bar = (
-                    format!("System message updated ({}).", self.current_system_label()),
-                    false,
-                );
             }
             _ => {
                 self.sys_prompt_area.input(key);
@@ -274,13 +269,6 @@ impl TuiApp {
                 self.config.personal_intelligence = pi.clone();
                 self.modal = ActiveModal::None;
                 let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
-                self.status_bar = (
-                    format!(
-                        "Personal Intelligence saved ({}).",
-                        self.current_pi_label()
-                    ),
-                    false,
-                );
             }
             _ => {
                 self.pi_area.input(key);
@@ -307,9 +295,6 @@ impl TuiApp {
             KeyCode::Down if alt => self.scroll_chat(3),
             KeyCode::Home if ctrl => self.scroll_chat(isize::MIN),
             KeyCode::End if ctrl => self.scroll_to_bottom(),
-            KeyCode::Char('?') if !ctrl && self.text_area.lines().iter().all(|l| l.is_empty()) => {
-                self.show_help_bar = !self.show_help_bar;
-            }
             KeyCode::Enter if shift => {
                 self.text_area.insert_newline();
             }

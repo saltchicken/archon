@@ -437,31 +437,16 @@ impl TuiApp {
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
-        let mut root_constraints = vec![Constraint::Min(10), Constraint::Length(1)];
-        if self.show_help_bar {
-            root_constraints.push(Constraint::Length(1));
-        }
-
-        let root = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(root_constraints)
-            .split(f.area());
-
         let sidebar_width = if self.sidebar_expanded { 36 } else { 0 };
         let main_panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
-            .split(root[0]);
+            .split(f.area());
 
         if self.sidebar_expanded {
             self.draw_sidebar(f, main_panes[0]);
         }
         self.draw_chat_area(f, main_panes[1]);
-        self.draw_status_bar(f, root[1]);
-
-        if self.show_help_bar {
-            self.draw_help_bar(f, root[2]);
-        }
 
         match self.modal {
             ActiveModal::AddFile => self.draw_file_modal(f),
@@ -472,69 +457,6 @@ impl TuiApp {
             ActiveModal::PersonalIntelligence => self.draw_personal_intelligence_modal(f),
             ActiveModal::None => {}
         }
-    }
-
-    fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
-        let status_style = if self.status_bar.1 {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Cyan)
-        };
-
-        let status_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(10), Constraint::Length(16)])
-            .split(area);
-
-        f.render_widget(
-            Paragraph::new(format!(" {}", sanitize_line(&self.status_bar.0))).style(status_style),
-            status_chunks[0],
-        );
-
-        let help_label = if self.show_help_bar {
-            "[?] Hide Help "
-        } else {
-            "[?] Show Help "
-        };
-        f.render_widget(
-            Paragraph::new(help_label).style(Style::default().fg(Color::DarkGray)),
-            status_chunks[1],
-        );
-    }
-
-    fn draw_help_bar(&self, f: &mut Frame, area: Rect) {
-        let key_style = Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-        let desc_style = Style::default().fg(Color::Gray);
-        let sep_style = Style::default().fg(Color::DarkGray);
-
-        let bindings = [
-            ("⏎", "Send"),
-            ("⇧⏎", "Newline"),
-            ("^M", "Model"),
-            ("^B", "Sidebar"),
-            ("^S", "Sessions"),
-            ("^R", "New"),
-            ("^V", "Paste Img"),
-            ("^f", "Add Img"),
-            ("^X", "Clear Imgs"),
-            ("^T", "Tools"),
-            ("^Y", "SysMsg"),
-            ("^P", "Intel"),
-            ("^Q", "Quit"),
-        ];
-
-        let mut spans = vec![Span::raw(" ")];
-        for (idx, (key, desc)) in bindings.iter().enumerate() {
-            if idx > 0 {
-                spans.push(Span::styled(" │ ", sep_style));
-            }
-            spans.push(Span::styled(*key, key_style));
-            spans.push(Span::styled(format!(" {desc}"), desc_style));
-        }
-
-        f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {

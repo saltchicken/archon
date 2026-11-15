@@ -77,15 +77,6 @@ impl SlashCommand {
         ("run", Self::Run),
     ];
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Exit => "exit",
-            Self::Intel => "intel",
-            Self::Reset => "reset",
-            Self::Run => "run",
-        }
-    }
-
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL
             .iter()
@@ -125,7 +116,6 @@ pub struct TuiApp {
     pub(super) streaming_text: String,
     pub(super) is_streaming: bool,
     pub(super) active_tool_status: Option<String>,
-    pub(super) status_bar: (String, bool),
 
     pub(super) model_idx: usize,
     pub(super) sys_preset_idx: usize,
@@ -150,7 +140,6 @@ pub struct TuiApp {
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
-    pub(super) show_help_bar: bool,
 
     pub(super) modal: ActiveModal,
     pub(super) file_path_input: String,
@@ -220,10 +209,6 @@ impl TuiApp {
             streaming_text: String::new(),
             is_streaming: false,
             active_tool_status: None,
-            status_bar: (
-                "Ready. Press ⏎ to send, / for commands, @ for skills, ? for help.".into(),
-                false,
-            ),
             model_idx,
             sys_preset_idx: 0,
             custom_system_prompt: None,
@@ -243,7 +228,6 @@ impl TuiApp {
             chat_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
-            show_help_bar: false,
             modal: ActiveModal::None,
             file_path_input: String::new(),
             sessions: Vec::new(),
@@ -383,7 +367,7 @@ impl TuiApp {
     fn handle_engine_event(&mut self, ev: EngineEvent) {
         match ev {
             EngineEvent::Notification { message, is_error } => {
-                self.status_bar = (message, is_error);
+                let _ = (message, is_error);
             }
             EngineEvent::AttachmentsUpdated(list) => self.attachments = list,
             EngineEvent::ChatUpdated {
@@ -433,13 +417,6 @@ impl TuiApp {
                 self.streaming_text.clear();
                 self.styled_stream.clear();
                 self.stream_dirty = true;
-                self.status_bar = (
-                    format!(
-                        "Streaming response from {}... (⏎ to queue interjection, Esc to cancel)",
-                        self.model
-                    ),
-                    false,
-                );
                 self.scroll_to_bottom();
             }
             EngineEvent::StreamChunk(c) => {
@@ -460,12 +437,8 @@ impl TuiApp {
                 index,
                 total,
             } => {
-                let status = format!("⚙ Running tool ({index}/{total}): {summary}...");
-                self.active_tool_status = Some(status.clone());
-                self.status_bar = (
-                    format!("{status} (⏎ to queue interjection, Esc to cancel)"),
-                    false,
-                );
+                self.active_tool_status =
+                    Some(format!("⚙ Running tool ({index}/{total}): {summary}..."));
                 self.scroll_to_bottom();
             }
             EngineEvent::ToolCompleted { .. } | EngineEvent::ShellCommandCompleted { .. } => {
@@ -577,7 +550,6 @@ impl TuiApp {
     pub(super) fn submit_prompt(&mut self) -> bool {
         let raw_prompt = self.text_area.lines().join("\n").trim().to_string();
         if raw_prompt.is_empty() {
-            self.status_bar = ("Prompt cannot be empty.".into(), true);
             return false;
         }
 
@@ -587,10 +559,6 @@ impl TuiApp {
                 None => (false, rest.trim()),
             };
             if shell_cmd.is_empty() {
-                self.status_bar = (
-                    "Usage: !<command> (local) or !!<command> (insert into context)".into(),
-                    true,
-                );
                 return false;
             }
             self.text_area = create_text_area();
@@ -609,20 +577,15 @@ impl TuiApp {
             };
             match SlashCommand::from_name(cmd_token) {
                 Some(SlashCommand::Run) => {
-                    let (include_in_context, cmd_args) =
-                        if let Some(rest_args) = args
-                            .strip_prefix("-c ")
-                            .or_else(|| args.strip_prefix("--context "))
-                        {
-                            (true, rest_args.trim())
-                        } else {
-                            (false, args)
-                        };
+                    let (include_in_context, cmd_args) = if let Some(rest_args) = args
+                        .strip_prefix("-c ")
+                        .or_else(|| args.strip_prefix("--context "))
+                    {
+                        (true, rest_args.trim())
+                    } else {
+                        (false, args)
+                    };
                     if cmd_args.is_empty() {
-                        self.status_bar = (
-                            "Usage: /run [-c|--context] <command> (e.g. /run -c git status)".into(),
-                            true,
-                        );
                         return false;
                     }
                     self.text_area = create_text_area();
@@ -643,28 +606,19 @@ impl TuiApp {
                     match args.to_ascii_lowercase().as_str() {
                         "clear" => {
                             pi.items.clear();
-                            self.status_bar = ("Personal Intelligence cleared.".into(), false);
                         }
                         "on" | "enable" => {
                             pi.enabled = true;
-                            self.status_bar = ("Personal Intelligence enabled.".into(), false);
                         }
                         "off" | "disable" => {
                             pi.enabled = false;
-                            self.status_bar = ("Personal Intelligence disabled.".into(), false);
                         }
                         _ => {
-                            let fact = clean_pi_item(
-                                args.strip_prefix("add ").unwrap_or(args),
-                            );
+                            let fact = clean_pi_item(args.strip_prefix("add ").unwrap_or(args));
                             if !fact.is_empty() {
                                 let mut items = pi.items;
                                 items.push(fact.to_string());
                                 pi = PersonalIntelligence::new(items, true);
-                                self.status_bar = (
-                                    format!("Added to Personal Intelligence: {fact}"),
-                                    false,
-                                );
                             }
                         }
                     }
@@ -672,13 +626,7 @@ impl TuiApp {
                     let _ = self.cmd_tx.send(EngineCommand::SetPersonalIntelligence(pi));
                     return false;
                 }
-                Some(cmd) if !args.is_empty() => {
-                    self.status_bar = (
-                        format!("Command '/{}' does not take any arguments.", cmd.as_str()),
-                        true,
-                    );
-                    return false;
-                }
+                Some(_) if !args.is_empty() => return false,
                 Some(SlashCommand::Exit) => return true,
                 Some(SlashCommand::Reset) => {
                     self.text_area = create_text_area();
@@ -686,10 +634,7 @@ impl TuiApp {
                     let _ = self.cmd_tx.send(EngineCommand::ResetChat);
                     return false;
                 }
-                None => {
-                    self.status_bar = (format!("Unknown command: /{cmd_token}"), true);
-                    return false;
-                }
+                None => return false,
             }
         }
 
@@ -699,30 +644,13 @@ impl TuiApp {
         {
             if let Some(skill) = crate::core::skills::find_skill(&self.config, &skill_name) {
                 if !skill.tools.is_empty() && !self.enable_tools {
-                    self.status_bar = (
-                        format!(
-                            "Skill '{}' cannot proceed: tools are disabled (^T). Required: {}",
-                            skill.name,
-                            skill.tools.join(", ")
-                        ),
-                        true,
-                    );
                     return false;
                 }
                 let missing = crate::core::skills::missing_skill_tools(skill, &self.config);
                 if !missing.is_empty() {
-                    self.status_bar = (
-                        format!(
-                            "Skill '{}' cannot proceed: required tool(s) not enabled in config: {}",
-                            skill.name,
-                            missing.join(", ")
-                        ),
-                        true,
-                    );
                     return false;
                 }
             }
-            self.status_bar = (format!("Invoked skill '{skill_name}'."), false);
             let args = raw_prompt
                 .trim()
                 .strip_prefix('@')
