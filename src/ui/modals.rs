@@ -1,4 +1,5 @@
 use super::{TuiApp, chat_block, render::sanitize_line, titled_block};
+use crate::core::config::MemoryScope;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -438,12 +439,30 @@ impl TuiApp {
         } else {
             ("DISABLED", Color::Red)
         };
+        let (global_style, ws_style) = match self.memory_scope {
+            MemoryScope::Global => (
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                Style::default().fg(Color::DarkGray),
+            ),
+            MemoryScope::Workspace => (
+                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+        };
         let header = Line::from(vec![
             Span::styled(
                 "Persistent Memory (MEMORY.md) ",
                 Style::default().fg(Color::Cyan),
             ),
-            Span::raw("(Always passed to the model across all sessions) │ "),
+            Span::raw("│ Scope: ["),
+            Span::styled("Global", global_style),
+            Span::raw(" / "),
+            Span::styled("Workspace", ws_style),
+            Span::raw("] │ "),
             Span::styled(
                 format!("Status: {status_label}"),
                 Style::default()
@@ -456,7 +475,7 @@ impl TuiApp {
             " Memory (^P) ",
             header,
             &self.memory_area,
-            " [^E] Toggle ON/OFF\n [^X] Clear\n [⇧⏎] Newline\n [⏎] Save & Persist\n [Esc] Cancel",
+            " [Tab/^S] Toggle Scope (Global/Workspace)\n [^E] Toggle ON/OFF\n [^X] Clear\n [⇧⏎] Newline\n [⏎] Save & Persist\n [Esc] Cancel",
         );
     }
 
@@ -520,6 +539,16 @@ fn draw_editor_modal(
     let area = centered_rect(75, 60, f.area());
     f.render_widget(Clear, area);
 
+    let footer_lines: Vec<Line> = footer_text
+        .split('\n')
+        .map(|s| {
+            Line::from(Span::styled(
+                s.to_string(),
+                Style::default().fg(Color::Yellow),
+            ))
+        })
+        .collect();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -529,7 +558,7 @@ fn draw_editor_modal(
             // the remainder. `Min(6)` instead claims *all* leftover space,
             // which on a short terminal can squeeze the hint bar to zero.
             Constraint::Fill(1),
-            Constraint::Length(5),
+            Constraint::Length(footer_lines.len() as u16),
         ])
         .split(area);
 
@@ -538,9 +567,5 @@ fn draw_editor_modal(
         chunks[0],
     );
     f.render_widget(editor, chunks[1]);
-    let footer_lines: Vec<Line> = footer_text
-        .split('\n')
-        .map(|s| Line::from(Span::styled(s.to_string(), Style::default().fg(Color::Yellow))))
-        .collect();
     f.render_widget(Paragraph::new(footer_lines), chunks[2]);
 }

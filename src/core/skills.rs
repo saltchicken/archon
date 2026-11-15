@@ -283,7 +283,7 @@ pub fn compose_system_prompt(
         sections.push(base_system_prompt.trim().to_string());
     }
 
-    if let Some(mem_block) = config.memory.format_for_prompt() {
+    if let Some(mem_block) = config.effective_memory().format_for_prompt() {
         sections.push(mem_block);
     }
 

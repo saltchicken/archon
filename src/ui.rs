@@ -6,7 +6,8 @@ use crate::core::{
     EngineCommand, EngineEvent, TruncatedToolAction, TurnConfig,
     attachments::ImageAttachment,
     config::{
-        Config, Memory, Preset, clean_memory_item, global_memory_path, load_scoped_memory_file,
+        Config, Memory, MemoryScope, Preset, clean_memory_item, global_memory_path,
+        load_scoped_memory_file,
     },
     session::{ChatMessage, SessionSummary},
 };
@@ -199,8 +200,11 @@ pub struct TuiApp {
     pub(super) sys_preset_idx: usize,
     pub(super) custom_system_prompt: Option<String>,
     pub(super) sys_prompt_area: TextArea<'static>,
+    pub(super) memory_scope: MemoryScope,
     pub(super) memory_area: TextArea<'static>,
     pub(super) memory_enabled_draft: bool,
+    pub(super) global_memory_draft: Memory,
+    pub(super) workspace_memory_draft: Memory,
     pub(super) enable_tools: bool,
     pub(super) num_ctx: u32,
     pub(super) max_tool_output_size: usize,
@@ -275,11 +279,12 @@ pub(super) fn create_sys_prompt_area(initial: &str) -> TextArea<'static> {
     create_editor_area(" Edit System Message ", initial)
 }
 
-pub(super) fn create_memory_area(initial: &str) -> TextArea<'static> {
-    create_editor_area(
-        " Persistent Facts / Environment Context (One per line) ",
-        initial,
-    )
+pub(super) fn create_memory_area(scope: MemoryScope, initial: &str) -> TextArea<'static> {
+    let title = match scope {
+        MemoryScope::Global => " Global Persistent Facts / Environment Context (One per line) ",
+        MemoryScope::Workspace => " Workspace Persistent Facts / Project Context (One per line) ",
+    };
+    create_editor_area(title, initial)
 }
 
 pub(super) fn titled_block<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
@@ -306,8 +311,11 @@ impl TuiApp {
             .iter()
             .position(|m| m.name == model)
             .unwrap_or(0);
-        let memory_initial = config.memory.to_editor_text();
-        let memory_enabled_draft = config.memory.enabled;
+        let memory_scope = MemoryScope::Global;
+        let memory_initial = config.global_memory.to_editor_text();
+        let memory_enabled_draft = config.global_memory.enabled;
+        let global_memory_draft = config.global_memory.clone();
+        let workspace_memory_draft = config.workspace_memory.clone();
 
         Self {
             model,
@@ -327,8 +335,11 @@ impl TuiApp {
             sys_preset_idx: 0,
             custom_system_prompt: None,
             sys_prompt_area: create_sys_prompt_area(""),
-            memory_area: create_memory_area(&memory_initial),
+            memory_scope,
+            memory_area: create_memory_area(memory_scope, &memory_initial),
             memory_enabled_draft,
+            global_memory_draft,
+            workspace_memory_draft,
             enable_tools: true,
             num_ctx,
             max_tool_output_size,
@@ -668,8 +679,12 @@ impl TuiApp {
             EngineEvent::SkillsUpdated(skills) => {
                 self.config.skills = skills;
             }
-            EngineEvent::MemoryUpdated(mem) => {
-                self.config.memory = mem;
+            EngineEvent::MemoryUpdated {
+                global_memory,
+                workspace_memory,
+            } => {
+                self.config.global_memory = global_memory;
+                self.config.workspace_memory = workspace_memory;
             }
             EngineEvent::ModelConfigUpdated {
                 model,
@@ -757,24 +772,91 @@ impl TuiApp {
     }
 
     pub(super) fn current_memory_label(&self) -> String {
-        let count = self.config.memory.count();
-        if !self.config.memory.enabled {
-            format!("OFF ({count})")
-        } else if count == 0 {
-            "Empty".into()
-        } else if count == 1 {
-            "1 item (ON)".into()
+        let effective = self.config.effective_memory();
+        if !effective.enabled {
+            let stored = self.config.global_memory.count() + self.config.workspace_memory.count();
+            format!("OFF ({stored})")
         } else {
-            format!("{count} items (ON)")
+            let count = effective.count();
+            if count == 0 {
+                "Empty".into()
+            } else if count == 1 {
+                "1 item (ON)".into()
+            } else {
+                format!("{count} items (ON)")
+            }
         }
+    }
+
+    pub(super) fn commit_active_memory_scope_draft(&mut self) {
+        let raw_text = self.memory_area.lines().join("\n");
+        let mem = Memory::from_editor_text(&raw_text, self.memory_enabled_draft);
+        match self.memory_scope {
+            MemoryScope::Global => self.global_memory_draft = mem,
+            MemoryScope::Workspace => self.workspace_memory_draft = mem,
+        }
+    }
+
+    pub(super) fn load_active_memory_scope_draft(&mut self) {
+        let draft = match self.memory_scope {
+            MemoryScope::Global => &self.global_memory_draft,
+            MemoryScope::Workspace => &self.workspace_memory_draft,
+        };
+        self.memory_area = create_memory_area(self.memory_scope, &draft.to_editor_text());
+        self.memory_enabled_draft = draft.enabled;
+    }
+
+    pub(super) fn toggle_memory_scope(&mut self) {
+        self.commit_active_memory_scope_draft();
+        self.memory_scope = self.memory_scope.toggle();
+        self.load_active_memory_scope_draft();
+    }
+
+    pub(super) fn save_memory_modal(&mut self) {
+        self.commit_active_memory_scope_draft();
+        self.modal = ActiveModal::None;
+
+        let active_scope = self.memory_scope;
+        let inactive_scope = active_scope.toggle();
+
+        let inactive_draft = match inactive_scope {
+            MemoryScope::Global => self.global_memory_draft.clone(),
+            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
+        };
+        if &inactive_draft != self.config.scoped_memory(inactive_scope) {
+            self.config
+                .set_scoped_memory(inactive_scope, inactive_draft.clone());
+            let _ = self.cmd_tx.send(EngineCommand::SetMemory {
+                scope: inactive_scope,
+                memory: inactive_draft,
+            });
+        }
+
+        let active_draft = match active_scope {
+            MemoryScope::Global => self.global_memory_draft.clone(),
+            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
+        };
+        self.config
+            .set_scoped_memory(active_scope, active_draft.clone());
+        let _ = self.cmd_tx.send(EngineCommand::SetMemory {
+            scope: active_scope,
+            memory: active_draft,
+        });
     }
 
     pub(super) fn open_memory_modal(&mut self) {
         let global_mem = load_scoped_memory_file(&global_memory_path(), true)
             .map(|(_, m)| m)
-            .unwrap_or_else(|_| self.config.memory.clone());
-        self.memory_area = create_memory_area(&global_mem.to_editor_text());
-        self.memory_enabled_draft = self.config.memory.enabled;
+            .unwrap_or_else(|_| self.config.global_memory.clone());
+        let ws_mem = load_scoped_memory_file(&self.config.workspace_memory_path(), false)
+            .map(|(_, m)| m)
+            .unwrap_or_else(|_| self.config.workspace_memory.clone());
+
+        self.config.global_memory = global_mem.clone();
+        self.config.workspace_memory = ws_mem.clone();
+        self.global_memory_draft = global_mem;
+        self.workspace_memory_draft = ws_mem;
+        self.load_active_memory_scope_draft();
         self.modal = ActiveModal::Memory;
     }
 
@@ -859,10 +941,37 @@ impl TuiApp {
                         self.open_memory_modal();
                         return false;
                     }
-                    let mut mem = load_scoped_memory_file(&global_memory_path(), true)
+                    let lower_args = args.to_ascii_lowercase();
+                    if matches!(lower_args.as_str(), "global") {
+                        self.memory_scope = MemoryScope::Global;
+                        self.open_memory_modal();
+                        return false;
+                    }
+                    if matches!(lower_args.as_str(), "workspace" | "ws") {
+                        self.memory_scope = MemoryScope::Workspace;
+                        self.open_memory_modal();
+                        return false;
+                    }
+
+                    let (scope, sub_args) = if let Some(rest_args) = args
+                        .strip_prefix("workspace ")
+                        .or_else(|| args.strip_prefix("ws "))
+                    {
+                        (MemoryScope::Workspace, rest_args.trim())
+                    } else if let Some(rest_args) = args.strip_prefix("global ") {
+                        (MemoryScope::Global, rest_args.trim())
+                    } else {
+                        (MemoryScope::Global, args)
+                    };
+
+                    let (mem_path, is_global) = match scope {
+                        MemoryScope::Global => (global_memory_path(), true),
+                        MemoryScope::Workspace => (self.config.workspace_memory_path(), false),
+                    };
+                    let mut mem = load_scoped_memory_file(&mem_path, is_global)
                         .map(|(_, m)| m)
-                        .unwrap_or_else(|_| self.config.memory.clone());
-                    match args.to_ascii_lowercase().as_str() {
+                        .unwrap_or_else(|_| self.config.scoped_memory(scope).clone());
+                    match sub_args.to_ascii_lowercase().as_str() {
                         "clear" => {
                             mem.items.clear();
                         }
@@ -873,7 +982,9 @@ impl TuiApp {
                             mem.enabled = false;
                         }
                         _ => {
-                            let fact = clean_memory_item(args.strip_prefix("add ").unwrap_or(args));
+                            let fact = clean_memory_item(
+                                sub_args.strip_prefix("add ").unwrap_or(sub_args),
+                            );
                             if !fact.is_empty() {
                                 let mut items = mem.items;
                                 items.push(fact.to_string());
@@ -881,8 +992,10 @@ impl TuiApp {
                             }
                         }
                     }
-                    self.config.memory = mem.clone();
-                    let _ = self.cmd_tx.send(EngineCommand::SetMemory(mem));
+                    self.config.set_scoped_memory(scope, mem.clone());
+                    let _ = self
+                        .cmd_tx
+                        .send(EngineCommand::SetMemory { scope, memory: mem });
                     return false;
                 }
                 Some(_) if !args.is_empty() => return false,

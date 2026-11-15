@@ -62,6 +62,34 @@ pub fn load_dotenv(path: impl AsRef<Path>) {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    /// Global `~/.config/archon/MEMORY.md` (shared across all workspaces).
+    #[default]
+    Global,
+    /// Workspace-specific `~/.config/archon/workspaces/<ws>/MEMORY.md`.
+    Workspace,
+}
+
+impl MemoryScope {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Global => Self::Workspace,
+            Self::Workspace => Self::Global,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Global => "Global",
+            Self::Workspace => "Workspace",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Memory {
@@ -95,6 +123,13 @@ pub fn clean_memory_item(raw: &str) -> &str {
 }
 
 impl Memory {
+    pub fn empty() -> Self {
+        Self {
+            enabled: true,
+            items: Vec::new(),
+        }
+    }
+
     pub fn new(raw_items: Vec<String>, enabled: bool) -> Self {
         let mut items: Vec<String> = Vec::new();
         for raw in raw_items {
@@ -196,7 +231,9 @@ impl Memory {
 pub struct Config {
     pub app: AppSettings,
     #[serde(skip)]
-    pub memory: Memory,
+    pub global_memory: Memory,
+    #[serde(skip)]
+    pub workspace_memory: Memory,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
@@ -340,7 +377,8 @@ impl Default for Config {
         };
         Self {
             app: AppSettings::default(),
-            memory: Memory::default(),
+            global_memory: Memory::default(),
+            workspace_memory: Memory::empty(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
             ollama: EndpointSettings {
                 api_key: String::new(),
@@ -403,7 +441,7 @@ pub fn load_scoped_memory_file(mem_path: &Path, is_global: bool) -> Result<(Stri
         let mem = if is_global {
             Memory::default()
         } else {
-            Memory::new(Vec::new(), true)
+            Memory::empty()
         };
         return Ok((String::new(), mem));
     }
@@ -426,46 +464,44 @@ pub fn save_memory_file(mem_path: &Path, mem: &Memory) -> Result<String> {
     Ok(rendered)
 }
 
-pub fn save_global_memory(mem: &Memory) -> Result<String> {
-    save_memory_file(&global_memory_path(), mem)
+pub fn save_scoped_memory(
+    scope: MemoryScope,
+    ws_dir: Option<&Path>,
+    mem: &Memory,
+) -> Result<String> {
+    let path = match scope {
+        MemoryScope::Global => global_memory_path(),
+        MemoryScope::Workspace => {
+            let dir = match ws_dir {
+                Some(d) => d.to_path_buf(),
+                None => {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    workspace_config_dir_for(&cwd)
+                }
+            };
+            workspace_memory_path(&dir)
+        }
+    };
+    save_memory_file(&path, mem)
 }
 
-pub fn load_merged_memory(ws_dir: Option<&Path>) -> Memory {
+pub fn load_memories(ws_dir: Option<&Path>) -> (Memory, Memory) {
     let global_path = global_memory_path();
     let (_, global_mem) = load_scoped_memory_file(&global_path, true)
         .unwrap_or_else(|_| (String::new(), Memory::default()));
 
-    let Some(ws_dir) = ws_dir else {
-        return global_mem;
-    };
-    let ws_path = workspace_memory_path(ws_dir);
-    if !ws_path.exists() {
-        return global_mem;
-    }
+    let workspace_mem = ws_dir
+        .map(workspace_memory_path)
+        .and_then(|ws_path| load_scoped_memory_file(&ws_path, false).ok())
+        .map(|(_, m)| m)
+        .unwrap_or_else(Memory::empty);
 
-    let Ok((_, ws_mem)) = load_scoped_memory_file(&ws_path, false) else {
-        return global_mem;
-    };
-
-    let mut combined_items = global_mem.items;
-    combined_items.extend(ws_mem.items);
-    Memory::new(combined_items, global_mem.enabled && ws_mem.enabled)
+    (global_mem, workspace_mem)
 }
 
-pub fn reload_memory(current_config: &Config) -> Memory {
-    let ws_dir = current_config
-        .workspace_skills_dir
-        .as_deref()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .or_else(|| {
-            current_config
-                .workspace
-                .as_deref()
-                .map(Path::new)
-                .map(workspace_config_dir_for)
-        });
-    load_merged_memory(ws_dir.as_deref())
+pub fn reload_memories(current_config: &Config) -> (Memory, Memory) {
+    let ws_dir = current_config.workspace_config_dir();
+    load_memories(ws_dir.as_deref())
 }
 
 fn read_bound_workspace(cfg_path: &Path) -> Option<PathBuf> {
@@ -561,6 +597,54 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
 }
 
 impl Config {
+    pub fn scoped_memory(&self, scope: MemoryScope) -> &Memory {
+        match scope {
+            MemoryScope::Global => &self.global_memory,
+            MemoryScope::Workspace => &self.workspace_memory,
+        }
+    }
+
+    pub fn set_scoped_memory(&mut self, scope: MemoryScope, memory: Memory) {
+        match scope {
+            MemoryScope::Global => self.global_memory = memory,
+            MemoryScope::Workspace => self.workspace_memory = memory,
+        }
+    }
+
+    pub fn effective_memory(&self) -> Memory {
+        let mut combined_items = Vec::new();
+        if self.global_memory.enabled {
+            combined_items.extend(self.global_memory.items.iter().cloned());
+        }
+        if self.workspace_memory.enabled {
+            combined_items.extend(self.workspace_memory.items.iter().cloned());
+        }
+        let enabled = self.global_memory.enabled
+            || (self.workspace_memory.enabled && self.workspace_memory.count() > 0);
+        Memory::new(combined_items, enabled)
+    }
+
+    pub fn workspace_config_dir(&self) -> Option<PathBuf> {
+        self.workspace_skills_dir
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                self.workspace
+                    .as_deref()
+                    .map(Path::new)
+                    .map(workspace_config_dir_for)
+            })
+    }
+
+    pub fn workspace_memory_path(&self) -> PathBuf {
+        let ws_dir = self.workspace_config_dir().unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            workspace_config_dir_for(&cwd)
+        });
+        workspace_memory_path(&ws_dir)
+    }
+
     fn find_model(&self, model: &str) -> Option<&ModelPreset> {
         self.models.iter().find(|m| m.name == model)
     }
@@ -612,7 +696,7 @@ impl Config {
         let ws_dir = workspace_config_dir.as_ref();
         let local_config_path = ws_dir.join("config.toml");
         let ws_skills_dir = ws_dir.join("skills");
-        let merged_memory = load_merged_memory(Some(ws_dir));
+        let (global_memory, workspace_memory) = load_memories(Some(ws_dir));
 
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
@@ -637,7 +721,8 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
-                cfg.memory = merged_memory;
+                cfg.global_memory = global_memory;
+                cfg.workspace_memory = workspace_memory;
                 cfg.skills = crate::core::skills::discover_skills(
                     &cfg.app.skills_dir,
                     Some(ws_skills_dir.as_path()),
@@ -658,7 +743,8 @@ impl Config {
             }
             Err(e) => {
                 let mut def = Self::default();
-                def.memory = merged_memory;
+                def.global_memory = global_memory;
+                def.workspace_memory = workspace_memory;
                 def.skills = crate::core::skills::discover_skills(
                     &def.app.skills_dir,
                     Some(ws_skills_dir.as_path()),

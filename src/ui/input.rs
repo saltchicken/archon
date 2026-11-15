@@ -2,8 +2,7 @@ use super::{
     ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
 };
 use crate::core::{
-    EngineCommand, TruncatedToolAction, attachments::copy_text_to_clipboard, config::Memory,
-    session::ChatMessage,
+    EngineCommand, TruncatedToolAction, attachments::copy_text_to_clipboard, session::ChatMessage,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
@@ -595,21 +594,23 @@ impl TuiApp {
     fn handle_memory_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
         match key.code {
             KeyCode::Esc => self.modal = ActiveModal::None,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.toggle_memory_scope();
+            }
+            KeyCode::Char('s') | KeyCode::Char('t') if ctrl => {
+                self.toggle_memory_scope();
+            }
             KeyCode::Char('e') if ctrl => {
                 self.memory_enabled_draft = !self.memory_enabled_draft;
             }
             KeyCode::Char('x') if ctrl => {
-                self.memory_area = super::create_memory_area("");
+                self.memory_area = super::create_memory_area(self.memory_scope, "");
             }
             KeyCode::Enter if shift => {
                 self.memory_area.insert_newline();
             }
             KeyCode::Enter => {
-                let raw_text = self.memory_area.lines().join("\n");
-                let mem = Memory::from_editor_text(&raw_text, self.memory_enabled_draft);
-                self.config.memory = mem.clone();
-                self.modal = ActiveModal::None;
-                let _ = self.cmd_tx.send(EngineCommand::SetMemory(mem));
+                self.save_memory_modal();
             }
             _ => {
                 self.memory_area.input(key);

@@ -1,7 +1,7 @@
 use super::{BlockingTool, ToolContext};
 use crate::core::config::{
-    Memory, clean_memory_item, format_tilde_path, global_memory_path, load_scoped_memory_file,
-    save_memory_file, workspace_config_dir_for, workspace_memory_path,
+    Memory, MemoryScope, clean_memory_item, format_tilde_path, global_memory_path,
+    load_scoped_memory_file, save_memory_file, workspace_config_dir_for, workspace_memory_path,
 };
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
@@ -31,16 +31,6 @@ pub enum MemoryAction {
     Enable,
     /// Disable persistent memory injection into the system prompt.
     Disable,
-}
-
-#[derive(Deserialize, JsonSchema, Clone, Copy, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryScope {
-    /// Global `~/.config/archon/MEMORY.md` (shared across all workspaces).
-    #[default]
-    Global,
-    /// Workspace-specific `~/.config/archon/workspaces/<ws>/MEMORY.md`.
-    Workspace,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -156,14 +146,29 @@ impl BlockingTool for Tool {
                 let (_, global_mem) = load_scoped_memory_file(&global_path, true)?;
                 let (_, ws_mem) = load_scoped_memory_file(&ws_path, false)?;
 
-                let status = if ctx.config.memory.enabled {
+                let effective_enabled =
+                    global_mem.enabled || (ws_mem.enabled && !ws_mem.items.is_empty());
+                let status = if effective_enabled {
+                    "ENABLED"
+                } else {
+                    "DISABLED"
+                };
+                let global_status = if global_mem.enabled {
+                    "ENABLED"
+                } else {
+                    "DISABLED"
+                };
+                let ws_status = if ws_mem.enabled {
                     "ENABLED"
                 } else {
                     "DISABLED"
                 };
 
                 let mut out = format!("Memory Status: {status}\n\n");
-                out.push_str(&format!("Global ({}):\n", format_tilde_path(&global_path)));
+                out.push_str(&format!(
+                    "Global ({}) [{global_status}]:\n",
+                    format_tilde_path(&global_path)
+                ));
                 if global_mem.items.is_empty() {
                     out.push_str("  (empty)\n");
                 } else {
@@ -172,7 +177,10 @@ impl BlockingTool for Tool {
                     }
                 }
 
-                out.push_str(&format!("\nWorkspace ({}):\n", format_tilde_path(&ws_path)));
+                out.push_str(&format!(
+                    "\nWorkspace ({}) [{ws_status}]:\n",
+                    format_tilde_path(&ws_path)
+                ));
                 if ws_mem.items.is_empty() {
                     out.push_str("  (empty)\n");
                 } else {

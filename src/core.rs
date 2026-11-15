@@ -9,7 +9,7 @@ pub mod skills;
 
 use crate::tools::{self, ToolCall};
 use attachments::{ImageAttachment, ImageStaging};
-use config::{Config, Memory};
+use config::{Config, Memory, MemoryScope};
 use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager, SessionSummary, ThoughtPart};
@@ -74,7 +74,10 @@ pub enum EngineCommand {
         max_tool_output_size: usize,
     },
     SetTurnConfig(TurnConfig),
-    SetMemory(Memory),
+    SetMemory {
+        scope: MemoryScope,
+        memory: Memory,
+    },
     RunShellCommand {
         command: String,
         include_in_context: bool,
@@ -142,7 +145,10 @@ pub enum EngineEvent {
     ToolCondensed(Result<String, String>),
     SessionsListed(Vec<SessionSummary>),
     SkillsUpdated(Vec<SkillDefinition>),
-    MemoryUpdated(Memory),
+    MemoryUpdated {
+        global_memory: Memory,
+        workspace_memory: Memory,
+    },
     ModelConfigUpdated {
         model: String,
         num_ctx: u32,
@@ -456,10 +462,13 @@ impl CoreEngine {
                 .tx
                 .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
         } else if tool_name == "memory" {
-            self.config.memory = config::reload_memory(&self.config);
-            let _ = self
-                .tx
-                .send(EngineEvent::MemoryUpdated(self.config.memory.clone()));
+            let (global_memory, workspace_memory) = config::reload_memories(&self.config);
+            self.config.global_memory = global_memory.clone();
+            self.config.workspace_memory = workspace_memory.clone();
+            let _ = self.tx.send(EngineEvent::MemoryUpdated {
+                global_memory,
+                workspace_memory,
+            });
         }
         let raw_bytes = output.len();
         self.messages
@@ -1136,31 +1145,38 @@ impl CoreEngine {
                 self.save_session_bg(Vec::new()).await;
                 self.emit_chat();
             }
-            EngineCommand::SetMemory(mem) => {
+            EngineCommand::SetMemory { scope, memory } => {
                 info!(
-                    "Updating Memory (enabled: {}, items: {})",
-                    mem.enabled,
-                    mem.items.len()
+                    "Updating {:?} Memory (enabled: {}, items: {})",
+                    scope,
+                    memory.enabled,
+                    memory.items.len()
                 );
-                let mem_to_save = mem.clone();
-                let save_res =
-                    tokio::task::spawn_blocking(move || config::save_global_memory(&mem_to_save))
-                        .await;
+                let mem_to_save = memory.clone();
+                let ws_dir = self.config.workspace_config_dir();
+                let save_res = tokio::task::spawn_blocking(move || {
+                    config::save_scoped_memory(scope, ws_dir.as_deref(), &mem_to_save)
+                })
+                .await;
 
                 match save_res {
                     Ok(Ok(_)) => {
-                        self.config.memory = config::reload_memory(&self.config);
-                        let _ = self
-                            .tx
-                            .send(EngineEvent::MemoryUpdated(self.config.memory.clone()));
+                        let (global_memory, workspace_memory) =
+                            config::reload_memories(&self.config);
+                        self.config.global_memory = global_memory.clone();
+                        self.config.workspace_memory = workspace_memory.clone();
+                        let _ = self.tx.send(EngineEvent::MemoryUpdated {
+                            global_memory,
+                            workspace_memory,
+                        });
                     }
                     Ok(Err(e)) => {
                         error!("Failed to persist Memory: {e}");
-                        self.config.memory = mem;
+                        self.config.set_scoped_memory(scope, memory);
                     }
                     Err(e) => {
                         error!("Memory save task panicked: {e}");
-                        self.config.memory = mem;
+                        self.config.set_scoped_memory(scope, memory);
                     }
                 }
             }
