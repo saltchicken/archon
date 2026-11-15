@@ -8,7 +8,24 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
-use wl_clipboard_rs::paste::{ClipboardType, MimeType, Seat, get_contents};
+use wl_clipboard_rs::{
+    copy::{MimeType as CopyMimeType, Options as CopyOptions, Source as CopySource},
+    paste::{ClipboardType, MimeType, Seat, get_contents},
+};
+
+pub fn copy_text_to_clipboard(text: &str) -> Result<()> {
+    let bytes = text.as_bytes().to_vec().into_boxed_slice();
+    if CopyOptions::new()
+        .copy(CopySource::Bytes(bytes), CopyMimeType::Text)
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_owned()))
+        .context("Failed to copy text to clipboard")
+}
 
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {

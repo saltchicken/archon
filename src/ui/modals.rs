@@ -271,6 +271,25 @@ impl TuiApp {
             " [^E] Toggle ON/OFF   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Persist   [Esc] Cancel",
         );
     }
+
+    pub(super) fn draw_context_menu(&self, f: &mut Frame, menu: &super::ContextMenu) {
+        let area = menu.rect(f.area());
+        let items: Vec<ListItem> = menu
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(i, action)| {
+                let (prefix, style) = selection_style(i == menu.selected, false);
+                ListItem::new(Line::from(Span::styled(
+                    format!("{prefix}{}", action.label()),
+                    style,
+                )))
+            })
+            .collect();
+
+        let block = titled_block("").border_style(Style::default().fg(Color::Cyan));
+        render_modal_at(f, area, List::new(items).block(block));
+    }
 }
 
 fn draw_editor_modal(

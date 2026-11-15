@@ -25,7 +25,7 @@ use futures_util::{FutureExt, StreamExt};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Padding},
@@ -102,6 +102,63 @@ pub(super) struct MsgUiState {
     pub collapsed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContextMenuAction {
+    CopyToClipboard,
+}
+
+impl ContextMenuAction {
+    pub const ALL: &[Self] = &[Self::CopyToClipboard];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CopyToClipboard => "Copy to clipboard",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ContextMenu {
+    pub x: u16,
+    pub y: u16,
+    pub selected: usize,
+    pub actions: Vec<ContextMenuAction>,
+    pub target_text: String,
+}
+
+impl ContextMenu {
+    pub fn rect(&self, screen: Rect) -> Rect {
+        let max_label = self
+            .actions
+            .iter()
+            .map(|a| a.label().len())
+            .max()
+            .unwrap_or(17);
+        let width = ((max_label + 7) as u16).min(screen.width.max(1));
+        let height = (self.actions.len() as u16 + 2).min(screen.height.max(1));
+        let max_x = screen.x + screen.width.saturating_sub(width);
+        let max_y = screen.y + screen.height.saturating_sub(height);
+        let x = self.x.clamp(screen.x, max_x);
+        let y = self.y.clamp(screen.y, max_y);
+        Rect::new(x, y, width, height)
+    }
+
+    pub fn item_at(&self, screen: Rect, col: u16, row: u16) -> Option<usize> {
+        let area = self.rect(screen);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if !inner.contains(Position::new(col, row)) {
+            return None;
+        }
+        let idx = usize::from(row - inner.y);
+        (idx < self.actions.len()).then_some(idx)
+    }
+}
+
 pub struct TuiApp {
     pub(super) model: String,
     pub(super) config: Config,
@@ -139,7 +196,9 @@ pub struct TuiApp {
 
     pub(super) msg_states: Vec<MsgUiState>,
 
+    pub(super) term_area: Rect,
     pub(super) chat_area: Rect,
+    pub(super) prompt_area: Rect,
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
@@ -147,6 +206,7 @@ pub struct TuiApp {
     pub(super) cursor_blink_on: bool,
 
     pub(super) modal: ActiveModal,
+    pub(super) context_menu: Option<ContextMenu>,
     pub(super) file_path_input: String,
     pub(super) sessions: Vec<SessionSummary>,
     pub(super) session_idx: usize,
@@ -257,12 +317,15 @@ impl TuiApp {
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_states: Vec::new(),
+            term_area: Rect::default(),
             chat_area: Rect::default(),
+            prompt_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
             modal: ActiveModal::None,
+            context_menu: None,
             file_path_input: String::new(),
             sessions: Vec::new(),
             session_idx: 0,

@@ -1,5 +1,10 @@
-use super::{ActiveModal, TuiApp};
-use crate::core::{EngineCommand, config::PersonalIntelligence};
+use super::{
+    ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
+};
+use crate::core::{
+    EngineCommand, attachments::copy_text_to_clipboard, config::PersonalIntelligence,
+    session::ChatMessage,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 use std::path::PathBuf;
@@ -45,8 +50,162 @@ impl TuiApp {
         }
     }
 
+    fn message_text_for(&self, idx: usize, m: &ChatMessage) -> String {
+        if !m.content.trim().is_empty() {
+            return m.content.clone();
+        }
+        if m.role == "assistant" {
+            let resolved_count = self.messages[idx + 1..]
+                .iter()
+                .filter(|n| n.role != "error")
+                .take_while(|n| n.role == "tool")
+                .count();
+            return format_assistant_display(m, resolved_count);
+        }
+        m.content.clone()
+    }
+
+    fn message_block_text(&self, idx: usize) -> Option<String> {
+        if idx < self.messages.len() {
+            Some(self.message_text_for(idx, &self.messages[idx]))
+        } else if idx == self.messages.len() {
+            if self.is_streaming && !self.streaming_text.is_empty() {
+                Some(self.streaming_text.clone())
+            } else {
+                self.active_tool_status.clone()
+            }
+        } else {
+            self.queued_messages
+                .get(idx.saturating_sub(self.messages.len() + 1))
+                .map(|m| m.content.clone())
+        }
+    }
+
+    fn context_target_text(&self, x: u16, y: u16) -> String {
+        match self.modal {
+            ActiveModal::ToolApproval => {
+                return self
+                    .pending_tool
+                    .as_ref()
+                    .map(|(p, _, _)| p.clone())
+                    .unwrap_or_default();
+            }
+            ActiveModal::SystemPrompt => return self.sys_prompt_area.lines().join("\n"),
+            ActiveModal::PersonalIntelligence => return self.pi_area.lines().join("\n"),
+            ActiveModal::AddFile => return self.file_path_input.clone(),
+            ActiveModal::Sessions => {
+                return self
+                    .sessions
+                    .get(self.session_idx)
+                    .map(|s| s.title.clone())
+                    .unwrap_or_default();
+            }
+            ActiveModal::ModelSelect => {
+                return self
+                    .config
+                    .models
+                    .get(self.model_idx)
+                    .map(|m| m.name.clone())
+                    .unwrap_or_default();
+            }
+            ActiveModal::None => {}
+        }
+
+        let pos = Position::new(x, y);
+        if self.prompt_area.contains(pos) {
+            let prompt_text = self.text_area.lines().join("\n");
+            if !prompt_text.is_empty() {
+                return prompt_text;
+            }
+        }
+
+        if self.chat_area.contains(pos) {
+            let inner = self.chat_inner_area();
+            let inner_y = usize::from(y.saturating_sub(inner.y));
+            let visual_y = inner_y + self.chat_scroll;
+
+            let target_idx = if inner.contains(pos) && inner_y == 0 {
+                self.find_sticky_header_msg()
+                    .or_else(|| self.find_msg_at(visual_y).map(|(i, _, _)| i))
+            } else {
+                self.find_msg_at(visual_y).map(|(i, _, _)| i)
+            };
+
+            if let Some(idx) = target_idx
+                && let Some(text) = self.message_block_text(idx)
+            {
+                return text;
+            }
+        }
+
+        if self.is_streaming && !self.streaming_text.is_empty() {
+            return self.streaming_text.clone();
+        }
+        if let Some((idx, last_msg)) = self.messages.iter().enumerate().next_back() {
+            return self.message_text_for(idx, last_msg);
+        }
+        self.text_area.lines().join("\n")
+    }
+
+    fn execute_context_menu_action(&mut self, action: ContextMenuAction, target_text: &str) {
+        match action {
+            ContextMenuAction::CopyToClipboard => {
+                if let Err(e) = copy_text_to_clipboard(target_text) {
+                    self.push_error_message(format!("Failed to copy to clipboard: {e}"));
+                }
+            }
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (x, y) = (mouse.column, mouse.row);
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+            let target_text = self.context_target_text(x, y);
+            self.context_menu = Some(ContextMenu {
+                x,
+                y,
+                selected: 0,
+                actions: ContextMenuAction::ALL.to_vec(),
+                target_text,
+            });
+            return;
+        }
+
+        if self.context_menu.is_some() {
+            let screen = self.term_area;
+            match mouse.kind {
+                MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                    if let Some(menu) = self.context_menu.as_mut()
+                        && let Some(idx) = menu.item_at(screen, x, y)
+                    {
+                        menu.selected = idx;
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(menu) = self.context_menu.take()
+                        && let Some(idx) = menu.item_at(screen, x, y)
+                        && let Some(&action) = menu.actions.get(idx)
+                    {
+                        self.execute_context_menu_action(action, &menu.target_text);
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if let Some(menu) = self.context_menu.as_mut() {
+                        menu.selected = menu.selected.saturating_sub(1);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(menu) = self.context_menu.as_mut()
+                        && menu.selected + 1 < menu.actions.len()
+                    {
+                        menu.selected += 1;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
 
         if self.modal == ActiveModal::ToolApproval {
             match mouse.kind {
@@ -122,6 +281,11 @@ impl TuiApp {
             return true;
         }
 
+        if self.context_menu.is_some() {
+            self.handle_context_menu_key(key.code);
+            return false;
+        }
+
         match self.modal {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
@@ -134,6 +298,32 @@ impl TuiApp {
             ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
         false
+    }
+
+    fn handle_context_menu_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.context_menu = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(menu) = self.context_menu.as_mut()
+                    && menu.selected + 1 < menu.actions.len()
+                {
+                    menu.selected += 1;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('c') => {
+                if let Some(menu) = self.context_menu.take()
+                    && let Some(&action) = menu.actions.get(menu.selected)
+                {
+                    self.execute_context_menu_action(action, &menu.target_text);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_add_file_key(&mut self, code: KeyCode) {

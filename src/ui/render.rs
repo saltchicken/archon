@@ -30,7 +30,7 @@ fn format_tool_call_summary(c: &ToolCall) -> String {
     format!("{}({})", c.function.name, truncate_str(&args, 80))
 }
 
-fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> String {
+pub(super) fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> String {
     let mut text = sanitize_line(&m.content);
     if let Some(calls) = m
         .tool_calls
@@ -454,11 +454,12 @@ impl TuiApp {
     }
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
+        self.term_area = f.area();
         let sidebar_width = if self.sidebar_expanded { 36 } else { 0 };
         let main_panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
-            .split(f.area());
+            .split(self.term_area);
 
         if self.sidebar_expanded {
             self.draw_sidebar(f, main_panes[0]);
@@ -473,6 +474,10 @@ impl TuiApp {
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::PersonalIntelligence => self.draw_personal_intelligence_modal(f),
             ActiveModal::None => {}
+        }
+
+        if let Some(ref menu) = self.context_menu {
+            self.draw_context_menu(f, menu);
         }
     }
 
@@ -547,6 +552,7 @@ impl TuiApp {
             .split(area);
 
         self.chat_area = chunks[0];
+        self.prompt_area = chunks[1];
         let available_width = self.chat_inner_area().width.saturating_sub(2).max(1) as usize;
 
         self.msg_states.resize(
