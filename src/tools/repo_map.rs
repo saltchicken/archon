@@ -1,6 +1,17 @@
-use super::{BlockingTool, ToolContext, utils::fs::read_utf8_capped};
-use crate::core::{config::WorkspaceSnapshotSettings, session::truncate_str};
+use super::{
+    BlockingTool, ToolContext,
+    utils::{
+        fs::read_utf8_capped,
+        path::{build_globset, has_git_dir_component, resolve_existing_under},
+    },
+};
+use crate::core::{
+    config::{WorkspaceSnapshotSettings, expand_tilde, format_tilde_path},
+    session::truncate_str,
+};
 use anyhow::{Result, bail};
+use ignore::WalkBuilder;
+use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
@@ -42,7 +53,10 @@ pub struct RepoMapArgs {
     /// Optional focus symbols or query terms when `action` is `map` (e.g. `["CoreEngine", "Provider"]`). Boosts PageRank personalization toward files defining or referencing these symbols.
     #[serde(default)]
     focus_symbols: Vec<String>,
-    /// Optional relative directory or file path within the workspace to scope the operation (defaults to workspace root).
+    /// Optional crate name (e.g. `"ratatui"`, `"ratatui-textarea"`, `"tree_sitter"`) to inspect an installed Rust crate's source inside `~/.cargo/registry/src` instead of the workspace. Automatically resolves the version matching `Cargo.lock` (or the latest installed version in the registry cache).
+    #[serde(default)]
+    crate_name: String,
+    /// Optional relative directory or file path within the workspace (or within the crate root when `crate_name` is set) to scope the operation. Also accepts a direct path inside `~/.cargo/registry/src`.
     #[serde(default)]
     target_path: String,
     /// Optional glob patterns to filter included files (e.g. `["src/**/*.rs", "**/*.ts"]`).
@@ -885,14 +899,301 @@ fn walk_references(
     }
 }
 
+fn cargo_registry_src_dir() -> Result<PathBuf> {
+    let base = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cargo")))
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine ~/.cargo directory"))?;
+    let src = base.join("registry").join("src");
+    if !src.is_dir() {
+        bail!("Cargo registry source directory not found at '{}'", src.display());
+    }
+    Ok(dunce::canonicalize(&src).unwrap_or(src))
+}
+
+fn normalize_crate_ident(name: &str) -> String {
+    name.trim().replace('-', "_").to_ascii_lowercase()
+}
+
+fn parse_version_sort_key(ver: &str) -> (Vec<u64>, bool, String) {
+    let (core, pre) = ver.split_once('-').unwrap_or((ver, ""));
+    let nums = core
+        .split('.')
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .collect();
+    (nums, pre.is_empty(), ver.to_string())
+}
+
+fn split_crate_dir_version<'a>(dir_name: &'a str, crate_norm: &str) -> Option<&'a str> {
+    for (idx, _) in dir_name.rmatch_indices('-') {
+        let (pkg, rest) = dir_name.split_at(idx);
+        let ver = &rest[1..];
+        if ver.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && normalize_crate_ident(pkg) == crate_norm
+        {
+            return Some(ver);
+        }
+    }
+    None
+}
+
+fn find_locked_crate_versions(workspace_root: &Path, crate_norm: &str) -> Vec<String> {
+    let lock_path = workspace_root
+        .ancestors()
+        .map(|a| a.join("Cargo.lock"))
+        .find(|p| p.is_file());
+    let Some(lock_path) = lock_path else {
+        return Vec::new();
+    };
+    let Ok(raw) = fs::read_to_string(lock_path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = toml::from_str::<toml::Value>(&raw) else {
+        return Vec::new();
+    };
+
+    let mut versions = Vec::new();
+    if let Some(pkgs) = parsed.get("package").and_then(toml::Value::as_array) {
+        for pkg in pkgs {
+            let Some(name) = pkg.get("name").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let Some(version) = pkg.get("version").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            if normalize_crate_ident(name) == crate_norm {
+                versions.push(version.to_string());
+            }
+        }
+    }
+    versions.sort_by(|a, b| parse_version_sort_key(b).cmp(&parse_version_sort_key(a)));
+    versions.dedup();
+    versions
+}
+
+fn resolve_installed_crate_dir(
+    workspace_root: &Path,
+    raw_crate: &str,
+) -> Result<(PathBuf, String)> {
+    let trimmed = raw_crate.trim();
+    if trimmed.is_empty() {
+        bail!("crate_name cannot be empty");
+    }
+
+    let (requested_name, explicit_ver) = match trimmed.rsplit_once('@') {
+        Some((n, v)) if !n.trim().is_empty() && !v.trim().is_empty() => {
+            (n.trim(), Some(v.trim().trim_start_matches('v')))
+        }
+        _ => (trimmed, None),
+    };
+
+    let crate_norm = normalize_crate_ident(requested_name);
+    let cargo_src_dir = cargo_registry_src_dir()?;
+
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    for index_entry in fs::read_dir(&cargo_src_dir).into_iter().flatten().flatten() {
+        let index_path = index_entry.path();
+        if !index_path.is_dir() {
+            continue;
+        }
+        for crate_entry in fs::read_dir(&index_path).into_iter().flatten().flatten() {
+            let crate_path = crate_entry.path();
+            if !crate_path.is_dir() {
+                continue;
+            }
+            let Some(dir_name) = crate_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(ver) = split_crate_dir_version(dir_name, &crate_norm) {
+                if let Some(req_ver) = explicit_ver
+                    && ver != req_ver
+                    && !ver.starts_with(&format!("{req_ver}."))
+                {
+                    continue;
+                }
+                let ver_owned = ver.to_string();
+                let canon = dunce::canonicalize(&crate_path).unwrap_or(crate_path);
+                candidates.push((ver_owned, canon));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        bail!(
+            "Crate '{trimmed}' not found in '{}'. Ensure it is downloaded in the Cargo cache.",
+            format_tilde_path(&cargo_src_dir)
+        );
+    }
+
+    candidates.sort_by(|a, b| parse_version_sort_key(&b.0).cmp(&parse_version_sort_key(&a.0)));
+
+    if explicit_ver.is_none() {
+        let locked_versions = find_locked_crate_versions(workspace_root, &crate_norm);
+        for locked in &locked_versions {
+            if let Some((_, path)) = candidates.iter().find(|(v, _)| v == locked) {
+                let label = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(requested_name)
+                    .to_string();
+                return Ok((path.clone(), label));
+            }
+        }
+    }
+
+    let (_, best_path) = candidates.into_iter().next().unwrap();
+    let label = best_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(requested_name)
+        .to_string();
+    Ok((best_path, label))
+}
+
+fn resolve_external_cargo_roots(
+    ctx: &ToolContext,
+    args: &RepoMapArgs,
+) -> Result<Option<(PathBuf, PathBuf, Option<String>)>> {
+    let crate_arg = args.crate_name.trim();
+    if !crate_arg.is_empty() {
+        let (crate_root, crate_label) = resolve_installed_crate_dir(&ctx.root, crate_arg)?;
+        let scan_root = resolve_existing_under(
+            &crate_root,
+            &args.target_path,
+            "target_path escapes crate root",
+        )?;
+        return Ok(Some((crate_root, scan_root, Some(crate_label))));
+    }
+
+    let raw_target = args.target_path.trim();
+    if raw_target.is_empty() {
+        return Ok(None);
+    }
+
+    let expanded = expand_tilde(raw_target);
+    if !expanded.is_absolute() {
+        return Ok(None);
+    }
+
+    let Ok(cargo_src_dir) = cargo_registry_src_dir() else {
+        return Ok(None);
+    };
+    if !expanded.exists() {
+        if expanded.starts_with(&cargo_src_dir) {
+            bail!("Target path does not exist: '{raw_target}'");
+        }
+        return Ok(None);
+    }
+
+    let canon_target = dunce::canonicalize(&expanded)?;
+    if !canon_target.starts_with(&cargo_src_dir) {
+        return Ok(None);
+    }
+
+    let rel = canon_target
+        .strip_prefix(&cargo_src_dir)
+        .unwrap_or(&canon_target);
+    let mut comps = rel.components();
+    let base_root = if let (Some(idx_comp), Some(crate_comp)) = (comps.next(), comps.next()) {
+        cargo_src_dir.join(idx_comp).join(crate_comp)
+    } else {
+        canon_target.clone()
+    };
+    let label = base_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(String::from);
+
+    Ok(Some((base_root, canon_target, label)))
+}
+
+fn walk_external_crate_files(
+    ctx: &ToolContext,
+    base_root: &Path,
+    scan_root: &Path,
+    crate_label: Option<&str>,
+    include_patterns: &[String],
+    call_exclude: &[String],
+) -> Result<Vec<(PathBuf, String)>> {
+    let include_set = (!include_patterns.is_empty())
+        .then(|| build_globset(include_patterns, true))
+        .transpose()?;
+    let exclude_set = ctx.build_exclude_globset(call_exclude, true)?;
+
+    let format_rel = |rel: &Path| -> String {
+        let rel_str = rel.to_string_lossy();
+        match crate_label {
+            Some(label) if !rel_str.is_empty() => format!("{label}/{rel_str}"),
+            Some(label) => label.to_string(),
+            None => format_tilde_path(&base_root.join(rel)),
+        }
+    };
+
+    if scan_root.is_file() {
+        let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
+        if exclude_set.is_match(&rel) {
+            bail!(
+                "Security violation: '{}' matches an excluded pattern",
+                rel.display()
+            );
+        }
+        return Ok(vec![(scan_root.to_path_buf(), format_rel(&rel))]);
+    }
+
+    let mut files = Vec::new();
+    let walker = WalkBuilder::new(scan_root)
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .build()
+        .flatten();
+
+    for entry in walker {
+        if files.len() >= ctx.config.workspace_snapshot.max_files {
+            break;
+        }
+        let path = entry.path();
+        if !path.is_file() || has_git_dir_component(path) {
+            continue;
+        }
+        let Some(relative) = diff_paths(path, base_root) else {
+            continue;
+        };
+        if exclude_set.is_match(&relative)
+            || include_set
+                .as_ref()
+                .is_some_and(|inc| !inc.is_match(&relative))
+        {
+            continue;
+        }
+        files.push((path.to_path_buf(), format_rel(&relative)));
+    }
+
+    files.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(files)
+}
+
 fn collect_candidate_files(
     args: &RepoMapArgs,
     ctx: &ToolContext,
 ) -> Result<Vec<(PathBuf, String, SupportedLang)>> {
-    let (base_root, scan_root) =
-        ctx.resolve_scan_roots(&args.target_path, "target_path escapes workspace root")?;
-
-    let walked = ctx.walk_workspace_files(&base_root, &scan_root, &args.include, &args.exclude)?;
+    let walked = if let Some((base_root, scan_root, crate_label)) =
+        resolve_external_cargo_roots(ctx, args)?
+    {
+        walk_external_crate_files(
+            ctx,
+            &base_root,
+            &scan_root,
+            crate_label.as_deref(),
+            &args.include,
+            &args.exclude,
+        )?
+    } else {
+        let (base_root, scan_root) =
+            ctx.resolve_scan_roots(&args.target_path, "target_path escapes workspace root")?;
+        ctx.walk_workspace_files(&base_root, &scan_root, &args.include, &args.exclude)?
+    };
 
     Ok(walked
         .into_iter()
@@ -1219,7 +1520,7 @@ fn execute_references(
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "repo_map";
-    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, and Go. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope).";
+    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, and Go. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly.";
     type Args = RepoMapArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
