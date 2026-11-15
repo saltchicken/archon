@@ -459,16 +459,21 @@ impl TuiApp {
                 for (i, m) in self.messages.iter().enumerate() {
                     if m.role == "tool" {
                         self.msg_states[i].collapsed = true;
+                    } else if m.role == "error" {
+                        self.msg_states[i].unfolded = true;
                     }
                 }
 
-                // Unfold the latest assistant or local shell response while keeping `tool` blocks collapsed.
+                // Unfold the latest assistant, local shell, or error response while keeping `tool` blocks collapsed.
                 if let Some(last_idx) = self
                     .messages
                     .iter()
-                    .rposition(|m| m.role == "assistant" || m.role == "local")
+                    .rposition(|m| matches!(m.role.as_str(), "assistant" | "local" | "error"))
                 {
                     self.msg_states[last_idx].unfolded = true;
+                }
+                if self.messages.last().is_some_and(|m| m.role == "error") {
+                    self.scroll_to_bottom();
                 }
             }
             EngineEvent::QueuedInterjectionsUpdated(queued) => {
@@ -504,6 +509,9 @@ impl TuiApp {
                         format!("{partial}\n\n*[Stream interrupted]*"),
                     ));
                 }
+                self.push_error_message(err);
+            }
+            EngineEvent::Error(err) => {
                 self.push_error_message(err);
             }
             EngineEvent::ToolStarted {
@@ -744,26 +752,32 @@ impl TuiApp {
         }
 
         let mut turn = self.current_turn_config();
-        let prompt = if let Some((skill_name, user_prompt)) =
-            crate::core::skills::expand_at_command(&raw_prompt, &self.config)
+        let prompt = if let Some((cmd_token, args_str)) =
+            crate::core::skills::parse_at_command(&raw_prompt)
         {
-            if let Err(reason) = crate::core::skills::check_skill_activation(
-                &skill_name,
+            match crate::core::skills::check_skill_activation(
+                cmd_token,
                 self.enable_tools,
                 &self.config,
             ) {
-                self.push_error_message(reason);
-                return false;
+                Ok(skill_name) => {
+                    turn.active_skill = Some(skill_name);
+                    turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
+                    if args_str.is_empty() {
+                        raw_prompt.trim().to_string()
+                    } else {
+                        args_str.to_string()
+                    }
+                }
+                Err(_) => {
+                    turn.active_skill = Some(cmd_token.to_string());
+                    let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
+                        prompt: raw_prompt,
+                        turn,
+                    });
+                    return false;
+                }
             }
-            let args = raw_prompt
-                .trim()
-                .strip_prefix('@')
-                .and_then(|rest| rest.find(char::is_whitespace).map(|idx| rest[idx..].trim()))
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            turn.active_skill = Some(skill_name);
-            turn.skill_args = args;
-            user_prompt
         } else {
             raw_prompt.clone()
         };

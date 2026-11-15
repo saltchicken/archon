@@ -65,9 +65,19 @@ pub(crate) fn parse_skill_markdown(
 ) -> Option<SkillDefinition> {
     let fallback_name = dir_path.file_name()?.to_str()?.trim().to_string();
     let (fm_str, body) = split_toml_frontmatter(raw);
-    let fm: SkillFrontmatter = fm_str
-        .and_then(|s| toml::from_str(s).ok())
-        .unwrap_or_default();
+    let fm: SkillFrontmatter = match fm_str {
+        Some(s) => match toml::from_str(s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse TOML frontmatter in skill '{}': {e}",
+                    dir_path.display()
+                );
+                SkillFrontmatter::default()
+            }
+        },
+        None => SkillFrontmatter::default(),
+    };
 
     let name = if fm.name.trim().is_empty() {
         fallback_name
@@ -114,17 +124,28 @@ pub(crate) fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefiniti
     for path in entries {
         if path.is_dir() {
             let md_path = path.join("SKILL.md");
-            if let Ok(raw) = fs::read_to_string(&md_path)
-                && let Some(skill) = parse_skill_markdown(&raw, &path, is_trusted)
-            {
-                skills.push(skill);
+            match fs::read_to_string(&md_path) {
+                Ok(raw) => {
+                    if let Some(skill) = parse_skill_markdown(&raw, &path, is_trusted) {
+                        skills.push(skill);
+                    }
+                }
+                Err(e) if md_path.exists() => {
+                    tracing::warn!("Failed to read skill file '{}': {e}", md_path.display());
+                }
+                Err(_) => {}
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md")
-            && let Ok(raw) = fs::read_to_string(&path)
-        {
-            let stem_dir = path.with_extension("");
-            if let Some(skill) = parse_skill_markdown(&raw, &stem_dir, is_trusted) {
-                skills.push(skill);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            match fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let stem_dir = path.with_extension("");
+                    if let Some(skill) = parse_skill_markdown(&raw, &stem_dir, is_trusted) {
+                        skills.push(skill);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read skill file '{}': {e}", path.display());
+                }
             }
         }
     }
@@ -175,7 +196,7 @@ pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a Skill
     })
 }
 
-pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, String)> {
+pub fn parse_at_command(raw_prompt: &str) -> Option<(&str, &str)> {
     let trimmed = raw_prompt.trim();
     let rest = trimmed.strip_prefix('@')?;
     let (cmd_token, args_str) = match rest.find(char::is_whitespace) {
@@ -185,16 +206,7 @@ pub fn expand_at_command(raw_prompt: &str, config: &Config) -> Option<(String, S
     if cmd_token.is_empty() {
         return None;
     }
-
-    let skill = find_skill(config, cmd_token)?;
-
-    let user_prompt = if args_str.is_empty() {
-        trimmed.to_string()
-    } else {
-        args_str.to_string()
-    };
-
-    Some((skill.name.clone(), user_prompt))
+    Some((cmd_token, args_str))
 }
 
 pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
@@ -215,9 +227,10 @@ pub fn check_skill_activation(
     skill_name: &str,
     enable_tools: bool,
     config: &Config,
-) -> std::result::Result<(), String> {
-    let Some(skill) = find_skill(config, skill_name) else {
-        return Err(format!("Skill '@{skill_name}' not found."));
+) -> std::result::Result<String, String> {
+    let clean_name = skill_name.trim().trim_start_matches('@');
+    let Some(skill) = find_skill(config, clean_name) else {
+        return Err(format!("Skill '@{clean_name}' not found."));
     };
     if !skill.tools.is_empty() && !enable_tools {
         return Err(format!(
@@ -233,7 +246,7 @@ pub fn check_skill_activation(
             missing.join(", ")
         ));
     }
-    Ok(())
+    Ok(skill.name.clone())
 }
 
 pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
@@ -280,27 +293,27 @@ pub fn compose_system_prompt(
         let refs = list_skill_reference_paths(skill);
         let args = skill_args.unwrap_or("").trim();
         let prompt_body = skill.prompt.replace("{{args}}", args).trim().to_string();
-        if !refs.is_empty() || !prompt_body.is_empty() || !args.is_empty() {
-            let mut block = String::new();
-            if !refs.is_empty() {
-                let _ = writeln!(
-                    block,
-                    "Reference files (read via `read_file`): {}",
-                    refs.join(", ")
-                );
-            }
-            if !prompt_body.is_empty() {
-                let _ = writeln!(block, "{prompt_body}");
-            }
-            if !args.is_empty() && !skill.prompt.contains("{{args}}") {
-                let _ = writeln!(block, "\nUser arguments / instructions: {args}");
-            }
-            sections.push(format!(
-                "<skill name=\"{}\">\n{}\n</skill>",
-                skill.name,
-                block.trim_end()
-            ));
+        let mut block = String::new();
+        if !refs.is_empty() {
+            let _ = writeln!(
+                block,
+                "Reference files (read via `read_file`): {}",
+                refs.join(", ")
+            );
         }
+        if !prompt_body.is_empty() {
+            let _ = writeln!(block, "{prompt_body}");
+        } else if refs.is_empty() && args.is_empty() {
+            let _ = writeln!(block, "Active skill: {}", skill.description);
+        }
+        if !args.is_empty() && !skill.prompt.contains("{{args}}") {
+            let _ = writeln!(block, "\nUser arguments / instructions: {args}");
+        }
+        sections.push(format!(
+            "<skill name=\"{}\">\n{}\n</skill>",
+            skill.name,
+            block.trim_end()
+        ));
     }
 
     sections.join("\n\n")

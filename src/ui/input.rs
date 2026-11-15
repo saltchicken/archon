@@ -350,11 +350,18 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
                 self.modal = ActiveModal::Sessions;
             }
-            KeyCode::Char('m') if ctrl && !self.config.models.is_empty() => {
-                if let Some(idx) = self.config.models.iter().position(|m| m.name == self.model) {
-                    self.model_idx = idx;
+            KeyCode::Char('m') if ctrl => {
+                if self.config.models.is_empty() {
+                    self.push_error_message(
+                        "No model presets configured in config.toml (`[[models]]`).".into(),
+                    );
+                } else {
+                    if let Some(idx) = self.config.models.iter().position(|m| m.name == self.model)
+                    {
+                        self.model_idx = idx;
+                    }
+                    self.modal = ActiveModal::ModelSelect;
                 }
-                self.modal = ActiveModal::ModelSelect;
             }
             KeyCode::Char('r') if ctrl => {
                 let _ = self.cmd_tx.send(EngineCommand::ResetChat);

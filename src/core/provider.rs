@@ -182,6 +182,7 @@ pub fn sanitize_messages_for_turn(
                     ));
                 }
             }
+            "error" => {}
             _ => {
                 out.push(m);
             }

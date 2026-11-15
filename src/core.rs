@@ -86,6 +86,7 @@ pub enum EngineEvent {
         thoughts: Vec<ThoughtPart>,
     },
     StreamError(String),
+    Error(String),
     ToolStarted {
         summary: String,
         index: usize,
@@ -218,6 +219,7 @@ impl CoreEngine {
         for m in self.messages.iter().rev() {
             match m.role.as_str() {
                 "tool" => resolved += 1,
+                "error" => continue,
                 "assistant" => {
                     let Some(calls) = m.tool_calls.as_ref() else {
                         return Vec::new();
@@ -260,6 +262,13 @@ impl CoreEngine {
         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(vec![]));
     }
 
+    async fn emit_error(&mut self, err: impl Into<String>) {
+        let err = err.into();
+        self.messages.push(ChatMessage::new("error", err.clone()));
+        self.save_session_bg(Vec::new()).await;
+        let _ = self.tx.send(EngineEvent::Error(err));
+    }
+
     fn emit_model_config(&self) {
         let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
             model: self.model.clone(),
@@ -272,8 +281,20 @@ impl CoreEngine {
         let active_skill = self.turn.active_skill.take();
         let skill_args = self.turn.skill_args.take();
         self.turn = new_turn;
-        self.turn.active_skill = active_skill;
-        self.turn.skill_args = skill_args;
+        if let Some(skill_name) = active_skill {
+            if skills::check_skill_activation(&skill_name, self.turn.enable_tools, &self.config)
+                .is_ok()
+            {
+                self.turn.active_skill = Some(skill_name);
+                self.turn.skill_args = skill_args;
+            } else if (!self.pending_tools.is_empty() || self.is_turn_active())
+                && skills::check_skill_activation(&skill_name, true, &self.config).is_ok()
+            {
+                self.turn.enable_tools = true;
+                self.turn.active_skill = Some(skill_name);
+                self.turn.skill_args = skill_args;
+            }
+        }
     }
 
     fn reset_skill_and_sync_model_limits(&mut self) {
@@ -334,14 +355,26 @@ impl CoreEngine {
             info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
         }
         let mut new_images = Vec::new();
+        let mut has_valid_prompt = false;
         for item in self.queued_interjections.drain(..) {
+            if let Some(ref skill_name) = item.turn.active_skill
+                && let Err(reason) =
+                    skills::check_skill_activation(skill_name, item.turn.enable_tools, &self.config)
+            {
+                warn!("{reason}");
+                self.messages.push(ChatMessage::new("error", reason));
+                continue;
+            }
             self.turn = item.turn;
             self.messages.push(item.msg);
             new_images.extend(item.new_images);
+            has_valid_prompt = true;
         }
         self.save_and_emit_chat(new_images).await;
-        let turn = self.turn.clone();
-        self.spawn_model_turn(&turn).await;
+        if has_valid_prompt {
+            let turn = self.turn.clone();
+            self.spawn_model_turn(&turn).await;
+        }
         true
     }
 
@@ -538,7 +571,7 @@ impl CoreEngine {
                         skills::check_skill_activation(skill_name, turn.enable_tools, &self.config)
                 {
                     warn!("{reason}");
-                    let _ = self.tx.send(EngineEvent::StreamError(reason));
+                    self.emit_error(reason).await;
                     return;
                 }
 
@@ -698,34 +731,52 @@ impl CoreEngine {
                         self.session_id = data.id;
                         self.turn.system_prompt = data.system_prompt;
 
+                        let mut model_switch_err = None;
                         if !data.model.is_empty() && data.model != self.model {
                             let loaded_provider = Provider::from_model(&data.model);
-                            if let Ok(new_client) = loaded_provider.build_client(&self.config) {
-                                self.model = data.model.clone();
-                                self.provider = loaded_provider;
-                                self.client = new_client;
+                            match loaded_provider.build_client(&self.config) {
+                                Ok(new_client) => {
+                                    self.model = data.model.clone();
+                                    self.provider = loaded_provider;
+                                    self.client = new_client;
+                                }
+                                Err(e) => {
+                                    let msg = format!(
+                                        "Failed to build HTTP client for session model '{}': {e}",
+                                        data.model
+                                    );
+                                    error!("{msg}");
+                                    model_switch_err = Some(msg);
+                                }
                             }
                         }
 
                         self.reset_skill_and_sync_model_limits();
-                        self.messages = data.messages;
-                        self.emit_chat();
-
-                        if let Some(calls) = self
+                        let pending_calls = data
                             .messages
                             .last()
                             .and_then(|m| m.tool_calls.clone())
-                            .filter(|c| !c.is_empty())
-                        {
+                            .filter(|c| !c.is_empty());
+                        self.messages = data.messages;
+                        self.emit_chat();
+                        if let Some(err) = model_switch_err {
+                            self.emit_error(err).await;
+                        }
+
+                        if let Some(calls) = pending_calls {
                             self.pending_tools = VecDeque::from(calls);
                             self.process_pending_tools().await;
                         }
                     }
                     Ok(Err(e)) => {
-                        error!("Failed to load session: {e}");
+                        let msg = format!("Failed to load session: {e}");
+                        error!("{msg}");
+                        self.emit_error(msg).await;
                     }
                     Err(e) => {
-                        error!("Session load task panicked: {e}");
+                        let msg = format!("Session load task panicked: {e}");
+                        error!("{msg}");
+                        self.emit_error(msg).await;
                     }
                 }
             }
@@ -754,9 +805,10 @@ impl CoreEngine {
                     || !self.pending_tools.is_empty()
                     || !self.queued_interjections.is_empty()
                 {
-                    let _ = self.tx.send(EngineEvent::StreamError(
-                        "Cannot switch models while a turn or tool approval is active.".into(),
-                    ));
+                    self.emit_error(
+                        "Cannot switch models while a turn or tool approval is active.",
+                    )
+                    .await;
                     return;
                 }
 
@@ -769,7 +821,7 @@ impl CoreEngine {
                 if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
                     let msg = format!("Model switch to '{model}' failed preflight: {e}");
                     error!("{msg}");
-                    let _ = self.tx.send(EngineEvent::StreamError(msg));
+                    self.emit_error(msg).await;
                     return;
                 }
 
@@ -778,7 +830,7 @@ impl CoreEngine {
                     Err(e) => {
                         let msg = format!("Failed to build HTTP client for '{model}': {e}");
                         error!("{msg}");
-                        let _ = self.tx.send(EngineEvent::StreamError(msg));
+                        self.emit_error(msg).await;
                         return;
                     }
                 };
@@ -894,7 +946,11 @@ impl CoreEngine {
                     warn!(
                         "Stream finished with empty content and no tool calls (Prompt: {prompt_tokens}, Eval: {eval_tokens})"
                     );
-                    self.emit_chat();
+                    self.messages.push(ChatMessage::new(
+                        "error",
+                        "Model returned an empty response (no content or tool calls).",
+                    ));
+                    self.save_and_emit_chat(Vec::new()).await;
                 }
 
                 let _ = self.tx.send(ev.clone());
@@ -907,8 +963,16 @@ impl CoreEngine {
             }
             EngineEvent::StreamError(ref err) => {
                 self.finish_active_task();
-                self.stream_buffer.clear();
+                let partial = std::mem::take(&mut self.stream_buffer);
+                if !partial.trim().is_empty() {
+                    self.messages.push(ChatMessage::new(
+                        "assistant",
+                        format!("{partial}\n\n*[Stream interrupted]*"),
+                    ));
+                }
                 error!("API Error: {err}");
+                self.messages.push(ChatMessage::new("error", err.clone()));
+                self.save_session_bg(Vec::new()).await;
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
             }

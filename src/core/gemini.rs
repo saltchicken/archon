@@ -340,8 +340,18 @@ pub fn build_payload(
 struct GeminiStreamChunk {
     error: Option<GeminiErrorDetail>,
     candidates: Option<Vec<GeminiCandidate>>,
+    #[serde(rename = "promptFeedback")]
+    prompt_feedback: Option<GeminiPromptFeedback>,
     #[serde(rename = "usageMetadata")]
     usage_metadata: Option<GeminiUsage>,
+}
+
+#[derive(Deserialize)]
+struct GeminiPromptFeedback {
+    #[serde(rename = "blockReason")]
+    block_reason: Option<String>,
+    #[serde(rename = "blockReasonMessage")]
+    block_reason_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -356,6 +366,8 @@ struct GeminiCandidate {
     content: Option<GeminiContent>,
     #[serde(rename = "finishReason")]
     finish_reason: Option<String>,
+    #[serde(rename = "finishMessage")]
+    finish_message: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -448,6 +460,9 @@ pub async fn stream_chat(
     let mut prompt_tokens = 0u64;
     let mut eval_tokens = 0u64;
     let mut done_reason = None;
+    let mut raw_finish_reason = None;
+    let mut finish_message = None;
+    let mut has_text = false;
 
     while let Some(line_res) = lines.next().await {
         let line = match line_res {
@@ -483,6 +498,20 @@ pub async fn stream_chat(
             return;
         }
 
+        if let Some(fb) = chunk.prompt_feedback
+            && let Some(reason) = fb.block_reason.filter(|r| !r.is_empty())
+        {
+            let detail = fb
+                .block_reason_message
+                .filter(|m| !m.is_empty())
+                .map(|m| format!(": {m}"))
+                .unwrap_or_default();
+            let msg = format!("Gemini blocked prompt ({reason}){detail}");
+            error!("{msg}");
+            let _ = tx.send(EngineEvent::StreamError(msg));
+            return;
+        }
+
         if let Some(usage) = chunk.usage_metadata {
             prompt_tokens = usage.prompt_token_count.unwrap_or(prompt_tokens);
             let total_eval =
@@ -493,12 +522,16 @@ pub async fn stream_chat(
         }
 
         for cand in chunk.candidates.into_iter().flatten() {
+            if let Some(msg) = cand.finish_message.filter(|m| !m.is_empty()) {
+                finish_message = Some(msg);
+            }
             if let Some(reason) = cand.finish_reason {
                 done_reason = Some(if reason == "MAX_TOKENS" {
                     "length".into()
                 } else {
                     reason.to_lowercase()
                 });
+                raw_finish_reason = Some(reason);
             }
 
             for part in cand.content.and_then(|c| c.parts).into_iter().flatten() {
@@ -517,12 +550,31 @@ pub async fn stream_chat(
                     push_thought_part(&mut collected_thoughts, part.text, part.thought_signature);
                 } else {
                     if let Some(text) = part.text.filter(|t| !t.is_empty()) {
+                        has_text = true;
                         let _ = tx.send(EngineEvent::StreamChunk(text));
                     }
                     push_thought_part(&mut collected_thoughts, None, part.thought_signature);
                 }
             }
         }
+    }
+
+    if let Some(ref reason) = raw_finish_reason
+        && !matches!(reason.as_str(), "STOP" | "MAX_TOKENS")
+        && ((!has_text && collected_tools.is_empty())
+            || matches!(
+                reason.as_str(),
+                "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL"
+            ))
+    {
+        let detail = finish_message
+            .as_deref()
+            .map(|m| format!(": {m}"))
+            .unwrap_or_default();
+        let msg = format!("Gemini generation stopped ({reason}){detail}");
+        error!("{msg}");
+        let _ = tx.send(EngineEvent::StreamError(msg));
+        return;
     }
 
     info!(

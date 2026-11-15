@@ -45,6 +45,11 @@ fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> Stri
             .map(|c| format!("⚙ [Pending Tool Approval: {}]", format_tool_call_summary(c)))
             .collect();
         text.push_str(&pending.join("\n"));
+    } else if text.trim().is_empty()
+        && m.tool_calls.as_ref().is_none_or(Vec::is_empty)
+        && m.thoughts.as_ref().is_some_and(|t| !t.is_empty())
+    {
+        text = String::from("*[Model produced internal thoughts without a final response]*");
     }
     text
 }
@@ -54,6 +59,7 @@ fn find_associated_tool_call(messages: &[ChatMessage], tool_msg_idx: usize) -> O
     for m in messages[..tool_msg_idx].iter().rev() {
         match m.role.as_str() {
             "tool" => offset += 1,
+            "error" => continue,
             "assistant" => return m.tool_calls.as_ref()?.get(offset),
             _ => break,
         }
@@ -560,6 +566,7 @@ impl TuiApp {
                 let formatted = if m.role == "assistant" {
                     let resolved_count = self.messages[i + 1..]
                         .iter()
+                        .filter(|n| n.role != "error")
                         .take_while(|n| n.role == "tool")
                         .count();
                     format_assistant_display(m, resolved_count)
