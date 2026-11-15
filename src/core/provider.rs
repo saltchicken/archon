@@ -142,6 +142,74 @@ impl Provider {
         (effective_system_prompt, sanitized_messages, payload)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn condense_tool_output(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        num_ctx: u32,
+        max_size: usize,
+        tool_name: &str,
+        tool_summary: &str,
+        user_query: &str,
+        guide_prompt: Option<&str>,
+        truncated_output: &str,
+    ) -> std::result::Result<String, String> {
+        let system_prompt = "You are a precise technical output condenser. Summarize and extract the most relevant information, key findings, file paths, code signatures, error messages, and data from the following tool output so the assistant can continue its task without losing critical details. Be concise, well-structured, and omit repetitive noise.";
+        let query_ctx = if user_query.trim().is_empty() {
+            String::new()
+        } else {
+            format!("User's current goal/prompt:\n{user_query}\n\n")
+        };
+        let guide_ctx = match guide_prompt.map(str::trim).filter(|g| !g.is_empty()) {
+            Some(g) => format!("Specific user instructions for condensing this output:\n{g}\n\n"),
+            None => String::new(),
+        };
+        let prompt = format!(
+            "{query_ctx}{guide_ctx}Tool executed: {tool_summary} (tool: {tool_name})\nOutput limit applied: {max_size} bytes.\n\nPlease condense the following output into a focused summary preserving all essential technical details:\n\n<truncated_tool_output>\n{truncated_output}\n</truncated_tool_output>"
+        );
+
+        let messages = vec![ChatMessage::new("user", prompt)];
+        let payload = match self {
+            Self::Ollama => {
+                ollama::build_payload(&model, &messages, system_prompt, num_ctx, None)
+            }
+            Self::Gemini => gemini::build_payload(&messages, system_prompt, None),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        match self {
+            Self::Ollama => {
+                ollama::stream_chat(client, config.ollama.base_url, payload, tx).await;
+            }
+            Self::Gemini => {
+                let Some(api_key) = config.gemini.resolve_api_key() else {
+                    return Err(
+                        "Missing Gemini API key. Set GEMINI_API_KEY in .env or config.toml".into(),
+                    );
+                };
+                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
+                    .await;
+            }
+        }
+
+        let mut condensed = String::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                EngineEvent::StreamChunk(c) => condensed.push_str(&c),
+                EngineEvent::StreamError(e) => return Err(e),
+                EngineEvent::StreamDone { .. } => break,
+                _ => {}
+            }
+        }
+
+        if condensed.trim().is_empty() {
+            return Err("Model returned an empty summary while condensing tool output.".into());
+        }
+        Ok(condensed)
+    }
+
     pub async fn stream_turn(
         &self,
         client: Client,

@@ -217,6 +217,156 @@ impl TuiApp {
         render_modal_at(f, area, widget);
     }
 
+    pub(super) fn draw_truncated_tool_modal(&mut self, f: &mut Frame) {
+        let max_msg_lines = self.config.app.max_msg_lines;
+        let Some(ref mut pending) = self.pending_truncated else {
+            return;
+        };
+
+        let (pct_y, min_h) = if pending.collapsed {
+            (28, 14)
+        } else {
+            (66, 26)
+        };
+        let area = top_right_rect(64, pct_y, 84, min_h, f.area());
+
+        let raw_kb = (pending.raw_bytes / 1024).max(1);
+        let max_kb = (pending.max_size / 1024).max(1);
+        let full_cap_kb = (pending.full_cap_bytes / 1024).max(1);
+        let captured_full_kb = (pending.raw_bytes.min(pending.full_cap_bytes) / 1024).max(1);
+
+        let preview_lines: Vec<String> = pending.preview.lines().map(sanitize_line).collect();
+        let total_content = preview_lines.len();
+        let inner_h = usize::from(area.height.saturating_sub(14)).max(5);
+        let max_lines = if pending.unfolded {
+            inner_h
+        } else {
+            max_msg_lines.min(inner_h)
+        };
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "Tool: ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    sanitize_line(&pending.summary),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!(" ({})", sanitize_line(&pending.tool_name)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!(
+                    "Output size (~{raw_kb} KB) exceeded the {max_kb} KB tool limit (context-padded cap: {full_cap_kb} KB).",
+                ),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+        ];
+
+        let mut preview_header = vec![
+            Span::styled(
+                format!("  ⚙ TOOL [{}] ", sanitize_line(&pending.summary)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "⚠ TRUNCATED ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if pending.collapsed {
+            preview_header.push(Span::styled(
+                format!("[+{total_content}]"),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+        lines.push(Line::from(preview_header));
+
+        if !pending.collapsed {
+            if total_content > max_lines {
+                let max_scroll = total_content.saturating_sub(max_lines);
+                pending.scroll = pending.scroll.min(max_scroll);
+                let start = pending.scroll;
+                let end = (start + max_lines).min(total_content);
+
+                if start > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... ({start}) ..."),
+                        Style::default().fg(Color::Blue),
+                    )));
+                } else {
+                    lines.push(Line::from(""));
+                }
+                for l in &preview_lines[start..end] {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {l}"),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+                if end < total_content {
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... ({}) ...", total_content - end),
+                        Style::default().fg(Color::Blue),
+                    )));
+                }
+            } else {
+                pending.scroll = 0;
+                lines.push(Line::from(""));
+                for l in &preview_lines {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {l}"),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+            }
+        }
+
+        lines.extend([
+            Line::from(""),
+            Line::from(Span::styled(
+                "Optional Condensation Guidance / Note ([^X] Clear):",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("> {}", sanitize_line(&self.truncated_guide_prompt))),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "[⏎] Proceed Truncated ({max_kb}KB)    [^F] Proceed Full ({captured_full_kb}KB)    [^C] Condense Truncated    [^G] Condense Full"
+                ),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "[Esc/^D] Discard Output    [⇧Esc] Cancel All    [Tab/Click] Fold/Unfold    [↑/↓/PgUp/PgDn] Scroll",
+                Style::default().fg(Color::Yellow),
+            )),
+        ]);
+
+        let widget = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                chat_block(format!(
+                    " ⚠ Tool Output Truncated ({}/{}) ",
+                    pending.index, pending.total
+                ))
+                .border_style(Style::default().fg(Color::LightRed)),
+            );
+        render_modal_at(f, area, widget);
+    }
+
     pub(super) fn draw_system_prompt_modal(&mut self, f: &mut Frame) {
         self.sys_prompt_area.set_cursor_style(super::cursor_style(
             self.term_focused && self.cursor_blink_on,

@@ -470,6 +470,7 @@ impl TuiApp {
             ActiveModal::AddFile => self.draw_file_modal(f),
             ActiveModal::Sessions => self.draw_sessions_modal(f),
             ActiveModal::ToolApproval => self.draw_tool_modal(f),
+            ActiveModal::TruncatedTool => self.draw_truncated_tool_modal(f),
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::Memory => self.draw_memory_modal(f),

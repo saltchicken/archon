@@ -769,18 +769,38 @@ register_tools! {
     blocking: workspace_snapshot,
 }
 
-fn truncate_tool_output(mut out: String, max_size: usize) -> (String, bool) {
-    let truncated = out.len() > max_size;
+pub struct ToolExecutionOutput {
+    pub truncated_output: String,
+    pub full_output: String,
+    pub raw_bytes: usize,
+    pub truncated: bool,
+}
+
+fn truncate_at_limit(mut out: String, limit: usize) -> (String, bool) {
+    let truncated = out.len() > limit;
     if truncated {
-        let truncate_at = out.floor_char_boundary(max_size);
+        let truncate_at = out.floor_char_boundary(limit);
         let dropped = out.len() - truncate_at;
         out.truncate(truncate_at);
         let _ = write!(
             out,
-            "\n\n[TRUNCATED: Output exceeded the {max_size} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
+            "\n\n[TRUNCATED: Output exceeded the {limit} byte limit — {dropped} bytes were dropped. Content is incomplete.]"
         );
     }
     (out, truncated)
+}
+
+fn package_tool_output(raw: String, max_size: usize, full_cap: usize) -> ToolExecutionOutput {
+    let raw_bytes = raw.len();
+    let effective_full_cap = full_cap.max(max_size);
+    let (full_output, _) = truncate_at_limit(raw.clone(), effective_full_cap);
+    let (truncated_output, truncated) = truncate_at_limit(raw, max_size);
+    ToolExecutionOutput {
+        truncated_output,
+        full_output,
+        raw_bytes,
+        truncated,
+    }
 }
 
 pub async fn run_manual_command(
@@ -788,18 +808,38 @@ pub async fn run_manual_command(
     args: &[String],
     config: &Config,
     max_size: usize,
-) -> (String, bool) {
-    let ctx = match ToolContext::new(config, None, max_size) {
+    full_cap: usize,
+) -> ToolExecutionOutput {
+    let capture_limit = full_cap.max(max_size);
+    let ctx = match ToolContext::new(config, None, capture_limit) {
         Ok(c) => c,
-        Err(e) => return (format!("Error resolving workspace root: {e}"), false),
+        Err(e) => {
+            let msg = format!("Error resolving workspace root: {e}");
+            let len = msg.len();
+            return ToolExecutionOutput {
+                truncated_output: msg.clone(),
+                full_output: msg,
+                raw_bytes: len,
+                truncated: false,
+            };
+        }
     };
 
     match ctx
         .run_command(program, args, "(Command completed with no output)")
         .await
     {
-        Ok(out) => truncate_tool_output(out, max_size),
-        Err(e) => (format!("Error: {e}"), false),
+        Ok(out) => package_tool_output(out, max_size, capture_limit),
+        Err(e) => {
+            let msg = format!("Error: {e}");
+            let len = msg.len();
+            ToolExecutionOutput {
+                truncated_output: msg.clone(),
+                full_output: msg,
+                raw_bytes: len,
+                truncated: false,
+            }
+        }
     }
 }
 
@@ -808,25 +848,42 @@ pub async fn execute(
     config: &Config,
     active_skill: Option<&str>,
     max_size: usize,
-) -> (String, bool) {
+    full_cap: usize,
+) -> ToolExecutionOutput {
     let name = &call.function.name;
     let args = &call.function.arguments;
+    let capture_limit = full_cap.max(max_size);
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(name, args, config, active_skill, max_size).await {
+    match dispatch_tool(name, args, config, active_skill, capture_limit).await {
         Ok(out) => {
-            let (out, truncated) = truncate_tool_output(out, max_size);
-            info!("Tool '{name}' executed successfully. Truncated: {truncated}");
+            let packaged = package_tool_output(out, max_size, capture_limit);
+            info!(
+                "Tool '{name}' executed successfully. Raw bytes: {}, Truncated: {}",
+                packaged.raw_bytes, packaged.truncated
+            );
             debug!(
                 "Tool output snippet: {}",
-                out.replace('\n', " ").chars().take(200).collect::<String>()
+                packaged
+                    .truncated_output
+                    .replace('\n', " ")
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
             );
-            (out, truncated)
+            packaged
         }
         Err(e) => {
             error!("Tool '{name}' failed: {e}");
-            (format!("Error: {e}"), false)
+            let msg = format!("Error: {e}");
+            let len = msg.len();
+            ToolExecutionOutput {
+                truncated_output: msg.clone(),
+                full_output: msg,
+                raw_bytes: len,
+                truncated: false,
+            }
         }
     }
 }

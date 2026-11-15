@@ -2,7 +2,8 @@ use super::{
     ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
 };
 use crate::core::{
-    EngineCommand, attachments::copy_text_to_clipboard, config::Memory, session::ChatMessage,
+    EngineCommand, TruncatedToolAction, attachments::copy_text_to_clipboard, config::Memory,
+    session::ChatMessage,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
@@ -87,6 +88,13 @@ impl TuiApp {
                     .pending_tool
                     .as_ref()
                     .map(|(p, _, _)| p.clone())
+                    .unwrap_or_default();
+            }
+            ActiveModal::TruncatedTool => {
+                return self
+                    .pending_truncated
+                    .as_ref()
+                    .map(|p| p.preview.clone())
                     .unwrap_or_default();
             }
             ActiveModal::SystemPrompt => return self.sys_prompt_area.lines().join("\n"),
@@ -218,6 +226,32 @@ impl TuiApp {
             return;
         }
 
+        if self.modal == ActiveModal::TruncatedTool {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(ref mut pending) = self.pending_truncated {
+                        pending.scroll = pending.scroll.saturating_sub(3);
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(ref mut pending) = self.pending_truncated {
+                        pending.scroll = pending.scroll.saturating_add(3);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(ref mut pending) = self.pending_truncated {
+                        if pending.collapsed {
+                            pending.collapsed = false;
+                        } else {
+                            pending.unfolded = !pending.unfolded;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.modal == ActiveModal::PayloadInspector {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -305,6 +339,7 @@ impl TuiApp {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
             ActiveModal::Sessions => self.handle_sessions_key(key.code),
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
+            ActiveModal::TruncatedTool => self.handle_truncated_tool_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
             ActiveModal::Memory => self.handle_memory_key(key, ctrl, shift),
@@ -401,6 +436,79 @@ impl TuiApp {
                 self.tool_feedback.pop();
             }
             KeyCode::Char(c) if !ctrl => self.tool_feedback.push(c),
+            _ => {}
+        }
+    }
+
+    fn handle_truncated_tool_key(&mut self, code: KeyCode, ctrl: bool, shift: bool) {
+        match code {
+            KeyCode::Enter => {
+                self.resolve_truncated_modal(TruncatedToolAction::ProceedTruncated);
+            }
+            KeyCode::Char('f') if ctrl => {
+                self.resolve_truncated_modal(TruncatedToolAction::ProceedFull);
+            }
+            KeyCode::Char('c') if ctrl => {
+                self.resolve_truncated_modal(TruncatedToolAction::CondenseTruncated);
+            }
+            KeyCode::Char('g') if ctrl => {
+                self.resolve_truncated_modal(TruncatedToolAction::CondenseFull);
+            }
+            KeyCode::Char('d') if ctrl => {
+                self.resolve_truncated_modal(TruncatedToolAction::Discard);
+            }
+            KeyCode::Char('x') if ctrl => {
+                self.truncated_guide_prompt.clear();
+            }
+            KeyCode::Tab => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    if pending.collapsed {
+                        pending.collapsed = false;
+                    } else if !pending.unfolded {
+                        pending.unfolded = true;
+                    } else {
+                        pending.collapsed = true;
+                        pending.unfolded = false;
+                        pending.scroll = 0;
+                    }
+                }
+            }
+            KeyCode::Esc if shift => {
+                self.pending_truncated = None;
+                self.truncated_guide_prompt.clear();
+                self.modal = ActiveModal::None;
+                self.follow_tail = true;
+                let _ = self.cmd_tx.send(EngineCommand::CancelStream);
+            }
+            KeyCode::Esc => {
+                self.resolve_truncated_modal(TruncatedToolAction::Discard);
+            }
+            KeyCode::Up => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    pending.scroll = pending.scroll.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    pending.scroll = pending.scroll.saturating_add(1);
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    pending.scroll = pending.scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    pending.scroll = pending.scroll.saturating_add(10);
+                }
+            }
+            KeyCode::Backspace => {
+                self.truncated_guide_prompt.pop();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                self.truncated_guide_prompt.push(c);
+            }
             _ => {}
         }
     }

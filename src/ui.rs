@@ -3,7 +3,7 @@ mod modals;
 mod render;
 
 use crate::core::{
-    EngineCommand, EngineEvent, TurnConfig,
+    EngineCommand, EngineEvent, TruncatedToolAction, TurnConfig,
     attachments::ImageAttachment,
     config::{
         Config, Memory, Preset, clean_memory_item, global_memory_path, load_scoped_memory_file,
@@ -59,10 +59,25 @@ pub(super) enum ActiveModal {
     AddFile,
     Sessions,
     ToolApproval,
+    TruncatedTool,
     ModelSelect,
     SystemPrompt,
     Memory,
     PayloadInspector,
+}
+
+pub(super) struct PendingTruncatedUi {
+    pub tool_name: String,
+    pub summary: String,
+    pub preview: String,
+    pub raw_bytes: usize,
+    pub max_size: usize,
+    pub full_cap_bytes: usize,
+    pub index: usize,
+    pub total: usize,
+    pub collapsed: bool,
+    pub unfolded: bool,
+    pub scroll: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -216,7 +231,9 @@ pub struct TuiApp {
     pub(super) sessions: Vec<SessionSummary>,
     pub(super) session_idx: usize,
     pub(super) pending_tool: Option<(String, usize, usize)>,
+    pub(super) pending_truncated: Option<PendingTruncatedUi>,
     pub(super) tool_feedback: String,
+    pub(super) truncated_guide_prompt: String,
     pub(super) last_payload_preview: String,
     pub(super) payload_scroll: u16,
 }
@@ -337,7 +354,9 @@ impl TuiApp {
             sessions: Vec::new(),
             session_idx: 0,
             pending_tool: None,
+            pending_truncated: None,
             tool_feedback: String::new(),
+            truncated_guide_prompt: String::new(),
             last_payload_preview: String::new(),
             payload_scroll: 0,
         }
@@ -374,6 +393,9 @@ impl TuiApp {
                 match self.modal {
                     ActiveModal::AddFile => self.file_path_input.push_str(&single_line),
                     ActiveModal::ToolApproval => self.tool_feedback.push_str(&single_line),
+                    ActiveModal::TruncatedTool => {
+                        self.truncated_guide_prompt.push_str(&single_line);
+                    }
                     ActiveModal::SystemPrompt => {
                         self.sys_prompt_area.insert_str(text.replace('\r', ""));
                     }
@@ -610,6 +632,35 @@ impl TuiApp {
                 self.tool_scroll = 0;
                 self.modal = ActiveModal::ToolApproval;
             }
+            EngineEvent::TruncatedToolResolutionRequested {
+                tool_name,
+                summary,
+                preview,
+                raw_bytes,
+                max_size,
+                full_cap_bytes,
+                index,
+                total,
+            } => {
+                self.active_tool_status = None;
+                self.pending_truncated = Some(PendingTruncatedUi {
+                    tool_name,
+                    summary,
+                    preview,
+                    raw_bytes,
+                    max_size,
+                    full_cap_bytes,
+                    index,
+                    total,
+                    collapsed: true,
+                    unfolded: false,
+                    scroll: 0,
+                });
+                self.truncated_guide_prompt.clear();
+                self.tool_scroll = 0;
+                self.modal = ActiveModal::TruncatedTool;
+            }
+            EngineEvent::ToolCondensed(_) => {}
             EngineEvent::SessionsListed(list) => {
                 self.sessions = list;
                 self.session_idx = 0;
@@ -896,6 +947,18 @@ impl TuiApp {
                 approved,
                 always_approve,
                 feedback: std::mem::take(&mut self.tool_feedback),
+                turn: self.current_turn_config(),
+            });
+        }
+    }
+
+    pub(super) fn resolve_truncated_modal(&mut self, action: TruncatedToolAction) {
+        if self.pending_truncated.take().is_some() {
+            self.modal = ActiveModal::None;
+            self.follow_tail = true;
+            let _ = self.cmd_tx.send(EngineCommand::ResolveTruncatedTool {
+                action,
+                guide_prompt: std::mem::take(&mut self.truncated_guide_prompt),
                 turn: self.current_turn_config(),
             });
         }
