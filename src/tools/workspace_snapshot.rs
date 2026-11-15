@@ -81,6 +81,32 @@ fn archon_config_dir() -> Option<PathBuf> {
     dunce::canonicalize(&dir).ok().or(Some(dir))
 }
 
+trait PartitionPatterns<'a>: Iterator<Item = &'a str> + Sized {
+    fn partition_map_pat(
+        self,
+        normalize: &impl Fn(&str) -> String,
+    ) -> (Vec<String>, Vec<String>) {
+        let mut neg = Vec::new();
+        let mut pos = Vec::new();
+        for pat in self {
+            if let Some(stripped) = pat.strip_prefix('!') {
+                let s = normalize(stripped.trim());
+                if !s.is_empty() {
+                    neg.push(s);
+                }
+            } else {
+                let s = normalize(pat);
+                if !s.is_empty() {
+                    pos.push(s);
+                }
+            }
+        }
+        (neg, pos)
+    }
+}
+
+impl<'a, I: Iterator<Item = &'a str>> PartitionPatterns<'a> for I {}
+
 fn has_glob_meta(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
 }
@@ -228,46 +254,75 @@ impl BlockingTool for Tool {
             vec!["**/*".into()]
         };
 
-        let include_set = build_globset(&include_patterns, false)?;
-        let exclude_set = ctx.build_exclude_globset(&[], false)?;
-        let tree_only_set = build_globset(&settings.include_in_tree, false)?;
+    let normalize_pat = |p: &str| p.trim_start_matches('/').to_string();
 
-        let mut entries = Vec::new();
-        for entry in ctx.build_walker(&scan_root) {
-            if entries.len() >= settings.max_files {
-                break;
-            }
-            let path = entry.path();
-            if path == base_root || has_git_dir_component(path) {
-                continue;
-            }
-            let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
-            else {
-                continue;
-            };
+    let (neg_include, pos_include): (Vec<String>, Vec<String>) = include_patterns
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .partition_map_pat(&normalize_pat);
 
-            let matches_tree = tree_only_set.is_match(&relative);
-            if exclude_set.is_match(&relative) && !matches_tree {
-                continue;
-            }
+    let (neg_exclude, pos_exclude): (Vec<String>, Vec<String>) = settings
+        .exclude
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .partition_map_pat(&normalize_pat);
 
-            let Ok(metadata) = path.metadata() else {
-                continue;
-            };
-            let is_dir = metadata.is_dir();
-            let matches_include = include_set.is_match(&relative);
-            if !is_dir && !matches_include && !matches_tree {
-                continue;
-            }
+    let (neg_tree, pos_tree): (Vec<String>, Vec<String>) = settings
+        .include_in_tree
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .partition_map_pat(&normalize_pat);
 
-            entries.push(FileEntry {
-                path: path.to_path_buf(),
-                display_path: relative.to_string_lossy().into_owned(),
-                depth: relative.components().count(),
-                is_dir,
-                include_content: !is_dir && matches_include && !matches_tree,
-            });
+    let include_set = build_globset(&pos_include, false)?;
+    let neg_include_set = build_globset(&neg_include, false)?;
+    let exclude_set = ctx.build_exclude_globset(&pos_exclude, false)?;
+    let neg_exclude_set = build_globset(&neg_exclude, false)?;
+    let tree_only_set = build_globset(&pos_tree, false)?;
+    let neg_tree_only_set = build_globset(&neg_tree, false)?;
+
+    let mut entries = Vec::new();
+    for entry in ctx.build_walker(&scan_root) {
+        if entries.len() >= settings.max_files {
+            break;
         }
+        let path = entry.path();
+        if path == base_root || has_git_dir_component(path) {
+            continue;
+        }
+        let Some(relative) = diff_paths(path, &base_root).filter(|r| !r.as_os_str().is_empty())
+        else {
+            continue;
+        };
+
+        let matches_tree =
+            tree_only_set.is_match(&relative) && !neg_tree_only_set.is_match(&relative);
+        let is_excluded =
+            exclude_set.is_match(&relative) && !neg_exclude_set.is_match(&relative);
+        if is_excluded && !matches_tree {
+            continue;
+        }
+
+        let Ok(metadata) = path.metadata() else {
+            continue;
+        };
+        let is_dir = metadata.is_dir();
+        let matches_include =
+            include_set.is_match(&relative) && !neg_include_set.is_match(&relative);
+        if !is_dir && !matches_include && !matches_tree {
+            continue;
+        }
+
+        entries.push(FileEntry {
+            path: path.to_path_buf(),
+            display_path: relative.to_string_lossy().into_owned(),
+            depth: relative.components().count(),
+            is_dir,
+            include_content: !is_dir && matches_include && !matches_tree,
+        });
+    }
 
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
