@@ -127,7 +127,7 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
 impl TuiApp {
     pub(super) fn draw_file_modal(&self, f: &mut Frame) {
         let widget = Paragraph::new(format!(
-            "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import    [Esc] Cancel",
+            "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import\n[Esc] Cancel",
             sanitize_line(&self.file_path_input)
         ))
         .block(chat_block(" Add Image File "));
@@ -425,7 +425,7 @@ impl TuiApp {
             " System Message Control (^Y) ",
             header,
             &self.sys_prompt_area,
-            " [^P] Cycle Preset   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Apply   [Esc] Cancel",
+            " [^P] Cycle Preset\n [^X] Clear\n [⇧⏎] Newline\n [⏎] Save & Apply\n [Esc] Cancel",
         );
     }
 
@@ -456,7 +456,7 @@ impl TuiApp {
             " Memory (^P) ",
             header,
             &self.memory_area,
-            " [^E] Toggle ON/OFF   [^X] Clear   [⇧⏎] Newline   [⏎] Save & Persist   [Esc] Cancel",
+            " [^E] Toggle ON/OFF\n [^X] Clear\n [⇧⏎] Newline\n [⏎] Save & Persist\n [Esc] Cancel",
         );
     }
 
@@ -466,7 +466,7 @@ impl TuiApp {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(6), Constraint::Length(2)])
+            .constraints([Constraint::Min(6), Constraint::Length(3)])
             .split(area);
 
         let lines = format_tool_preview_lines(&self.last_payload_preview);
@@ -483,13 +483,11 @@ impl TuiApp {
             );
         f.render_widget(widget, chunks[0]);
 
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " [↑/↓/PgUp/PgDn/Home/End] Scroll   [C] Copy to Clipboard   [Esc/^G] Close",
-                Style::default().fg(Color::Yellow),
-            ))),
-            chunks[1],
-        );
+        let payload_footer: Vec<Line> = [" [↑/↓/PgUp/PgDn/Home/End] Scroll", " [C] Copy to Clipboard", " [Esc/^G] Close"]
+            .iter()
+            .map(|s| Line::from(Span::styled(*s, Style::default().fg(Color::Yellow))))
+            .collect();
+        f.render_widget(Paragraph::new(payload_footer), chunks[1]);
     }
 
     pub(super) fn draw_context_menu(&self, f: &mut Frame, menu: &super::ContextMenu) {
@@ -527,7 +525,7 @@ fn draw_editor_modal(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(2),
+            Constraint::Length(5),
         ])
         .split(area);
 
@@ -536,11 +534,9 @@ fn draw_editor_modal(
         chunks[0],
     );
     f.render_widget(editor, chunks[1]);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            footer_text,
-            Style::default().fg(Color::Yellow),
-        ))),
-        chunks[2],
-    );
+    let footer_lines: Vec<Line> = footer_text
+        .split('\n')
+        .map(|s| Line::from(Span::styled(s.to_string(), Style::default().fg(Color::Yellow))))
+        .collect();
+    f.render_widget(Paragraph::new(footer_lines), chunks[2]);
 }
