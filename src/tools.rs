@@ -43,6 +43,59 @@ use utils::{
 
 const COMMAND_TIMEOUT_SECS: u64 = 30;
 
+#[cfg(unix)]
+fn kill_process_group(pgid: u32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+    if let Ok(pgid) = i32::try_from(pgid)
+        && pgid > 0
+    {
+        // SAFETY: Sending SIGKILL to a negative process group ID (-pgid) is a
+        // standard POSIX syscall with no memory-safety preconditions.
+        unsafe {
+            let _ = kill(-pgid, SIGKILL);
+        }
+    }
+}
+
+struct ManagedChild {
+    child: tokio::process::Child,
+    #[cfg(unix)]
+    pgid: Option<u32>,
+}
+
+impl ManagedChild {
+    fn new(child: tokio::process::Child) -> Self {
+        #[cfg(unix)]
+        let pgid = child.id();
+        Self {
+            child,
+            #[cfg(unix)]
+            pgid,
+        }
+    }
+
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.child.wait().await;
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            kill_process_group(pgid);
+        }
+        status
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid.take() {
+            kill_process_group(pgid);
+        }
+    }
+}
+
 const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
     "**/.git/**",
     "**/*.venv/**",
@@ -338,27 +391,37 @@ impl ToolContext {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut child = Command::new(program)
-            .current_dir(&self.root)
+        let mut cmd = Command::new(program);
+        cmd.current_dir(&self.root)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("Error executing {program}"))?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = ManagedChild::new(
+            cmd.spawn()
+                .with_context(|| format!("Error executing {program}"))?,
+        );
 
         let cap = (self.max_output_size as u64).saturating_add(1);
-        let stdout = child.stdout.take().context("Failed to capture stdout")?;
-        let stderr = child.stderr.take().context("Failed to capture stderr")?;
+        let stdout = child
+            .child
+            .stdout
+            .take()
+            .context("Failed to capture stdout")?;
+        let stderr = child
+            .child
+            .stderr
+            .take()
+            .context("Failed to capture stderr")?;
 
         let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(timeout_secs), async {
-            let (r1, r2, status) = tokio::join!(
-                read_capped(stdout, cap),
-                read_capped(stderr, cap),
-                child.wait()
-            );
-            Ok::<_, std::io::Error>((r1?, r2?, status?))
+            let (r1, r2) = tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap));
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((r1?, r2?, status))
         })
         .await
         .map_err(|_| anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds"))?
