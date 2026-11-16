@@ -1,6 +1,5 @@
 use super::{
-    ActiveModal, ContextMenu, ContextMenuAction, TuiApp,
-    render::{format_assistant_display, format_thought_display},
+    ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
 };
 use crate::core::{
     EngineCommand, TruncatedToolAction, attachments::copy_text_to_clipboard, session::ChatMessage,
@@ -10,13 +9,6 @@ use ratatui::layout::Position;
 use std::path::PathBuf;
 
 impl TuiApp {
-    fn find_thought_at(&self, visual_y: usize) -> Option<(usize, usize, bool)> {
-        self.thought_visual_ranges
-            .iter()
-            .find(|(_, start, end, _)| (*start..*end).contains(&visual_y))
-            .map(|&(i, start, _, truncated)| (i, start, truncated))
-    }
-
     fn find_msg_at(&self, visual_y: usize) -> Option<(usize, usize, bool)> {
         self.msg_visual_ranges
             .iter()
@@ -61,10 +53,6 @@ impl TuiApp {
         if !m.content.trim().is_empty() {
             return m.content.clone();
         }
-        let thought = format_thought_display(m);
-        if !thought.trim().is_empty() {
-            return thought;
-        }
         if m.role == "assistant" {
             let resolved_count = self.messages[idx + 1..]
                 .iter()
@@ -74,17 +62,6 @@ impl TuiApp {
             return format_assistant_display(m, resolved_count);
         }
         m.content.clone()
-    }
-
-    fn thought_block_text(&self, idx: usize) -> Option<String> {
-        if idx < self.messages.len() {
-            let t = format_thought_display(&self.messages[idx]);
-            (!t.trim().is_empty()).then_some(t)
-        } else if idx == self.messages.len() && self.is_streaming && !self.streaming_thought.is_empty() {
-            Some(self.streaming_thought.clone())
-        } else {
-            None
-        }
     }
 
     fn message_block_text(&self, idx: usize) -> Option<String> {
@@ -161,13 +138,6 @@ impl TuiApp {
             let inner = self.chat_inner_area();
             let inner_y = usize::from(y.saturating_sub(inner.y));
             let visual_y = inner_y + self.chat_scroll;
-
-            if !(inner.contains(pos) && inner_y == 0 && self.find_sticky_header_msg().is_some())
-                && let Some((t_idx, _, _)) = self.find_thought_at(visual_y)
-                && let Some(text) = self.thought_block_text(t_idx)
-            {
-                return text;
-            }
 
             let target_idx = if inner.contains(pos) && inner_y == 0 {
                 self.find_sticky_header_msg()
@@ -318,27 +288,16 @@ impl TuiApp {
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let is_up = mouse.kind == MouseEventKind::ScrollUp;
-                if !is_on_scrollbar {
-                    if let Some((i, _, true)) = self.find_thought_at(visual_y)
-                        && let Some(state) = self.thought_states.get_mut(i)
-                    {
-                        state.scroll = if is_up {
-                            state.scroll.saturating_sub(3)
-                        } else {
-                            state.scroll.saturating_add(3)
-                        };
-                        return;
-                    }
-                    if let Some((i, _, true)) = self.find_msg_at(visual_y)
-                        && let Some(state) = self.msg_states.get_mut(i)
-                    {
-                        state.scroll = if is_up {
-                            state.scroll.saturating_sub(3)
-                        } else {
-                            state.scroll.saturating_add(3)
-                        };
-                        return;
-                    }
+                if !is_on_scrollbar
+                    && let Some((i, _, true)) = self.find_msg_at(visual_y)
+                    && let Some(state) = self.msg_states.get_mut(i)
+                {
+                    state.scroll = if is_up {
+                        state.scroll.saturating_sub(3)
+                    } else {
+                        state.scroll.saturating_add(3)
+                    };
+                    return;
                 }
                 self.scroll_chat(if is_up { -3 } else { 3 });
             }
@@ -360,14 +319,6 @@ impl TuiApp {
                     && let Some(state) = self.msg_states.get_mut(sticky_idx)
                 {
                     state.collapsed = !state.collapsed;
-                } else if let Some((i, start_y, _)) = self.find_thought_at(visual_y)
-                    && let Some(state) = self.thought_states.get_mut(i)
-                {
-                    if visual_y == start_y {
-                        state.collapsed = !state.collapsed;
-                    } else if !state.collapsed {
-                        state.unfolded = !state.unfolded;
-                    }
                 } else if let Some((i, start_y, _)) = self.find_msg_at(visual_y)
                     && let Some(state) = self.msg_states.get_mut(i)
                 {

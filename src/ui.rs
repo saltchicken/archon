@@ -189,7 +189,6 @@ pub struct TuiApp {
     pub(super) messages: Vec<ChatMessage>,
     pub(super) queued_messages: Vec<ChatMessage>,
     pub(super) styled_messages: Vec<Vec<Line<'static>>>,
-    pub(super) styled_thoughts: Vec<Vec<Line<'static>>>,
     pub(super) styled_stream: Vec<Line<'static>>,
     pub(super) styled_stream_thought: Vec<Line<'static>>,
     pub(super) stream_dirty: bool,
@@ -223,13 +222,11 @@ pub struct TuiApp {
     pub(super) total_chat_lines: usize,
 
     pub(super) msg_states: Vec<MsgUiState>,
-    pub(super) thought_states: Vec<MsgUiState>,
 
     pub(super) term_area: Rect,
     pub(super) chat_area: Rect,
     pub(super) prompt_area: Rect,
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
-    pub(super) thought_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) term_focused: bool,
@@ -331,7 +328,6 @@ impl TuiApp {
             messages: Vec::new(),
             queued_messages: Vec::new(),
             styled_messages: Vec::new(),
-            styled_thoughts: Vec::new(),
             styled_stream: Vec::new(),
             styled_stream_thought: Vec::new(),
             stream_dirty: false,
@@ -362,12 +358,10 @@ impl TuiApp {
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_states: Vec::new(),
-            thought_states: Vec::new(),
             term_area: Rect::default(),
             chat_area: Rect::default(),
             prompt_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
-            thought_visual_ranges: Vec::new(),
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
@@ -571,15 +565,11 @@ impl TuiApp {
 
                 let prev_msg_count = if is_reset_or_reload {
                     self.msg_states.clear();
-                    self.thought_states.clear();
                     self.styled_messages.clear();
-                    self.styled_thoughts.clear();
                     0
                 } else {
                     self.msg_states.truncate(self.messages.len());
-                    self.thought_states.truncate(self.messages.len());
                     self.styled_messages.truncate(self.messages.len());
-                    self.styled_thoughts.truncate(self.messages.len());
                     self.messages.len()
                 };
 
@@ -592,12 +582,9 @@ impl TuiApp {
                 self.sync_system_prompt(&system_prompt);
                 let total_slots = self.messages.len() + 1 + self.queued_messages.len();
                 self.msg_states.resize(total_slots, MsgUiState::default());
-                self.thought_states
-                    .resize(total_slots, MsgUiState::default());
 
                 if is_reset_or_reload {
                     for (i, m) in self.messages.iter().enumerate() {
-                        self.thought_states[i].collapsed = true;
                         if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if m.role == "error" {
@@ -613,7 +600,6 @@ impl TuiApp {
                     }
                 } else {
                     for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
-                        self.thought_states[i].collapsed = true;
                         if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if matches!(m.role.as_str(), "assistant" | "local" | "error") {
@@ -638,10 +624,6 @@ impl TuiApp {
                 self.styled_stream_thought.clear();
                 self.stream_dirty = true;
                 self.stream_thought_dirty = true;
-                let stream_idx = self.messages.len();
-                if let Some(ts) = self.thought_states.get_mut(stream_idx) {
-                    *ts = MsgUiState::default();
-                }
                 self.scroll_to_bottom();
             }
             EngineEvent::StreamThoughtChunk(c) => {
@@ -802,8 +784,6 @@ impl TuiApp {
         self.messages.push(ChatMessage::new("error", err));
         let total_slots = self.messages.len() + 1 + self.queued_messages.len();
         self.msg_states.resize(total_slots, MsgUiState::default());
-        self.thought_states
-            .resize(total_slots, MsgUiState::default());
         if let Some(last_idx) = self.messages.len().checked_sub(1) {
             self.msg_states[last_idx].unfolded = true;
         }
