@@ -580,7 +580,21 @@ impl TuiApp {
         } else {
             Color::Cyan
         };
+        let dir = self
+            .config
+            .workspace
+            .as_deref()
+            .map(|ws| crate::core::config::format_tilde_path(std::path::Path::new(ws)))
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| crate::core::config::format_tilde_path(&p))
+                    .unwrap_or_else(|_| "unknown".into())
+            });
         let settings_text = vec![
+            Line::from(vec![
+                Span::raw("Dir:     "),
+                Span::styled(dir, Style::default().fg(Color::Cyan)),
+            ]),
             Line::from(vec![
                 Span::raw("Model:   "),
                 Span::styled(&self.model, Style::default().fg(Color::Green)),
