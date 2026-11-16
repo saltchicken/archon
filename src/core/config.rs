@@ -231,6 +231,7 @@ impl Memory {
 pub struct Config {
     pub app: AppSettings,
     pub ui: UiSettings,
+    pub dotfiles: DotfilesSettings,
     #[serde(skip)]
     pub global_memory: Memory,
     #[serde(skip)]
@@ -246,6 +247,20 @@ pub struct Config {
     pub workspace_skills_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DotfilesSettings {
+    pub allowed_dirs: Vec<String>,
+}
+
+impl Default for DotfilesSettings {
+    fn default() -> Self {
+        Self {
+            allowed_dirs: vec!["*".into()],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +410,7 @@ impl Default for Config {
         Self {
             app: AppSettings::default(),
             ui: UiSettings::default(),
+            dotfiles: DotfilesSettings::default(),
             global_memory: Memory::default(),
             workspace_memory: Memory::empty(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),

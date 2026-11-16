@@ -640,15 +640,17 @@ fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -
 fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
     append_filtered_kvs(&mut out, obj, &["edits", "content"]);
 
-    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) {
+    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) 
+        && let Ok(ctx) = ToolContext::from_cwd()
+    {
         match parsed.action {
             dotfiles::DotfilesAction::Edit => append_diff_result(
                 &mut out,
-                dotfiles::preview_edit(&parsed).map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
+                dotfiles::preview_edit(&parsed, &ctx.config).map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
             ),
             dotfiles::DotfilesAction::Create => append_diff_result(
                 &mut out,
-                dotfiles::preview_create(&parsed)
+                dotfiles::preview_create(&parsed, &ctx.config)
                     .map(|(_, d)| (d, String::new(), parsed.content, None)),
             ),
             _ => {}
