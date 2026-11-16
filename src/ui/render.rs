@@ -728,7 +728,7 @@ impl TuiApp {
                 }
                 "hook" => {
                     let summary = m.tool_name.as_deref().unwrap_or("hook");
-                    (sanitize_line(&format!("⚡ HOOK [{summary}]")), Color::Cyan)
+                    (sanitize_line(&format!("⚡ HOOK [{summary}]")), Color::Yellow)
                 }
                 _ => ("SYS".to_string(), Color::Gray),
             };
