@@ -389,7 +389,7 @@ impl Default for Config {
             gemini: EndpointSettings {
                 api_key: String::new(),
                 base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
-                chat_timeout: 180,
+                chat_timeout: 600,
                 status_timeout: 5,
             },
             models: vec![
