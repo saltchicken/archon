@@ -39,19 +39,19 @@ enum ListMarker {
 }
 
 enum QuoteContent {
-    Plain(String),
+    Plain(Vec<Span<'static>>),
     Header {
         level: usize,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
     ListItem {
         indent: usize,
         marker: ListMarker,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
     ListContinuation {
         indent: usize,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
 }
 
@@ -59,29 +59,26 @@ enum WrappedLine {
     CodeFence(String),
     CodeLine(String),
     TableBorder(String),
-    TableRow {
-        text: String,
-        is_header: bool,
-    },
+    TableRow(Vec<Span<'static>>),
     Header {
         level: usize,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
     ListItem {
         indent: usize,
         marker: ListMarker,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
     ListContinuation {
         indent: usize,
-        text: String,
+        spans: Vec<Span<'static>>,
     },
     Blockquote {
         indent: usize,
         depth: usize,
         content: QuoteContent,
     },
-    Plain(String),
+    Plain(Vec<Span<'static>>),
 }
 
 enum ParsedListKind {
@@ -218,12 +215,439 @@ fn parse_separator_row(cells: &[String]) -> Option<Vec<ColAlign>> {
         .collect()
 }
 
-fn pad_cell(text: &str, width: usize, align: ColAlign) -> String {
-    let pad = width.saturating_sub(display_width(text));
-    match align {
-        ColAlign::Left => format!("{text}{}", " ".repeat(pad)),
-        ColAlign::Right => format!("{}{text}", " ".repeat(pad)),
-        ColAlign::Center => format!("{}{text}{}", " ".repeat(pad / 2), " ".repeat(pad - pad / 2)),
+#[derive(Clone, Debug)]
+enum InlineTokenKind {
+    Text(String),
+    Code(String),
+    Delim {
+        ch: char,
+        count: usize,
+        orig_count: usize,
+        can_open: bool,
+        can_close: bool,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct InlineToken {
+    kind: InlineTokenKind,
+    modifiers: Modifier,
+}
+
+fn find_closing_backticks(s: &str, tick_count: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let run_start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            if i - run_start == tick_count {
+                return Some(run_start);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn is_markdown_punct(c: char) -> bool {
+    c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace())
+}
+
+fn tokenize_inline_markdown(text: &str) -> Vec<InlineToken> {
+    let bytes = text.as_bytes();
+    let mut pos = 0usize;
+    let mut text_start = 0usize;
+    let mut tokens = Vec::new();
+
+    let flush_text = |tokens: &mut Vec<InlineToken>, start: usize, end: usize| {
+        if start < end {
+            tokens.push(InlineToken {
+                kind: InlineTokenKind::Text(text[start..end].to_string()),
+                modifiers: Modifier::empty(),
+            });
+        }
+    };
+
+    while pos < bytes.len() {
+        let b = bytes[pos];
+        if b == b'\\'
+            && pos + 1 < bytes.len()
+            && matches!(bytes[pos + 1], b'*' | b'_' | b'~' | b'`' | b'\\')
+        {
+            flush_text(&mut tokens, text_start, pos);
+            tokens.push(InlineToken {
+                kind: InlineTokenKind::Text(text[pos + 1..pos + 2].to_string()),
+                modifiers: Modifier::empty(),
+            });
+            pos += 2;
+            text_start = pos;
+            continue;
+        }
+
+        if b == b'`' {
+            let mut tick_count = 0usize;
+            while pos + tick_count < bytes.len() && bytes[pos + tick_count] == b'`' {
+                tick_count += 1;
+            }
+            let after_open = pos + tick_count;
+            if let Some(rel_close) = find_closing_backticks(&text[after_open..], tick_count) {
+                flush_text(&mut tokens, text_start, pos);
+                let end_pos = after_open + rel_close + tick_count;
+                tokens.push(InlineToken {
+                    kind: InlineTokenKind::Code(text[pos..end_pos].to_string()),
+                    modifiers: Modifier::empty(),
+                });
+                pos = end_pos;
+                text_start = pos;
+            } else {
+                pos = after_open;
+            }
+            continue;
+        }
+
+        if matches!(b, b'*' | b'_' | b'~') {
+            flush_text(&mut tokens, text_start, pos);
+            let ch = b as char;
+            let mut count = 0usize;
+            while pos + count < bytes.len() && bytes[pos + count] == b {
+                count += 1;
+            }
+            let end_pos = pos + count;
+            let prev_char = text[..pos].chars().next_back();
+            let next_char = text[end_pos..].chars().next();
+
+            let prev_ws = prev_char.is_none_or(char::is_whitespace);
+            let next_ws = next_char.is_none_or(char::is_whitespace);
+            let prev_punct = prev_char.is_some_and(is_markdown_punct);
+            let next_punct = next_char.is_some_and(is_markdown_punct);
+
+            let left_flanking = !next_ws && (!next_punct || prev_ws || prev_punct);
+            let right_flanking = !prev_ws && (!prev_punct || next_ws || next_punct);
+
+            let is_glob_slash =
+                ch == '*' && prev_char == Some('/') && matches!(next_char, Some('/' | '.'));
+
+            let (can_open, can_close) = if is_glob_slash {
+                (false, false)
+            } else {
+                match ch {
+                    '*' => (left_flanking, right_flanking),
+                    '_' => (
+                        left_flanking && (!right_flanking || prev_punct),
+                        right_flanking && (!left_flanking || next_punct),
+                    ),
+                    '~' => (left_flanking && count == 2, right_flanking && count == 2),
+                    _ => (false, false),
+                }
+            };
+
+            tokens.push(InlineToken {
+                kind: InlineTokenKind::Delim {
+                    ch,
+                    count,
+                    orig_count: count,
+                    can_open,
+                    can_close,
+                },
+                modifiers: Modifier::empty(),
+            });
+            pos = end_pos;
+            text_start = pos;
+            continue;
+        }
+
+        pos += text[pos..].chars().next().map_or(1, char::len_utf8);
+    }
+
+    flush_text(&mut tokens, text_start, text.len());
+    tokens
+}
+
+fn push_merged_span(target: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = target.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(text);
+    } else {
+        target.push(Span::styled(text.to_string(), style));
+    }
+}
+
+fn parse_inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut tokens = tokenize_inline_markdown(text);
+
+    let mut closer_idx = 0usize;
+    while closer_idx < tokens.len() {
+        let (ch, closer_count, closer_orig, closer_can_open, closer_can_close) =
+            match tokens[closer_idx].kind {
+                InlineTokenKind::Delim {
+                    ch,
+                    count,
+                    orig_count,
+                    can_open,
+                    can_close,
+                } if can_close && count > 0 => (ch, count, orig_count, can_open, can_close),
+                _ => {
+                    closer_idx += 1;
+                    continue;
+                }
+            };
+
+        let mut found_opener = None;
+        for opener_idx in (0..closer_idx).rev() {
+            if let InlineTokenKind::Delim {
+                ch: o_ch,
+                count: o_count,
+                orig_count: o_orig,
+                can_open: o_can_open,
+                can_close: o_can_close,
+            } = tokens[opener_idx].kind
+            {
+                if o_ch != ch || !o_can_open || o_count == 0 {
+                    continue;
+                }
+                if ch == '~' {
+                    if o_count >= 2 && closer_count >= 2 {
+                        found_opener = Some(opener_idx);
+                        break;
+                    }
+                    continue;
+                }
+                if ((o_can_open && o_can_close) || (closer_can_open && closer_can_close))
+                    && (o_orig + closer_orig) % 3 == 0
+                    && !(o_orig % 3 == 0 && closer_orig % 3 == 0)
+                {
+                    continue;
+                }
+                found_opener = Some(opener_idx);
+                break;
+            }
+        }
+
+        let Some(opener_idx) = found_opener else {
+            closer_idx += 1;
+            continue;
+        };
+
+        let o_count = match tokens[opener_idx].kind {
+            InlineTokenKind::Delim { count, .. } => count,
+            _ => unreachable!(),
+        };
+
+        let (use_delims, modifier) = if ch == '~' {
+            (2, Modifier::CROSSED_OUT)
+        } else if o_count >= 2 && closer_count >= 2 {
+            (2, Modifier::BOLD)
+        } else {
+            (1, Modifier::ITALIC)
+        };
+
+        if let InlineTokenKind::Delim { count, .. } = &mut tokens[opener_idx].kind {
+            *count -= use_delims;
+        }
+        if let InlineTokenKind::Delim { count, .. } = &mut tokens[closer_idx].kind {
+            *count -= use_delims;
+        }
+
+        for token in &mut tokens[(opener_idx + 1)..closer_idx] {
+            token.modifiers.insert(modifier);
+            if let InlineTokenKind::Delim { can_open, .. } = &mut token.kind {
+                *can_open = false;
+            }
+        }
+    }
+
+    let mut spans = Vec::new();
+    for token in tokens {
+        let style = base_style.add_modifier(token.modifiers);
+        match token.kind {
+            InlineTokenKind::Text(s) => push_merged_span(&mut spans, &s, style),
+            InlineTokenKind::Code(s) => push_merged_span(&mut spans, &s, style.fg(Color::Yellow)),
+            InlineTokenKind::Delim { ch, count, .. } if count > 0 => {
+                push_merged_span(&mut spans, &ch.to_string().repeat(count), style);
+            }
+            InlineTokenKind::Delim { .. } => {}
+        }
+    }
+    spans
+}
+
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|s| display_width(s.content.as_ref()))
+        .sum()
+}
+
+fn wrap_styled_spans(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    break_words: bool,
+) -> Vec<Vec<Span<'static>>> {
+    if spans.is_empty() || spans.iter().all(|s| s.content.is_empty()) {
+        return vec![Vec::new()];
+    }
+
+    let mut pieces: Vec<(bool, Vec<Span<'static>>)> = Vec::new();
+    for span in spans {
+        let s = span.content.as_ref();
+        let style = span.style;
+        let mut start = 0usize;
+        let mut cur_is_space: Option<bool> = None;
+
+        for (idx, ch) in s.char_indices() {
+            let is_space = ch == ' ';
+            if let Some(prev_space) = cur_is_space {
+                if prev_space != is_space {
+                    let seg = &s[start..idx];
+                    if let Some((last_space, last_vec)) = pieces.last_mut()
+                        && *last_space == prev_space
+                    {
+                        push_merged_span(last_vec, seg, style);
+                    } else {
+                        let mut v = Vec::new();
+                        push_merged_span(&mut v, seg, style);
+                        pieces.push((prev_space, v));
+                    }
+                    start = idx;
+                    cur_is_space = Some(is_space);
+                }
+            } else {
+                cur_is_space = Some(is_space);
+            }
+        }
+
+        if let Some(prev_space) = cur_is_space {
+            let seg = &s[start..];
+            if let Some((last_space, last_vec)) = pieces.last_mut()
+                && *last_space == prev_space
+            {
+                push_merged_span(last_vec, seg, style);
+            } else {
+                let mut v = Vec::new();
+                push_merged_span(&mut v, seg, style);
+                pieces.push((prev_space, v));
+            }
+        }
+    }
+
+    let max_width = width.max(1);
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur_line: Vec<Span<'static>> = Vec::new();
+    let mut cur_width = 0usize;
+    let mut pending_space: Vec<Span<'static>> = Vec::new();
+
+    for (is_space, piece_spans) in pieces {
+        if is_space {
+            if lines.is_empty() && cur_line.is_empty() {
+                for sp in piece_spans {
+                    let mut taken = String::new();
+                    for ch in sp.content.chars() {
+                        let mut buf = [0u8; 4];
+                        let cw = display_width(ch.encode_utf8(&mut buf));
+                        if cur_width + cw > max_width {
+                            break;
+                        }
+                        taken.push(ch);
+                        cur_width += cw;
+                    }
+                    push_merged_span(&mut cur_line, &taken, sp.style);
+                }
+            } else if !cur_line.is_empty() {
+                for sp in piece_spans {
+                    push_merged_span(&mut pending_space, &sp.content, sp.style);
+                }
+            }
+            continue;
+        }
+
+        let word_width = spans_display_width(&piece_spans);
+        let space_width = spans_display_width(&pending_space);
+
+        if cur_width > 0 && cur_width + space_width + word_width <= max_width {
+            for sp in pending_space.drain(..) {
+                push_merged_span(&mut cur_line, &sp.content, sp.style);
+            }
+            for sp in piece_spans {
+                push_merged_span(&mut cur_line, &sp.content, sp.style);
+            }
+            cur_width += space_width + word_width;
+            continue;
+        }
+
+        pending_space.clear();
+        if cur_width > 0 {
+            lines.push(std::mem::take(&mut cur_line));
+            cur_width = 0;
+        }
+
+        if word_width <= max_width || !break_words {
+            for sp in piece_spans {
+                push_merged_span(&mut cur_line, &sp.content, sp.style);
+            }
+            cur_width = word_width;
+        } else {
+            for sp in piece_spans {
+                let mut chunk = String::new();
+                for ch in sp.content.chars() {
+                    let mut buf = [0u8; 4];
+                    let cw = display_width(ch.encode_utf8(&mut buf));
+                    if cur_width + cw > max_width && cur_width > 0 {
+                        push_merged_span(&mut cur_line, &chunk, sp.style);
+                        chunk.clear();
+                        lines.push(std::mem::take(&mut cur_line));
+                        cur_width = 0;
+                    }
+                    chunk.push(ch);
+                    cur_width += cw;
+                }
+                push_merged_span(&mut cur_line, &chunk, sp.style);
+            }
+        }
+    }
+
+    if !cur_line.is_empty() || lines.is_empty() {
+        lines.push(cur_line);
+    }
+    lines
+}
+
+fn wrap_markdown_line(
+    line: &str,
+    base_style: Style,
+    options: &textwrap::Options<'_>,
+) -> Vec<Vec<Span<'static>>> {
+    if line.is_empty() {
+        vec![Vec::new()]
+    } else {
+        wrap_styled_spans(
+            parse_inline_spans(line, base_style),
+            options.width,
+            options.break_words,
+        )
+    }
+}
+
+fn wrap_raw_line(
+    line: &str,
+    style: Style,
+    options: &textwrap::Options<'_>,
+) -> Vec<Vec<Span<'static>>> {
+    if line.is_empty() {
+        vec![Vec::new()]
+    } else {
+        wrap_styled_spans(
+            vec![Span::styled(line.to_string(), style)],
+            options.width,
+            options.break_words,
+        )
     }
 }
 
@@ -242,10 +666,34 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
     let num_cols = parsed_rows.iter().map(Vec::len).max().filter(|&n| n > 0)?;
     aligns.resize(num_cols, ColAlign::Left);
 
+    let styled_rows: Vec<Vec<Vec<Span<'static>>>> = parsed_rows
+        .iter()
+        .enumerate()
+        .map(|(r_idx, row)| {
+            if r_idx == 1 {
+                return Vec::new();
+            }
+            let cell_style = if r_idx == 0 {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            (0..num_cols)
+                .map(|c_idx| {
+                    let text = row.get(c_idx).map_or("", String::as_str);
+                    parse_inline_spans(text, cell_style)
+                })
+                .collect()
+        })
+        .collect();
+
     let mut col_widths = vec![1usize; num_cols];
-    for (_, row) in parsed_rows.iter().enumerate().filter(|&(i, _)| i != 1) {
-        for (c_idx, cell) in row.iter().enumerate() {
-            col_widths[c_idx] = col_widths[c_idx].max(display_width(cell));
+    for (r_idx, row) in styled_rows.iter().enumerate().filter(|&(i, _)| i != 1) {
+        for (c_idx, cell_spans) in row.iter().enumerate() {
+            let _ = r_idx;
+            col_widths[c_idx] = col_widths[c_idx].max(spans_display_width(cell_spans));
         }
     }
 
@@ -266,13 +714,14 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         }
     }
 
+    let border_style = Style::default().fg(Color::DarkGray);
     let mut out = vec![WrappedLine::TableBorder(draw_table_border(
         &col_widths,
         '┌',
         '┬',
         '┐',
     ))];
-    for (r_idx, row) in parsed_rows.iter().enumerate() {
+    for (r_idx, row) in styled_rows.into_iter().enumerate() {
         if r_idx == 1 {
             out.push(WrappedLine::TableBorder(draw_table_border(
                 &col_widths,
@@ -283,30 +732,43 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
             continue;
         }
 
-        let wrapped_cells: Vec<Vec<String>> = (0..num_cols)
-            .map(|c_idx| {
-                let text = row.get(c_idx).map_or("", String::as_str);
-                wrap_single_line(
-                    text,
-                    &textwrap::Options::new(col_widths[c_idx].max(1)).break_words(true),
-                )
+        let cell_style = if r_idx == 0 {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let wrapped_cells: Vec<Vec<Vec<Span<'static>>>> = row
+            .into_iter()
+            .enumerate()
+            .map(|(c_idx, cell_spans)| {
+                wrap_styled_spans(cell_spans, col_widths[c_idx].max(1), true)
             })
             .collect();
         let max_sublines = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1);
 
         for sub in 0..max_sublines {
-            let mut line = String::from("│");
+            let mut spans = vec![Span::raw("  ")];
             for c_idx in 0..num_cols {
-                let part = wrapped_cells[c_idx].get(sub).map_or("", String::as_str);
-                line.push_str(&format!(
-                    " {} │",
-                    pad_cell(part, col_widths[c_idx], aligns[c_idx])
-                ));
+                spans.push(Span::styled("│", border_style));
+                let part = wrapped_cells[c_idx].get(sub);
+                let part_width = part.map_or(0, |s| spans_display_width(s));
+                let pad = col_widths[c_idx].saturating_sub(part_width);
+                let (left_pad, right_pad) = match aligns[c_idx] {
+                    ColAlign::Left => (1, 1 + pad),
+                    ColAlign::Right => (1 + pad, 1),
+                    ColAlign::Center => (1 + pad / 2, 1 + pad - pad / 2),
+                };
+                spans.push(Span::styled(" ".repeat(left_pad), cell_style));
+                if let Some(part_spans) = part {
+                    spans.extend(part_spans.iter().cloned());
+                }
+                spans.push(Span::styled(" ".repeat(right_pad), cell_style));
             }
-            out.push(WrappedLine::TableRow {
-                text: line,
-                is_header: r_idx == 0,
-            });
+            spans.push(Span::styled("│", border_style));
+            out.push(WrappedLine::TableRow(spans));
         }
     }
 
@@ -317,17 +779,6 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         '┘',
     )));
     Some(out)
-}
-
-fn wrap_single_line(line: &str, options: &textwrap::Options<'_>) -> Vec<String> {
-    if line.is_empty() {
-        vec![String::new()]
-    } else {
-        textwrap::wrap(line, options)
-            .into_iter()
-            .map(|c| c.into_owned())
-            .collect()
-    }
 }
 
 fn flush_table_buffer(
@@ -345,7 +796,7 @@ fn flush_table_buffer(
     } else {
         list_levels.clear();
         for raw in table_buf.iter() {
-            for part in wrap_single_line(raw, options) {
+            for part in wrap_markdown_line(raw, Style::default(), options) {
                 out.push(WrappedLine::Plain(part));
             }
         }
@@ -475,10 +926,11 @@ fn wrap_list_item_lines(
     raw_indent: usize,
     kind: ParsedListKind,
     item_text: &str,
+    base_style: Style,
     list_levels: &mut Vec<(usize, usize)>,
     avail_width: usize,
     break_words: bool,
-) -> Vec<(usize, Option<ListMarker>, String)> {
+) -> Vec<(usize, Option<ListMarker>, Vec<Span<'static>>)> {
     while list_levels
         .last()
         .is_some_and(|&(top_indent, _)| top_indent > raw_indent)
@@ -525,7 +977,7 @@ fn wrap_list_item_lines(
 
     let text_width = avail_width.saturating_sub(hanging_indent).max(1);
     let item_opts = textwrap::Options::new(text_width).break_words(break_words);
-    let mut wrapped = wrap_single_line(item_text, &item_opts).into_iter();
+    let mut wrapped = wrap_markdown_line(item_text, base_style, &item_opts).into_iter();
     let mut result = Vec::new();
     if let Some(first) = wrapped.next() {
         result.push((visual_indent, Some(marker), first));
@@ -536,6 +988,23 @@ fn wrap_list_item_lines(
     result
 }
 
+fn header_text_style(level: usize) -> Style {
+    match level {
+        1 => Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        2 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        3 => Style::default()
+            .fg(Color::LightBlue)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD | Modifier::ITALIC),
+    }
+}
+
 fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine> {
     let mut out = Vec::new();
     let mut table_buf: Vec<&str> = Vec::new();
@@ -544,6 +1013,10 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
     let mut last_quote_depth: Option<usize> = None;
     let mut in_code_block = false;
     let mut in_diff_hunk = false;
+    let mut in_params_block = false;
+    let quote_style = Style::default()
+        .fg(Color::Gray)
+        .add_modifier(Modifier::ITALIC);
 
     for line in content.lines() {
         if line.trim_start().starts_with("```") {
@@ -551,6 +1024,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
             quote_list_levels.clear();
             last_quote_depth = None;
             in_diff_hunk = false;
+            in_params_block = false;
             in_code_block = !in_code_block;
             out.push(WrappedLine::CodeFence(line.trim().to_string()));
             continue;
@@ -566,8 +1040,9 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
             list_levels.clear();
             quote_list_levels.clear();
             last_quote_depth = None;
+            in_params_block = false;
             in_diff_hunk = true;
-            for part in wrap_single_line(line, options) {
+            for part in wrap_raw_line(line, Style::default(), options) {
                 out.push(WrappedLine::Plain(part));
             }
             continue;
@@ -575,7 +1050,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
 
         if in_diff_hunk {
             if is_diff_body_line(line) {
-                for part in wrap_single_line(line, options) {
+                for part in wrap_raw_line(line, Style::default(), options) {
                     out.push(WrappedLine::Plain(part));
                 }
                 continue;
@@ -586,6 +1061,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
         if !line.trim_start().starts_with('>') && is_table_line(line) {
             quote_list_levels.clear();
             last_quote_depth = None;
+            in_params_block = false;
             table_buf.push(line);
             continue;
         }
@@ -593,6 +1069,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
         flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
 
         if let Some((leading_spaces, depth, quote_text)) = parse_blockquote(line) {
+            in_params_block = false;
             while list_levels
                 .last()
                 .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
@@ -612,18 +1089,19 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 quote_list_levels.clear();
                 let hdr_opts = textwrap::Options::new(inner_width.saturating_sub(6).max(1))
                     .break_words(options.break_words);
-                for part in wrap_single_line(hdr_content, &hdr_opts) {
+                for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
                     out.push(WrappedLine::Blockquote {
                         indent: base_indent,
                         depth,
-                        content: QuoteContent::Header { level, text: part },
+                        content: QuoteContent::Header { level, spans },
                     });
                 }
             } else if let Some((q_raw_indent, kind, item_text)) = parse_list_item(quote_text) {
-                for (item_indent, maybe_marker, text) in wrap_list_item_lines(
+                for (item_indent, maybe_marker, spans) in wrap_list_item_lines(
                     q_raw_indent,
                     kind,
                     item_text,
+                    quote_style,
                     &mut quote_list_levels,
                     inner_width,
                     options.break_words,
@@ -632,11 +1110,11 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                         Some(marker) => QuoteContent::ListItem {
                             indent: item_indent,
                             marker,
-                            text,
+                            spans,
                         },
                         None => QuoteContent::ListContinuation {
                             indent: item_indent,
-                            text,
+                            spans,
                         },
                     };
                     out.push(WrappedLine::Blockquote {
@@ -649,7 +1127,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 out.push(WrappedLine::Blockquote {
                     indent: base_indent,
                     depth,
-                    content: QuoteContent::Plain(String::new()),
+                    content: QuoteContent::Plain(Vec::new()),
                 });
             } else {
                 let q_leading = quote_text.bytes().take_while(|&b| b == b' ').count();
@@ -663,24 +1141,26 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                     let text_width = inner_width.saturating_sub(hanging_indent).max(1);
                     let cont_opts =
                         textwrap::Options::new(text_width).break_words(options.break_words);
-                    for part in wrap_single_line(quote_text.trim_start(), &cont_opts) {
+                    for spans in
+                        wrap_markdown_line(quote_text.trim_start(), quote_style, &cont_opts)
+                    {
                         out.push(WrappedLine::Blockquote {
                             indent: base_indent,
                             depth,
                             content: QuoteContent::ListContinuation {
                                 indent: hanging_indent,
-                                text: part,
+                                spans,
                             },
                         });
                     }
                 } else {
                     let q_opts =
                         textwrap::Options::new(inner_width).break_words(options.break_words);
-                    for part in wrap_single_line(quote_text, &q_opts) {
+                    for spans in wrap_markdown_line(quote_text, quote_style, &q_opts) {
                         out.push(WrappedLine::Blockquote {
                             indent: base_indent,
                             depth,
-                            content: QuoteContent::Plain(part),
+                            content: QuoteContent::Plain(spans),
                         });
                     }
                 }
@@ -693,16 +1173,19 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
 
         if let Some((level, hdr_content)) = parse_markdown_header(line) {
             list_levels.clear();
+            in_params_block = false;
             let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
                 .break_words(options.break_words);
-            for part in wrap_single_line(hdr_content, &hdr_opts) {
-                out.push(WrappedLine::Header { level, text: part });
+            for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
+                out.push(WrappedLine::Header { level, spans });
             }
         } else if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
-            for (indent, maybe_marker, text) in wrap_list_item_lines(
+            in_params_block = false;
+            for (indent, maybe_marker, spans) in wrap_list_item_lines(
                 raw_indent,
                 kind,
                 item_text,
+                Style::default(),
                 &mut list_levels,
                 options.width,
                 options.break_words,
@@ -711,14 +1194,34 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                     Some(marker) => out.push(WrappedLine::ListItem {
                         indent,
                         marker,
-                        text,
+                        spans,
                     }),
-                    None => out.push(WrappedLine::ListContinuation { indent, text }),
+                    None => out.push(WrappedLine::ListContinuation { indent, spans }),
                 }
             }
         } else if line.trim().is_empty() {
-            out.push(WrappedLine::Plain(String::new()));
+            in_params_block = false;
+            out.push(WrappedLine::Plain(Vec::new()));
         } else {
+            let trimmed = line.trim_start();
+            if trimmed == "Parameters:" {
+                in_params_block = true;
+            }
+            if in_params_block {
+                list_levels.clear();
+                let style = if trimmed == "Parameters:" {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                for spans in wrap_raw_line(line, style, options) {
+                    out.push(WrappedLine::Plain(spans));
+                }
+                continue;
+            }
+
             let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
             while list_levels
                 .last()
@@ -729,55 +1232,28 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
             if let Some(&(_, hanging_indent)) = list_levels.last() {
                 let text_width = options.width.saturating_sub(hanging_indent).max(1);
                 let cont_opts = textwrap::Options::new(text_width).break_words(options.break_words);
-                for part in wrap_single_line(line.trim_start(), &cont_opts) {
+                for spans in wrap_markdown_line(line.trim_start(), Style::default(), &cont_opts) {
                     out.push(WrappedLine::ListContinuation {
                         indent: hanging_indent,
-                        text: part,
+                        spans,
                     });
                 }
+            } else if trimmed.starts_with("⚙ [") {
+                let style = Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC);
+                for spans in wrap_raw_line(line, style, options) {
+                    out.push(WrappedLine::Plain(spans));
+                }
             } else {
-                for part in wrap_single_line(line, options) {
-                    out.push(WrappedLine::Plain(part));
+                for spans in wrap_markdown_line(line, Style::default(), options) {
+                    out.push(WrappedLine::Plain(spans));
                 }
             }
         }
     }
     flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
     out
-}
-
-fn style_inline_segments(text: &str, base_style: Style) -> Vec<Span<'static>> {
-    text.split('`')
-        .enumerate()
-        .filter(|(_, seg)| !seg.is_empty())
-        .map(|(idx, seg)| {
-            if idx % 2 == 1 {
-                Span::styled(format!("`{seg}`"), base_style.fg(Color::Yellow))
-            } else {
-                Span::styled(seg.to_string(), base_style)
-            }
-        })
-        .collect()
-}
-
-fn style_table_row(line: &str, is_header: bool) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw("  ")];
-    let border_style = Style::default().fg(Color::DarkGray);
-    let cell_style = if is_header {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-
-    for (idx, part) in line.split('│').enumerate() {
-        if idx > 0 {
-            spans.push(Span::styled("│", border_style));
-        }
-        spans.extend(style_inline_segments(part, cell_style));
-    }
-    spans
 }
 
 fn parse_markdown_header(line: &str) -> Option<(usize, &str)> {
@@ -797,62 +1273,49 @@ fn parse_markdown_header(line: &str) -> Option<(usize, &str)> {
     } else {
         trimmed_rest
     };
-    let content = content
-        .strip_prefix("**")
-        .and_then(|s| s.strip_suffix("**"))
-        .unwrap_or(content);
     Some((level, content))
 }
 
-fn style_markdown_header_inner(level: usize, content: &str) -> Vec<Span<'static>> {
+fn style_markdown_header_inner(
+    level: usize,
+    content_spans: &[Span<'static>],
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     match level {
         1 => {
             let accent = Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD);
-            let text_style = Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             spans.push(Span::styled("▌ ", accent));
-            spans.extend(style_inline_segments(content, text_style));
+            spans.extend(content_spans.iter().cloned());
         }
         2 => {
             let accent = Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD);
-            let text_style = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
             spans.push(Span::styled("▎ ", accent));
-            spans.extend(style_inline_segments(content, text_style));
+            spans.extend(content_spans.iter().cloned());
             spans.push(Span::styled(" ───", Style::default().fg(Color::Blue)));
         }
         3 => {
             let accent = Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD);
-            let text_style = Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD);
             spans.push(Span::styled("▸ ", accent));
-            spans.extend(style_inline_segments(content, text_style));
+            spans.extend(content_spans.iter().cloned());
         }
         _ => {
             let accent = Style::default().fg(Color::DarkGray);
-            let text_style = Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD | Modifier::ITALIC);
             spans.push(Span::styled("• ", accent));
-            spans.extend(style_inline_segments(content, text_style));
+            spans.extend(content_spans.iter().cloned());
         }
     }
     spans
 }
 
-fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
+fn style_markdown_header(level: usize, content_spans: &[Span<'static>]) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw("  ")];
-    spans.extend(style_markdown_header_inner(level, content));
+    spans.extend(style_markdown_header_inner(level, content_spans));
     spans
 }
 
@@ -946,33 +1409,15 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
     }
 }
 
-fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
-    let trimmed = line.trim_start();
-    let mut spans = vec![Span::raw("  ")];
-    if trimmed.starts_with("⚙ [") {
-        spans.push(Span::styled(
-            line.to_string(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        ));
-    } else {
-        spans.extend(style_inline_segments(line, Style::default()));
-    }
-    spans
-}
-
 fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut code_fence_width = 7usize;
-    let mut in_params_block = false;
     let mut out = Vec::with_capacity(content_lines.len());
     let border_style = Style::default().fg(Color::Blue);
 
     for item in content_lines {
         let formatted = match item {
             WrappedLine::CodeFence(trimmed) => {
-                in_params_block = false;
                 let spans = if !in_code_block {
                     let lang = trimmed.trim_start_matches('`').trim();
                     if lang.is_empty() {
@@ -1012,41 +1457,35 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 ]
             }
             WrappedLine::TableBorder(line) => {
-                in_params_block = false;
                 vec![
                     Span::raw("  "),
                     Span::styled(line.clone(), Style::default().fg(Color::DarkGray)),
                 ]
             }
-            WrappedLine::TableRow { text, is_header } => {
-                in_params_block = false;
-                style_table_row(text, *is_header)
-            }
-            WrappedLine::Header { level, text } => {
-                in_params_block = false;
-                style_markdown_header(*level, text)
-            }
+            WrappedLine::TableRow(spans) => spans.clone(),
+            WrappedLine::Header { level, spans } => style_markdown_header(*level, spans),
             WrappedLine::ListItem {
                 indent,
                 marker,
-                text,
+                spans: item_spans,
             } => {
-                in_params_block = false;
                 let mut spans = vec![Span::raw("  ")];
                 if *indent > 0 {
                     spans.push(Span::raw(" ".repeat(*indent)));
                 }
                 spans.extend(style_list_marker(marker));
-                spans.extend(style_inline_segments(text, Style::default()));
+                spans.extend(item_spans.iter().cloned());
                 spans
             }
-            WrappedLine::ListContinuation { indent, text } => {
-                in_params_block = false;
+            WrappedLine::ListContinuation {
+                indent,
+                spans: cont_spans,
+            } => {
                 let mut spans = vec![Span::raw("  ")];
                 if *indent > 0 {
                     spans.push(Span::raw(" ".repeat(*indent)));
                 }
-                spans.extend(style_inline_segments(text, Style::default()));
+                spans.extend(cont_spans.iter().cloned());
                 spans
             }
             WrappedLine::Blockquote {
@@ -1054,65 +1493,48 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 depth,
                 content,
             } => {
-                in_params_block = false;
                 let mut spans = vec![Span::raw("  ")];
                 if *indent > 0 {
                     spans.push(Span::raw(" ".repeat(*indent)));
                 }
                 spans.extend(style_blockquote_bars(*depth));
-                let quote_style = Style::default()
-                    .fg(Color::Gray)
-                    .add_modifier(Modifier::ITALIC);
                 match content {
-                    QuoteContent::Plain(text) => {
-                        spans.extend(style_inline_segments(text, quote_style));
+                    QuoteContent::Plain(q_spans) => {
+                        spans.extend(q_spans.iter().cloned());
                     }
-                    QuoteContent::Header { level, text } => {
-                        spans.extend(style_markdown_header_inner(*level, text));
+                    QuoteContent::Header {
+                        level,
+                        spans: h_spans,
+                    } => {
+                        spans.extend(style_markdown_header_inner(*level, h_spans));
                     }
                     QuoteContent::ListItem {
                         indent: item_indent,
                         marker,
-                        text,
+                        spans: item_spans,
                     } => {
                         if *item_indent > 0 {
                             spans.push(Span::raw(" ".repeat(*item_indent)));
                         }
                         spans.extend(style_list_marker(marker));
-                        spans.extend(style_inline_segments(text, quote_style));
+                        spans.extend(item_spans.iter().cloned());
                     }
                     QuoteContent::ListContinuation {
                         indent: cont_indent,
-                        text,
+                        spans: cont_spans,
                     } => {
                         if *cont_indent > 0 {
                             spans.push(Span::raw(" ".repeat(*cont_indent)));
                         }
-                        spans.extend(style_inline_segments(text, quote_style));
+                        spans.extend(cont_spans.iter().cloned());
                     }
                 }
                 spans
             }
-            WrappedLine::Plain(line) => {
-                let trimmed = line.trim_start();
-                if trimmed == "Parameters:" {
-                    in_params_block = true;
-                } else if trimmed.is_empty() {
-                    in_params_block = false;
-                }
-
-                if in_params_block {
-                    let style = if trimmed == "Parameters:" {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Yellow)
-                    };
-                    vec![Span::raw("  "), Span::styled(line.clone(), style)]
-                } else {
-                    style_inline_markdown(line)
-                }
+            WrappedLine::Plain(line_spans) => {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line_spans.iter().cloned());
+                spans
             }
         };
         out.push(Line::from(formatted));
