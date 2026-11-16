@@ -136,8 +136,19 @@ impl TuiApp {
 
         if self.chat_area.contains(pos) {
             let inner = self.chat_inner_area();
+            let inner_x = usize::from(x.saturating_sub(inner.x));
             let inner_y = usize::from(y.saturating_sub(inner.y));
             let visual_y = inner_y + self.chat_scroll;
+
+            if inner.contains(pos)
+                && !(inner_y == 0 && self.find_sticky_header_msg().is_some())
+                && let Some(btn) = self
+                    .code_copy_buttons
+                    .iter()
+                    .find(|b| b.visual_y == visual_y && b.x_range.contains(&inner_x))
+            {
+                return btn.code.clone();
+            }
 
             let target_idx = if inner.contains(pos) && inner_y == 0 {
                 self.find_sticky_header_msg()
@@ -314,11 +325,30 @@ impl TuiApp {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) if inner.contains(pos) => {
+                let inner_x = usize::from(x.saturating_sub(inner.x));
                 if inner_y == 0
                     && let Some(sticky_idx) = self.find_sticky_header_msg()
                     && let Some(state) = self.msg_states.get_mut(sticky_idx)
                 {
                     state.collapsed = !state.collapsed;
+                } else if let Some(btn) = self
+                    .code_copy_buttons
+                    .iter()
+                    .find(|b| b.visual_y == visual_y && b.x_range.contains(&inner_x))
+                {
+                    let code = btn.code.clone();
+                    let target = (btn.msg_idx, btn.content_idx);
+                    match copy_text_to_clipboard(&code) {
+                        Ok(()) => {
+                            self.copied_code_flash = Some((
+                                target,
+                                std::time::Instant::now() + std::time::Duration::from_millis(1500),
+                            ));
+                        }
+                        Err(e) => {
+                            self.push_error_message(format!("Failed to copy to clipboard: {e}"));
+                        }
+                    }
                 } else if let Some((i, start_y, _)) = self.find_msg_at(visual_y)
                     && let Some(state) = self.msg_states.get_mut(i)
                 {

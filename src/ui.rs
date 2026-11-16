@@ -123,6 +123,14 @@ pub(super) struct MsgUiState {
     pub collapsed: bool,
 }
 
+pub(super) struct CodeCopyButton {
+    pub msg_idx: usize,
+    pub content_idx: usize,
+    pub visual_y: usize,
+    pub x_range: std::ops::Range<usize>,
+    pub code: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContextMenuAction {
     CopyToClipboard,
@@ -227,6 +235,8 @@ pub struct TuiApp {
     pub(super) chat_area: Rect,
     pub(super) prompt_area: Rect,
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
+    pub(super) code_copy_buttons: Vec<CodeCopyButton>,
+    pub(super) copied_code_flash: Option<((usize, usize), std::time::Instant)>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) term_focused: bool,
@@ -362,6 +372,8 @@ impl TuiApp {
             chat_area: Rect::default(),
             prompt_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
+            code_copy_buttons: Vec::new(),
+            copied_code_flash: None,
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
@@ -495,6 +507,13 @@ impl TuiApp {
                         self.cursor_blink_on = !self.cursor_blink_on;
                         dirty = true;
                     }
+                    if self
+                        .copied_code_flash
+                        .is_some_and(|(_, exp)| std::time::Instant::now() >= exp)
+                    {
+                        self.copied_code_flash = None;
+                        dirty = true;
+                    }
                 }
                 maybe_term = term_events.next() => {
                     match maybe_term {
@@ -575,6 +594,7 @@ impl TuiApp {
                 let prev_msg_count = if is_reset_or_reload {
                     self.msg_states.clear();
                     self.styled_messages.clear();
+                    self.copied_code_flash = None;
                     0
                 } else {
                     self.msg_states.truncate(self.messages.len());

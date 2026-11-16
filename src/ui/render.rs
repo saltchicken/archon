@@ -1,4 +1,4 @@
-use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, titled_block};
+use super::{ActiveModal, CodeCopyButton, MsgUiState, SlashCommand, TuiApp, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::{self, ToolCall},
@@ -1433,14 +1433,21 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
             WrappedLine::CodeFence(trimmed) => {
                 let spans = if !in_code_block {
                     let lang = trimmed.trim_start_matches('`').trim();
+                    let copy_badge = Span::styled(
+                        "[Copy]",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    );
                     if lang.is_empty() {
                         code_fence_width = 7;
                         vec![
                             Span::raw("  "),
                             Span::styled(
-                                format!("╭{}", "─".repeat(code_fence_width)),
+                                format!("╭{} ", "─".repeat(code_fence_width)),
                                 border_style,
                             ),
+                            copy_badge,
                         ]
                     } else {
                         code_fence_width = display_width(lang) + 6;
@@ -1451,7 +1458,8 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                                 lang.to_string(),
                                 border_style.add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(" ───", border_style),
+                            Span::styled(" ─── ", border_style),
+                            copy_badge,
                         ]
                     }
                 } else {
@@ -1578,6 +1586,33 @@ fn is_message_header_line(line: &Line<'_>) -> bool {
         .is_some_and(|s| s.content.starts_with("━━ "))
 }
 
+fn is_opening_code_fence(line: &Line<'_>) -> bool {
+    line.spans
+        .get(1)
+        .is_some_and(|s| s.content.starts_with('╭'))
+        && line
+            .spans
+            .last()
+            .is_some_and(|s| s.content.as_ref() == "[Copy]")
+}
+
+fn extract_code_block_from(styled_content: &[Line<'static>], fence_idx: usize) -> String {
+    let mut code_lines = Vec::new();
+    for line in &styled_content[(fence_idx + 1)..] {
+        if line
+            .spans
+            .first()
+            .is_some_and(|s| s.content.as_ref() == "  │ ")
+        {
+            let text = line.spans.get(1).map_or("", |s| s.content.as_ref());
+            code_lines.push(text);
+        } else {
+            break;
+        }
+    }
+    code_lines.join("\n")
+}
+
 fn image_badge(m: &ChatMessage) -> String {
     m.images
         .as_ref()
@@ -1646,7 +1681,7 @@ impl TuiApp {
         let is_truncated = !state.collapsed && total_content > max_lines;
 
         if !state.collapsed {
-            if is_truncated {
+            let (slice_start, slice_end) = if is_truncated {
                 state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
                 let start = state.scroll;
                 let end = (start + max_lines).min(total_content);
@@ -1659,16 +1694,54 @@ impl TuiApp {
                 } else {
                     lines.push(Line::from(""));
                 }
-                lines.extend_from_slice(&styled_content[start..end]);
-                if end < total_content {
-                    lines.push(Line::from(Span::styled(
-                        format!("    ... ({}) ...", total_content - end),
-                        Style::default().fg(Color::Blue),
-                    )));
-                }
+                (start, end)
             } else {
                 lines.push(Line::from(""));
-                lines.extend_from_slice(styled_content);
+                (0, total_content)
+            };
+
+            let flash_target = self
+                .copied_code_flash
+                .filter(|&(_, exp)| std::time::Instant::now() < exp)
+                .map(|(target, _)| target);
+
+            for (rel_idx, line) in styled_content[slice_start..slice_end].iter().enumerate() {
+                let content_idx = slice_start + rel_idx;
+                let visual_y = lines.len();
+                if is_opening_code_fence(line) {
+                    let is_flashed = flash_target == Some((idx, content_idx));
+                    let mut rendered_line = line.clone();
+                    if is_flashed && let Some(last_span) = rendered_line.spans.last_mut() {
+                        *last_span = Span::styled(
+                            "[Copied!]",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        );
+                    }
+                    let total_w = spans_display_width(&rendered_line.spans);
+                    let badge_w = rendered_line
+                        .spans
+                        .last()
+                        .map_or(0, |s| display_width(s.content.as_ref()));
+                    self.code_copy_buttons.push(CodeCopyButton {
+                        msg_idx: idx,
+                        content_idx,
+                        visual_y,
+                        x_range: total_w.saturating_sub(badge_w)..total_w,
+                        code: extract_code_block_from(styled_content, content_idx),
+                    });
+                    lines.push(rendered_line);
+                } else {
+                    lines.push(line.clone());
+                }
+            }
+
+            if is_truncated && slice_end < total_content {
+                lines.push(Line::from(Span::styled(
+                    format!("    ... ({}) ...", total_content - slice_end),
+                    Style::default().fg(Color::Blue),
+                )));
             }
         } else {
             lines.push(Line::from(""));
@@ -1810,6 +1883,7 @@ impl TuiApp {
         let total_slots = self.messages.len() + 1 + self.queued_messages.len();
         self.msg_states.resize(total_slots, MsgUiState::default());
         self.msg_visual_ranges.clear();
+        self.code_copy_buttons.clear();
 
         let options = textwrap::Options::new(available_width).break_words(true);
 
