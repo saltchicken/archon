@@ -653,7 +653,7 @@ impl TuiApp {
         self.prompt_area = chunks[1];
         // Reserve an extra column on the right so wrapped text doesn't butt up
         // against the vertical scrollbar rendered on the chat area's right edge.
-        let available_width = self.chat_inner_area().width.saturating_sub(6).max(1) as usize;
+        let available_width = self.chat_inner_area().width.saturating_sub(4).max(1) as usize;
 
         self.msg_states.resize(
             self.messages.len() + 1 + self.queued_messages.len(),
