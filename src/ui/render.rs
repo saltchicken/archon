@@ -38,6 +38,23 @@ enum ListMarker {
     },
 }
 
+enum QuoteContent {
+    Plain(String),
+    Header {
+        level: usize,
+        text: String,
+    },
+    ListItem {
+        indent: usize,
+        marker: ListMarker,
+        text: String,
+    },
+    ListContinuation {
+        indent: usize,
+        text: String,
+    },
+}
+
 enum WrappedLine {
     CodeFence(String),
     CodeLine(String),
@@ -58,6 +75,11 @@ enum WrappedLine {
     ListContinuation {
         indent: usize,
         text: String,
+    },
+    Blockquote {
+        indent: usize,
+        depth: usize,
+        content: QuoteContent,
     },
     Plain(String),
 }
@@ -430,16 +452,104 @@ fn is_diff_body_line(line: &str) -> bool {
         && !line.starts_with("+++ ")
 }
 
+fn parse_blockquote(line: &str) -> Option<(usize, usize, &str)> {
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    let mut rest = &line[leading_spaces..];
+    let mut depth = 0usize;
+
+    while let Some(after_gt) = rest.strip_prefix('>') {
+        depth += 1;
+        let one_space = after_gt.strip_prefix(' ').unwrap_or(after_gt);
+        let trimmed = after_gt.trim_start_matches(' ');
+        rest = if trimmed.starts_with('>') {
+            trimmed
+        } else {
+            one_space
+        };
+    }
+
+    (depth > 0).then_some((leading_spaces, depth, rest))
+}
+
+fn wrap_list_item_lines(
+    raw_indent: usize,
+    kind: ParsedListKind,
+    item_text: &str,
+    list_levels: &mut Vec<(usize, usize)>,
+    avail_width: usize,
+    break_words: bool,
+) -> Vec<(usize, Option<ListMarker>, String)> {
+    while list_levels
+        .last()
+        .is_some_and(|&(top_indent, _)| top_indent > raw_indent)
+    {
+        list_levels.pop();
+    }
+    let depth = if let Some(&(top_indent, _)) = list_levels.last() {
+        if raw_indent > top_indent {
+            list_levels.len()
+        } else {
+            list_levels.len().saturating_sub(1)
+        }
+    } else {
+        0
+    };
+
+    let marker = match kind {
+        ParsedListKind::Bullet => ListMarker::Bullet { depth },
+        ParsedListKind::Ordered { number, delim } => ListMarker::Ordered {
+            number,
+            delim,
+            depth,
+        },
+        ParsedListKind::Task { checked, ordered } => ListMarker::Task {
+            checked,
+            depth,
+            ordered,
+        },
+    };
+
+    let max_indent = avail_width.saturating_sub(8);
+    let visual_indent = (depth * 2).min(max_indent);
+    let marker_width = list_marker_width(&marker);
+    let hanging_indent = (visual_indent + marker_width).min(avail_width.saturating_sub(1));
+
+    if list_levels
+        .last()
+        .is_none_or(|&(top_indent, _)| raw_indent > top_indent)
+    {
+        list_levels.push((raw_indent, hanging_indent));
+    } else if let Some(top) = list_levels.last_mut() {
+        top.1 = hanging_indent;
+    }
+
+    let text_width = avail_width.saturating_sub(hanging_indent).max(1);
+    let item_opts = textwrap::Options::new(text_width).break_words(break_words);
+    let mut wrapped = wrap_single_line(item_text, &item_opts).into_iter();
+    let mut result = Vec::new();
+    if let Some(first) = wrapped.next() {
+        result.push((visual_indent, Some(marker), first));
+    }
+    for cont in wrapped {
+        result.push((hanging_indent, None, cont));
+    }
+    result
+}
+
 fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine> {
     let mut out = Vec::new();
     let mut table_buf: Vec<&str> = Vec::new();
     let mut list_levels: Vec<(usize, usize)> = Vec::new();
+    let mut quote_list_levels: Vec<(usize, usize)> = Vec::new();
+    let mut last_quote_depth: Option<usize> = None;
     let mut in_code_block = false;
     let mut in_diff_hunk = false;
 
     for line in content.lines() {
         if line.trim_start().starts_with("```") {
             flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+            quote_list_levels.clear();
+            last_quote_depth = None;
             in_diff_hunk = false;
             in_code_block = !in_code_block;
             out.push(WrappedLine::CodeFence(line.trim().to_string()));
@@ -454,6 +564,8 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
         if is_diff_hunk_header(line) {
             flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
             list_levels.clear();
+            quote_list_levels.clear();
+            last_quote_depth = None;
             in_diff_hunk = true;
             for part in wrap_single_line(line, options) {
                 out.push(WrappedLine::Plain(part));
@@ -471,12 +583,113 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
             in_diff_hunk = false;
         }
 
-        if is_table_line(line) {
+        if !line.trim_start().starts_with('>') && is_table_line(line) {
+            quote_list_levels.clear();
+            last_quote_depth = None;
             table_buf.push(line);
             continue;
         }
 
         flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+
+        if let Some((leading_spaces, depth, quote_text)) = parse_blockquote(line) {
+            while list_levels
+                .last()
+                .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
+            {
+                list_levels.pop();
+            }
+            let base_indent = list_levels
+                .last()
+                .map_or(0, |&(_, hanging_indent)| hanging_indent);
+            if last_quote_depth != Some(depth) {
+                quote_list_levels.clear();
+                last_quote_depth = Some(depth);
+            }
+
+            let inner_width = options.width.saturating_sub(base_indent + depth * 2).max(1);
+            if let Some((level, hdr_content)) = parse_markdown_header(quote_text) {
+                quote_list_levels.clear();
+                let hdr_opts = textwrap::Options::new(inner_width.saturating_sub(6).max(1))
+                    .break_words(options.break_words);
+                for part in wrap_single_line(hdr_content, &hdr_opts) {
+                    out.push(WrappedLine::Blockquote {
+                        indent: base_indent,
+                        depth,
+                        content: QuoteContent::Header { level, text: part },
+                    });
+                }
+            } else if let Some((q_raw_indent, kind, item_text)) = parse_list_item(quote_text) {
+                for (item_indent, maybe_marker, text) in wrap_list_item_lines(
+                    q_raw_indent,
+                    kind,
+                    item_text,
+                    &mut quote_list_levels,
+                    inner_width,
+                    options.break_words,
+                ) {
+                    let content = match maybe_marker {
+                        Some(marker) => QuoteContent::ListItem {
+                            indent: item_indent,
+                            marker,
+                            text,
+                        },
+                        None => QuoteContent::ListContinuation {
+                            indent: item_indent,
+                            text,
+                        },
+                    };
+                    out.push(WrappedLine::Blockquote {
+                        indent: base_indent,
+                        depth,
+                        content,
+                    });
+                }
+            } else if quote_text.trim().is_empty() {
+                out.push(WrappedLine::Blockquote {
+                    indent: base_indent,
+                    depth,
+                    content: QuoteContent::Plain(String::new()),
+                });
+            } else {
+                let q_leading = quote_text.bytes().take_while(|&b| b == b' ').count();
+                while quote_list_levels
+                    .last()
+                    .is_some_and(|&(raw_indent, _)| raw_indent >= q_leading)
+                {
+                    quote_list_levels.pop();
+                }
+                if let Some(&(_, hanging_indent)) = quote_list_levels.last() {
+                    let text_width = inner_width.saturating_sub(hanging_indent).max(1);
+                    let cont_opts =
+                        textwrap::Options::new(text_width).break_words(options.break_words);
+                    for part in wrap_single_line(quote_text.trim_start(), &cont_opts) {
+                        out.push(WrappedLine::Blockquote {
+                            indent: base_indent,
+                            depth,
+                            content: QuoteContent::ListContinuation {
+                                indent: hanging_indent,
+                                text: part,
+                            },
+                        });
+                    }
+                } else {
+                    let q_opts =
+                        textwrap::Options::new(inner_width).break_words(options.break_words);
+                    for part in wrap_single_line(quote_text, &q_opts) {
+                        out.push(WrappedLine::Blockquote {
+                            indent: base_indent,
+                            depth,
+                            content: QuoteContent::Plain(part),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        quote_list_levels.clear();
+        last_quote_depth = None;
 
         if let Some((level, hdr_content)) = parse_markdown_header(line) {
             list_levels.clear();
@@ -486,66 +699,22 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 out.push(WrappedLine::Header { level, text: part });
             }
         } else if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
-            while list_levels
-                .last()
-                .is_some_and(|&(top_indent, _)| top_indent > raw_indent)
-            {
-                list_levels.pop();
-            }
-            let depth = if let Some(&(top_indent, _)) = list_levels.last() {
-                if raw_indent > top_indent {
-                    list_levels.len()
-                } else {
-                    list_levels.len().saturating_sub(1)
+            for (indent, maybe_marker, text) in wrap_list_item_lines(
+                raw_indent,
+                kind,
+                item_text,
+                &mut list_levels,
+                options.width,
+                options.break_words,
+            ) {
+                match maybe_marker {
+                    Some(marker) => out.push(WrappedLine::ListItem {
+                        indent,
+                        marker,
+                        text,
+                    }),
+                    None => out.push(WrappedLine::ListContinuation { indent, text }),
                 }
-            } else {
-                0
-            };
-
-            let marker = match kind {
-                ParsedListKind::Bullet => ListMarker::Bullet { depth },
-                ParsedListKind::Ordered { number, delim } => ListMarker::Ordered {
-                    number,
-                    delim,
-                    depth,
-                },
-                ParsedListKind::Task { checked, ordered } => ListMarker::Task {
-                    checked,
-                    depth,
-                    ordered,
-                },
-            };
-
-            let max_indent = options.width.saturating_sub(8);
-            let visual_indent = (depth * 2).min(max_indent);
-            let marker_width = list_marker_width(&marker);
-            let hanging_indent =
-                (visual_indent + marker_width).min(options.width.saturating_sub(1));
-
-            if list_levels
-                .last()
-                .is_none_or(|&(top_indent, _)| raw_indent > top_indent)
-            {
-                list_levels.push((raw_indent, hanging_indent));
-            } else if let Some(top) = list_levels.last_mut() {
-                top.1 = hanging_indent;
-            }
-
-            let text_width = options.width.saturating_sub(hanging_indent).max(1);
-            let item_opts = textwrap::Options::new(text_width).break_words(options.break_words);
-            let mut wrapped = wrap_single_line(item_text, &item_opts).into_iter();
-            if let Some(first) = wrapped.next() {
-                out.push(WrappedLine::ListItem {
-                    indent: visual_indent,
-                    marker,
-                    text: first,
-                });
-            }
-            for cont in wrapped {
-                out.push(WrappedLine::ListContinuation {
-                    indent: hanging_indent,
-                    text: cont,
-                });
             }
         } else if line.trim().is_empty() {
             out.push(WrappedLine::Plain(String::new()));
@@ -635,8 +804,8 @@ fn parse_markdown_header(line: &str) -> Option<(usize, &str)> {
     Some((level, content))
 }
 
-fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw("  ")];
+fn style_markdown_header_inner(level: usize, content: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
     match level {
         1 => {
             let accent = Style::default()
@@ -679,6 +848,29 @@ fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
         }
     }
     spans
+}
+
+fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("  ")];
+    spans.extend(style_markdown_header_inner(level, content));
+    spans
+}
+
+fn style_blockquote_bars(depth: usize) -> Vec<Span<'static>> {
+    (0..depth)
+        .map(|level| {
+            let color = match level {
+                0 => Color::Blue,
+                1 => Color::Cyan,
+                2 => Color::LightBlue,
+                _ => Color::DarkGray,
+            };
+            Span::styled(
+                "▎ ",
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
 }
 
 fn ordered_marker_style(depth: usize) -> Style {
@@ -855,6 +1047,50 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                     spans.push(Span::raw(" ".repeat(*indent)));
                 }
                 spans.extend(style_inline_segments(text, Style::default()));
+                spans
+            }
+            WrappedLine::Blockquote {
+                indent,
+                depth,
+                content,
+            } => {
+                in_params_block = false;
+                let mut spans = vec![Span::raw("  ")];
+                if *indent > 0 {
+                    spans.push(Span::raw(" ".repeat(*indent)));
+                }
+                spans.extend(style_blockquote_bars(*depth));
+                let quote_style = Style::default()
+                    .fg(Color::Gray)
+                    .add_modifier(Modifier::ITALIC);
+                match content {
+                    QuoteContent::Plain(text) => {
+                        spans.extend(style_inline_segments(text, quote_style));
+                    }
+                    QuoteContent::Header { level, text } => {
+                        spans.extend(style_markdown_header_inner(*level, text));
+                    }
+                    QuoteContent::ListItem {
+                        indent: item_indent,
+                        marker,
+                        text,
+                    } => {
+                        if *item_indent > 0 {
+                            spans.push(Span::raw(" ".repeat(*item_indent)));
+                        }
+                        spans.extend(style_list_marker(marker));
+                        spans.extend(style_inline_segments(text, quote_style));
+                    }
+                    QuoteContent::ListContinuation {
+                        indent: cont_indent,
+                        text,
+                    } => {
+                        if *cont_indent > 0 {
+                            spans.push(Span::raw(" ".repeat(*cont_indent)));
+                        }
+                        spans.extend(style_inline_segments(text, quote_style));
+                    }
+                }
                 spans
             }
             WrappedLine::Plain(line) => {
