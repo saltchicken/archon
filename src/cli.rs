@@ -4,7 +4,8 @@ use crate::core::{
 use anyhow::{Result, bail};
 use std::{
     env,
-    io::{self, IsTerminal, Read, Write},
+    fs::File,
+    io::{self, BufRead, BufReader, IsTerminal, Read, Write},
     path::PathBuf,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -267,28 +268,44 @@ impl CliApp {
                     index,
                     total,
                 } => {
-                    let approved = if self.args.auto_approve_all {
+                    if printed_thoughts {
+                        let _ = writeln!(stderr, "\x1b[0m");
+                        printed_thoughts = false;
+                    }
+
+                    if self.args.auto_approve_all {
                         let _ = writeln!(
                             stderr,
                             "\x1b[32m✓ Auto-approved tool ({index}/{total})\x1b[0m"
                         );
-                        true
+                        self.cmd_tx.send(EngineCommand::ResolveTool {
+                            approved: true,
+                            always_approve: true,
+                            feedback: String::new(),
+                            turn: turn.clone(),
+                        })?;
                     } else {
-                        let _ = writeln!(
-                            stderr,
-                            "\n\x1b[33m⚠ Tool Approval Required ({index}/{total}):\x1b[0m\n\
-                             {formatted_preview}\n\
-                             \x1b[33mDeclining in headless mode (pass -y / --yes to allow non-auto-approved tools).\x1b[0m"
-                        );
-                        false
-                    };
-
-                    self.cmd_tx.send(EngineCommand::ResolveTool {
-                        approved,
-                        always_approve: self.args.auto_approve_all,
-                        feedback: String::new(),
-                        turn: turn.clone(),
-                    })?;
+                        match prompt_tool_approval_tty(formatted_preview, index, total).await {
+                            TtyApprovalDecision::CancelAll => {
+                                let _ =
+                                    writeln!(stderr, "\x1b[31m✗ Cancelled tool execution.\x1b[0m");
+                                self.cmd_tx.send(EngineCommand::CancelStream)?;
+                                break;
+                            }
+                            TtyApprovalDecision::Resolve {
+                                approved,
+                                always_approve,
+                                feedback,
+                            } => {
+                                self.cmd_tx.send(EngineCommand::ResolveTool {
+                                    approved,
+                                    always_approve,
+                                    feedback,
+                                    turn: turn.clone(),
+                                })?;
+                            }
+                        }
+                    }
                 }
                 EngineEvent::TruncatedToolResolutionRequested {
                     summary,
@@ -335,4 +352,86 @@ impl CliApp {
         // Dropping `self` drops `cmd_tx`, signaling `CoreEngine::run` to flush SQLite saves and exit.
         Ok(())
     }
+}
+
+enum TtyApprovalDecision {
+    Resolve {
+        approved: bool,
+        always_approve: bool,
+        feedback: String,
+    },
+    CancelAll,
+}
+
+async fn prompt_tool_approval_tty(
+    formatted_preview: String,
+    index: usize,
+    total: usize,
+) -> TtyApprovalDecision {
+    tokio::task::spawn_blocking(move || {
+        let mut stderr = io::stderr();
+        let _ = writeln!(
+            stderr,
+            "\n\x1b[33;1m⚠ Tool Execution Approval Required ({index}/{total}):\x1b[0m\n{formatted_preview}\n"
+        );
+
+        let Ok(tty) = File::open("/dev/tty") else {
+            let _ = writeln!(
+                stderr,
+                "\x1b[31mNo controlling terminal (/dev/tty) available; declining tool call.\x1b[0m"
+            );
+            return TtyApprovalDecision::Resolve {
+                approved: false,
+                always_approve: false,
+                feedback: String::new(),
+            };
+        };
+
+        let _ = write!(
+            stderr,
+            "\x1b[33mApprove? [y]es / [a]lways / [n]o / [c]ancel (optional `: <feedback>`): \x1b[0m"
+        );
+        let _ = stderr.flush();
+
+        let mut reader = BufReader::new(tty);
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return TtyApprovalDecision::Resolve {
+                approved: false,
+                always_approve: false,
+                feedback: String::new(),
+            };
+        }
+
+        let trimmed = line.trim();
+        let (choice, feedback) = match trimmed.split_once(':') {
+            Some((c, fb)) => (c.trim().to_ascii_lowercase(), fb.trim().to_string()),
+            None => (trimmed.to_ascii_lowercase(), String::new()),
+        };
+
+        match choice.as_str() {
+            "y" | "yes" => TtyApprovalDecision::Resolve {
+                approved: true,
+                always_approve: false,
+                feedback,
+            },
+            "a" | "always" => TtyApprovalDecision::Resolve {
+                approved: true,
+                always_approve: true,
+                feedback,
+            },
+            "c" | "cancel" => TtyApprovalDecision::CancelAll,
+            _ => TtyApprovalDecision::Resolve {
+                approved: false,
+                always_approve: false,
+                feedback,
+            },
+        }
+    })
+    .await
+    .unwrap_or(TtyApprovalDecision::Resolve {
+        approved: false,
+        always_approve: false,
+        feedback: String::new(),
+    })
 }
