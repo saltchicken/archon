@@ -144,6 +144,9 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
 }
 
 pub(super) fn format_thought_display(m: &ChatMessage) -> String {
+    if !m.content.trim().is_empty() {
+        return String::new();
+    }
     let Some(thoughts) = m.thoughts.as_ref() else {
         return String::new();
     };
@@ -2038,19 +2041,18 @@ impl TuiApp {
                 self.stream_dirty = false;
             }
 
-            let thought_label = if self.streaming_text.is_empty() {
-                "THINKING (...)"
+            let styled_stream_thought = if self.streaming_text.is_empty() {
+                self.styled_stream_thought.clone()
             } else {
-                "THINKING"
+                Vec::new()
             };
-            let styled_stream_thought = self.styled_stream_thought.clone();
             let styled_stream = self.styled_stream.clone();
             self.render_message_block(
                 i,
                 "ARCHON (...)",
                 Color::Yellow,
                 false,
-                thought_label,
+                "THINKING (...)",
                 &styled_stream_thought,
                 &styled_stream,
                 &mut lines,

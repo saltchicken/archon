@@ -645,15 +645,16 @@ impl TuiApp {
                 self.scroll_to_bottom();
             }
             EngineEvent::StreamThoughtChunk(c) => {
-                self.streaming_thought.push_str(&c);
-                self.stream_thought_dirty = true;
+                if self.streaming_text.is_empty() {
+                    self.streaming_thought.push_str(&c);
+                    self.stream_thought_dirty = true;
+                }
             }
             EngineEvent::StreamChunk(c) => {
                 if self.streaming_text.is_empty() && !c.is_empty() {
-                    let stream_idx = self.messages.len();
-                    if let Some(ts) = self.thought_states.get_mut(stream_idx) {
-                        ts.collapsed = true;
-                    }
+                    self.streaming_thought.clear();
+                    self.styled_stream_thought.clear();
+                    self.stream_thought_dirty = false;
                 }
                 self.streaming_text.push_str(&c);
                 self.stream_dirty = true;
