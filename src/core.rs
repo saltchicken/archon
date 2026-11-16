@@ -127,6 +127,13 @@ pub enum EngineEvent {
         truncated: bool,
         include_in_context: bool,
     },
+    HookCompleted {
+        tool_name: String,
+        summary: String,
+        output: String,
+        truncated: bool,
+    },
+    HooksFinished,
     ToolApprovalRequested {
         formatted_preview: String,
         index: usize,
@@ -191,6 +198,7 @@ pub struct CoreEngine {
     turn: TurnConfig,
     active_max_tool_output_size: usize,
     session_auto_approve: HashSet<String>,
+    executed_skill_hooks: HashSet<String>,
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
@@ -239,6 +247,7 @@ impl CoreEngine {
             },
             active_max_tool_output_size,
             session_auto_approve: HashSet::new(),
+            executed_skill_hooks: HashSet::new(),
             messages: Vec::new(),
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
@@ -334,6 +343,16 @@ impl CoreEngine {
         let _ = self.tx.send(EngineEvent::Error(err));
     }
 
+    fn refresh_skills(&mut self) {
+        self.config.skills = skills::discover_skills(
+            &self.config.app.skills_dir,
+            self.config.workspace_skills_dir.as_deref(),
+        );
+        let _ = self
+            .tx
+            .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
+    }
+
     fn emit_model_config(&self) {
         let _ = self.tx.send(EngineEvent::ModelConfigUpdated {
             model: self.model.clone(),
@@ -419,6 +438,13 @@ impl CoreEngine {
         if skipped > 0 {
             info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
         }
+        if self
+            .queued_interjections
+            .iter()
+            .any(|i| i.turn.active_skill.is_some())
+        {
+            self.refresh_skills();
+        }
         let mut new_images = Vec::new();
         let mut has_valid_prompt = false;
         for item in self.queued_interjections.drain(..) {
@@ -438,7 +464,7 @@ impl CoreEngine {
         self.save_and_emit_chat(new_images).await;
         if has_valid_prompt {
             let turn = self.turn.clone();
-            self.spawn_model_turn(&turn).await;
+            self.start_user_turn(&turn).await;
         }
         true
     }
@@ -454,13 +480,7 @@ impl CoreEngine {
 
     async fn complete_tool_result(&mut self, tool_name: String, output: String, truncated: bool) {
         if tool_name == "skill" {
-            self.config.skills = skills::discover_skills(
-                &self.config.app.skills_dir,
-                self.config.workspace_skills_dir.as_deref(),
-            );
-            let _ = self
-                .tx
-                .send(EngineEvent::SkillsUpdated(self.config.skills.clone()));
+            self.refresh_skills();
         } else if tool_name == "memory" {
             let (global_memory, workspace_memory) = config::reload_memories(&self.config);
             self.config.global_memory = global_memory.clone();
@@ -786,7 +806,10 @@ impl CoreEngine {
                 info!("Clearing attached images");
                 self.clear_attachments().await;
             }
-            EngineCommand::SendPrompt { prompt, turn } => {
+            EngineCommand::SendPrompt { prompt, mut turn } => {
+                if turn.active_skill.is_some() {
+                    self.refresh_skills();
+                }
                 if let Some(ref skill_name) = turn.active_skill
                     && let Err(reason) =
                         skills::check_skill_activation(skill_name, turn.enable_tools, &self.config)
@@ -794,6 +817,11 @@ impl CoreEngine {
                     warn!("{reason}");
                     self.emit_error(reason).await;
                     return;
+                }
+                if let Some(ref skill_name) = turn.active_skill
+                    && let Some(skill) = skills::find_skill(&self.config, skill_name)
+                {
+                    turn.active_skill = Some(skill.name.clone());
                 }
 
                 info!(
@@ -836,7 +864,7 @@ impl CoreEngine {
                 self.messages.push(user_msg);
 
                 self.save_and_emit_chat(new_image_blobs).await;
-                self.spawn_model_turn(&turn).await;
+                self.start_user_turn(&turn).await;
             }
             EngineCommand::CancelStream => {
                 let (had_task, was_tool) = self.finish_active_task();
@@ -1019,6 +1047,7 @@ impl CoreEngine {
                 match res {
                     Ok(Ok((data, restored_staging_paths, attachments))) => {
                         self.abort_active_state();
+                        self.executed_skill_hooks.clear();
                         self.sent_images.extend(restored_staging_paths);
                         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
@@ -1086,6 +1115,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_auto_approve.clear();
+                self.executed_skill_hooks.clear();
                 self.reset_skill_and_sync_model_limits();
                 self.messages.clear();
                 self.emit_chat();
@@ -1239,6 +1269,7 @@ impl CoreEngine {
                     let user_content = if let Some((cmd_token, args_str)) =
                         skills::parse_at_command(trimmed_draft)
                     {
+                        self.refresh_skills();
                         if let Ok(skill_name) = skills::check_skill_activation(
                             cmd_token,
                             turn.enable_tools,
@@ -1256,6 +1287,13 @@ impl CoreEngine {
                         trimmed_draft.to_string()
                     };
                     preview_msgs.push(ChatMessage::new("user", user_content.clone()));
+                    for summary in self.preview_due_skill_hooks(&turn) {
+                        preview_msgs.push(ChatMessage::new_hook(
+                            summary,
+                            "[Hook will execute automatically before turn is sent]",
+                            false,
+                        ));
+                    }
                     Some(user_content)
                 } else {
                     None
@@ -1466,6 +1504,42 @@ impl CoreEngine {
                 self.complete_shell_result(command, output, truncated, include_in_context)
                     .await;
             }
+            EngineEvent::HookCompleted {
+                tool_name,
+                summary,
+                output,
+                truncated,
+            } => {
+                if tool_name == "skill" {
+                    self.refresh_skills();
+                } else if tool_name == "memory" {
+                    let (global_memory, workspace_memory) = config::reload_memories(&self.config);
+                    self.config.global_memory = global_memory.clone();
+                    self.config.workspace_memory = workspace_memory.clone();
+                    let _ = self.tx.send(EngineEvent::MemoryUpdated {
+                        global_memory,
+                        workspace_memory,
+                    });
+                }
+                info!("Skill hook '{summary}' completed (truncated: {truncated})");
+                self.messages
+                    .push(ChatMessage::new_hook(summary, output, truncated));
+                self.save_and_emit_chat(Vec::new()).await;
+            }
+            EngineEvent::HooksFinished => {
+                self.finish_active_task();
+                let _ = self.tx.send(EngineEvent::ToolCompleted {
+                    output: String::new(),
+                    full_output: String::new(),
+                    raw_bytes: 0,
+                    truncated: false,
+                });
+                if self.flush_queued_interjections().await {
+                    return;
+                }
+                let turn = self.turn.clone();
+                self.spawn_model_turn(&turn).await;
+            }
             other => {
                 let _ = self.tx.send(other);
             }
@@ -1491,6 +1565,118 @@ impl CoreEngine {
             if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images) {
                 error!("Failed to save session {id}: {e}");
             }
+        }));
+    }
+
+    fn hook_execution_key(skill_name: &str, idx: usize, hook: &skills::SkillHook) -> String {
+        format!(
+            "{}::{idx}::{}::{}",
+            skill_name.to_ascii_lowercase(),
+            hook.tool,
+            hook.args
+        )
+    }
+
+    fn is_hook_already_in_session(&self, key: &str, summary: &str) -> bool {
+        self.executed_skill_hooks.contains(key)
+            || self
+                .messages
+                .iter()
+                .any(|m| m.role == "hook" && m.tool_name.as_deref() == Some(summary))
+    }
+
+    fn preview_due_skill_hooks(&self, turn: &TurnConfig) -> Vec<String> {
+        let Some(skill_name) = turn.active_skill.as_deref() else {
+            return Vec::new();
+        };
+        let Some(skill) = skills::find_skill(&self.config, skill_name) else {
+            return Vec::new();
+        };
+        let mut summaries = Vec::new();
+        for (idx, hook) in skill.hooks.iter().enumerate() {
+            let summary = skills::format_hook_summary(hook);
+            let key = Self::hook_execution_key(&skill.name, idx, hook);
+            let due = match hook.trigger {
+                skills::HookTrigger::OnActivate => !self.is_hook_already_in_session(&key, &summary),
+                skills::HookTrigger::EveryTurn => true,
+            };
+            if due {
+                summaries.push(summary);
+            }
+        }
+        summaries
+    }
+
+    fn collect_due_skill_hooks(&mut self, turn: &TurnConfig) -> Vec<(String, ToolCall)> {
+        let Some(skill_name) = turn.active_skill.as_deref() else {
+            return Vec::new();
+        };
+        let Some(skill) = skills::find_skill(&self.config, skill_name) else {
+            return Vec::new();
+        };
+        let mut due_hooks = Vec::new();
+        for (idx, hook) in skill.hooks.iter().enumerate() {
+            let summary = skills::format_hook_summary(hook);
+            let key = Self::hook_execution_key(&skill.name, idx, hook);
+            let due = match hook.trigger {
+                skills::HookTrigger::OnActivate => {
+                    let already = self.is_hook_already_in_session(&key, &summary);
+                    self.executed_skill_hooks.insert(key);
+                    !already
+                }
+                skills::HookTrigger::EveryTurn => true,
+            };
+            if due {
+                due_hooks.push((
+                    summary,
+                    ToolCall {
+                        function: tools::ToolFunction {
+                            name: hook.tool.clone(),
+                            arguments: hook.args.clone(),
+                        },
+                        thought_signature: None,
+                    },
+                ));
+            }
+        }
+        due_hooks
+    }
+
+    async fn start_user_turn(&mut self, turn: &TurnConfig) {
+        let hooks = self.collect_due_skill_hooks(turn);
+        if hooks.is_empty() {
+            self.spawn_model_turn(turn).await;
+            return;
+        }
+
+        let total = hooks.len();
+        info!("Running {total} pre-turn skill hook(s) before model stream");
+        self.executing_tool = true;
+        let cfg = self.config.clone();
+        let active_skill = turn.active_skill.clone();
+        let max_out = self.active_max_tool_output_size;
+        let full_cap = self.context_padded_capture_limit();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.internal_rx = Some(rx);
+
+        self.active_task = Some(tokio::spawn(async move {
+            for (idx, (summary, call)) in hooks.into_iter().enumerate() {
+                let _ = tx.send(EngineEvent::ToolStarted {
+                    summary: format!("hook: {summary}"),
+                    index: idx + 1,
+                    total,
+                });
+                let res =
+                    tools::execute_hook(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
+                        .await;
+                let _ = tx.send(EngineEvent::HookCompleted {
+                    tool_name: call.function.name,
+                    summary,
+                    output: res.truncated_output,
+                    truncated: res.truncated,
+                });
+            }
+            let _ = tx.send(EngineEvent::HooksFinished);
         }));
     }
 

@@ -580,7 +580,7 @@ impl TuiApp {
 
                 if is_reset_or_reload {
                     for (i, m) in self.messages.iter().enumerate() {
-                        if m.role == "tool" {
+                        if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if m.role == "error" {
                             self.msg_states[i].unfolded = true;
@@ -595,7 +595,7 @@ impl TuiApp {
                     }
                 } else {
                     for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
-                        if m.role == "tool" {
+                        if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if matches!(m.role.as_str(), "assistant" | "local" | "error") {
                             self.msg_states[i].unfolded = true;
@@ -657,7 +657,10 @@ impl TuiApp {
                 self.active_tool_status = Some(format!("⚙ TOOL [{summary}]{progress} ..."));
                 self.scroll_to_bottom();
             }
-            EngineEvent::ToolCompleted { .. } | EngineEvent::ShellCommandCompleted { .. } => {
+            EngineEvent::ToolCompleted { .. }
+            | EngineEvent::ShellCommandCompleted { .. }
+            | EngineEvent::HookCompleted { .. }
+            | EngineEvent::HooksFinished => {
                 self.active_tool_status = None;
             }
             EngineEvent::ToolApprovalRequested {
@@ -1045,6 +1048,10 @@ impl TuiApp {
         let prompt = if let Some((cmd_token, args_str)) =
             crate::core::skills::parse_at_command(&raw_prompt)
         {
+            self.config.skills = crate::core::skills::discover_skills(
+                &self.config.app.skills_dir,
+                self.config.workspace_skills_dir.as_deref(),
+            );
             match crate::core::skills::check_skill_activation(
                 cmd_token,
                 self.enable_tools,

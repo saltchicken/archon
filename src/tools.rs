@@ -781,8 +781,14 @@ macro_rules! register_tools {
             config: &Config,
             active_skill: Option<&str>,
             max_output_size: usize,
+            enforce_turn_filter: bool,
         ) -> Result<String> {
-            if !is_tool_enabled_for_turn(name, config, active_skill) {
+            let allowed = if enforce_turn_filter {
+                is_tool_enabled_for_turn(name, config, active_skill)
+            } else {
+                is_tool_enabled(name, config)
+            };
+            if !allowed {
                 bail!("Unknown tool: '{name}'");
             }
             let ctx = ToolContext::new(config, active_skill, max_output_size)?;
@@ -896,12 +902,13 @@ pub async fn run_manual_command(
     }
 }
 
-pub async fn execute(
+async fn execute_with_filter(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
     max_size: usize,
     full_cap: usize,
+    enforce_turn_filter: bool,
 ) -> ToolExecutionOutput {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -909,7 +916,16 @@ pub async fn execute(
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(name, args, config, active_skill, capture_limit).await {
+    match dispatch_tool(
+        name,
+        args,
+        config,
+        active_skill,
+        capture_limit,
+        enforce_turn_filter,
+    )
+    .await
+    {
         Ok(out) => {
             let packaged = package_tool_output(out, max_size, full_cap);
             info!(
@@ -939,4 +955,24 @@ pub async fn execute(
             }
         }
     }
+}
+
+pub async fn execute(
+    call: &ToolCall,
+    config: &Config,
+    active_skill: Option<&str>,
+    max_size: usize,
+    full_cap: usize,
+) -> ToolExecutionOutput {
+    execute_with_filter(call, config, active_skill, max_size, full_cap, true).await
+}
+
+pub async fn execute_hook(
+    call: &ToolCall,
+    config: &Config,
+    active_skill: Option<&str>,
+    max_size: usize,
+    full_cap: usize,
+) -> ToolExecutionOutput {
+    execute_with_filter(call, config, active_skill, max_size, full_cap, false).await
 }

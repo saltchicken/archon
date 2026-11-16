@@ -9,8 +9,8 @@ use super::{
 use crate::core::{
     config::{expand_tilde, format_tilde_path, workspace_config_dir_for},
     skills::{
-        SkillDefinition, list_skill_reference_paths, parse_skill_markdown, scan_skills_dir,
-        split_toml_frontmatter,
+        HookTrigger, SkillDefinition, SkillHook, format_hook_summary, list_skill_reference_paths,
+        parse_skill_markdown, scan_skills_dir, split_toml_frontmatter,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -33,7 +33,7 @@ pub enum SkillAction {
     Read,
     /// Create a new skill (`SKILL.md` with `+++` TOML frontmatter and markdown prompt) or create a reference file inside a skill directory.
     Create,
-    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `tools`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md` or a reference file.
+    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `tools`, `hooks`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md` or a reference file.
     #[serde(alias = "edit", alias = "update")]
     Modify,
 }
@@ -69,6 +69,9 @@ pub struct SkillArgs {
     /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`).
     #[serde(default)]
     pub tools: Option<Vec<String>>,
+    /// Optional list of pre-turn tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"tool": "workspace_snapshot", "args": {"tree_only": true}}]`).
+    #[serde(default)]
+    pub hooks: Option<Vec<SkillHook>>,
     /// Optional markdown prompt body for `SKILL.md` (without `+++` frontmatter) when `action` is `create` or `modify`.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -243,6 +246,7 @@ fn format_skill_document(
     description: &str,
     command: &str,
     tools: &[String],
+    hooks: &[SkillHook],
     extra: Option<&toml::Table>,
     prompt: &str,
 ) -> Result<String> {
@@ -264,9 +268,39 @@ fn format_skill_document(
         .collect();
     table.insert("tools".into(), toml::Value::Array(clean_tools));
 
+    let clean_hooks: Vec<toml::Value> = hooks
+        .iter()
+        .filter(|h| !h.tool.trim().is_empty())
+        .map(|h| {
+            let mut ht = toml::Table::new();
+            if h.trigger != HookTrigger::OnActivate {
+                ht.insert(
+                    "trigger".into(),
+                    toml::Value::String(h.trigger.as_str().to_string()),
+                );
+            }
+            ht.insert(
+                "tool".into(),
+                toml::Value::String(h.tool.trim().to_string()),
+            );
+            if let Some(obj) = h.args.as_object().filter(|o| !o.is_empty())
+                && let Ok(toml_args) = toml::Value::try_from(obj.clone())
+            {
+                ht.insert("args".into(), toml_args);
+            }
+            toml::Value::Table(ht)
+        })
+        .collect();
+    if !clean_hooks.is_empty() {
+        table.insert("hooks".into(), toml::Value::Array(clean_hooks));
+    }
+
     if let Some(ext) = extra {
         for (k, v) in ext {
-            if !matches!(k.as_str(), "name" | "description" | "command" | "tools") {
+            if !matches!(
+                k.as_str(),
+                "name" | "description" | "command" | "tools" | "hooks"
+            ) {
                 table.insert(k.clone(), v.clone());
             }
         }
@@ -282,7 +316,7 @@ fn format_skill_document(
 }
 
 fn validate_and_parse_skill_doc(raw: &str, fallback_dir: &Path) -> Result<(toml::Table, String)> {
-    let trimmed = raw.trim_start_matches('\u{feff}');
+    let trimmed = raw.trim_start_matches('\u{feff}').trim_start();
     if trimmed.starts_with("+++") {
         let (Some(fm_str), body) = split_toml_frontmatter(trimmed) else {
             bail!(
@@ -315,6 +349,11 @@ fn table_string_vec(table: &toml::Table, key: &str) -> Option<Vec<String>> {
             .map(String::from)
             .collect(),
     )
+}
+
+fn table_hooks(table: &toml::Table) -> Option<Vec<SkillHook>> {
+    let val = table.get("hooks")?.clone();
+    val.try_into::<Vec<SkillHook>>().ok()
 }
 
 fn check_unknown_tools(tools: &[String]) -> Option<String> {
@@ -351,6 +390,7 @@ fn merge_and_format_skill_doc(
     fallback_desc: &str,
     fallback_cmd: &str,
     fallback_tools: &[String],
+    fallback_hooks: &[SkillHook],
     body: &str,
     validate_cmd: bool,
 ) -> Result<String> {
@@ -373,16 +413,25 @@ fn merge_and_format_skill_doc(
         .clone()
         .or_else(|| table_string_vec(table, "tools"))
         .unwrap_or_else(|| fallback_tools.to_vec());
-    format_skill_document(&name, &desc, &cmd, &tools, Some(table), body)
+    let hooks = args
+        .hooks
+        .clone()
+        .or_else(|| table_hooks(table))
+        .unwrap_or_else(|| fallback_hooks.to_vec());
+    format_skill_document(&name, &desc, &cmd, &tools, &hooks, Some(table), body)
 }
 
 fn append_unknown_tools_note(msg: &mut String, args: &SkillArgs, doc: &str, path: &Path) {
     if is_skill_md_target(&args.file)
         && let Ok((table, _)) = validate_and_parse_skill_doc(doc, path)
-        && let Some(tools) = table_string_vec(&table, "tools")
-        && let Some(note) = check_unknown_tools(&tools)
     {
-        let _ = write!(msg, "\n{note}");
+        let mut all_tools = table_string_vec(&table, "tools").unwrap_or_default();
+        if let Some(hooks) = table_hooks(&table) {
+            all_tools.extend(hooks.into_iter().map(|h| h.tool));
+        }
+        if let Some(note) = check_unknown_tools(&all_tools) {
+            let _ = write!(msg, "\n{note}");
+        }
     }
 }
 
@@ -432,20 +481,31 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         );
     }
 
-    let rendered = if let Some(raw_content) = args
-        .content
-        .as_deref()
-        .filter(|c| c.trim_start_matches('\u{feff}').starts_with("+++"))
-    {
+    let rendered = if let Some(raw_content) = args.content.as_deref().filter(|c| {
+        c.trim_start_matches('\u{feff}')
+            .trim_start()
+            .starts_with("+++")
+    }) {
         let (table, body) = validate_and_parse_skill_doc(raw_content, &skill_dir)?;
         let has_overrides = args.description.is_some()
             || args.command.is_some()
             || args.tools.is_some()
+            || args.hooks.is_some()
             || args.prompt.is_some();
 
         if has_overrides {
             let prompt_body = args.prompt.as_deref().unwrap_or(&body);
-            merge_and_format_skill_doc(args, &table, &slug, "", &slug, &[], prompt_body, false)?
+            merge_and_format_skill_doc(
+                args,
+                &table,
+                &slug,
+                "",
+                &slug,
+                &[],
+                &[],
+                prompt_body,
+                false,
+            )?
         } else {
             normalize_doc_newlines(raw_content)
         }
@@ -483,7 +543,8 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             validate_skill_slug(cmd, "command")?;
         }
         let tools = args.tools.as_deref().unwrap_or(&[]);
-        format_skill_document(&slug, desc, cmd, tools, None, prompt_body)?
+        let hooks = args.hooks.as_deref().unwrap_or(&[]);
+        format_skill_document(&slug, desc, cmd, tools, hooks, None, prompt_body)?
     };
 
     let display = format_tilde_path(&target_path);
@@ -525,12 +586,13 @@ pub fn preview_modify(
     let has_field_updates = args.description.is_some()
         || args.command.is_some()
         || args.tools.is_some()
+        || args.hooks.is_some()
         || args.prompt.is_some()
         || args.content.is_some();
 
     if args.edits.is_empty() && !has_field_updates {
         bail!(
-            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'tools', 'prompt', or 'content'",
+            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'tools', 'hooks', 'prompt', or 'content'",
             resolved.definition.name
         );
     }
@@ -539,6 +601,7 @@ pub fn preview_modify(
     if let Some(raw_content) = args.content.as_deref() {
         if raw_content
             .trim_start_matches('\u{feff}')
+            .trim_start()
             .starts_with("+++")
         {
             working = normalize_doc_newlines(raw_content);
@@ -550,6 +613,7 @@ pub fn preview_modify(
     if args.description.is_some()
         || args.command.is_some()
         || args.tools.is_some()
+        || args.hooks.is_some()
         || body_override.is_some()
     {
         let (table, current_body) = validate_and_parse_skill_doc(&working, &resolved.skill_dir)?;
@@ -562,6 +626,7 @@ pub fn preview_modify(
             &def.description,
             &def.command,
             &def.tools,
+            &def.hooks,
             body,
             true,
         )?;
@@ -656,6 +721,14 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         );
         let _ = writeln!(out, "  description: {}", skill.description);
         let _ = writeln!(out, "  tools:       {tools_str}");
+        if !skill.hooks.is_empty() {
+            let hooks_str: Vec<String> = skill
+                .hooks
+                .iter()
+                .map(|h| format!("{} [{}]", format_hook_summary(h), h.trigger.as_str()))
+                .collect();
+            let _ = writeln!(out, "  hooks:       {}", hooks_str.join(", "));
+        }
         if !path_str.is_empty() {
             let _ = writeln!(out, "  path:        {path_str}");
         }

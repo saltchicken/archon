@@ -427,6 +427,18 @@ pub fn sanitize_messages_for_turn(
                     ));
                 }
             }
+            "hook" => {
+                if m.include_in_context {
+                    let label = m.tool_name.as_deref().unwrap_or("hook");
+                    out.push(ChatMessage::new(
+                        "user",
+                        format!(
+                            "<hook_output tool=\"{label}\">\n{}\n</hook_output>",
+                            m.content
+                        ),
+                    ));
+                }
+            }
             "error" => {}
             _ => {
                 out.push(m);

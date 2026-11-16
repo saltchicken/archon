@@ -427,7 +427,7 @@ impl TuiApp {
             if m.role == "assistant" && self.styled_messages.get(j).is_some_and(Vec::is_empty) {
                 continue;
             }
-            return m.role == "tool";
+            return matches!(m.role.as_str(), "tool" | "hook");
         }
         false
     }
@@ -452,7 +452,7 @@ impl TuiApp {
         };
 
         let mut header_spans = vec![Span::styled(
-            if header_label.starts_with("⚙ TOOL") {
+            if header_label.starts_with("⚙ TOOL") || header_label.starts_with("⚡ HOOK") {
                 format!("  {header_label} ")
             } else {
                 format!("━━ {header_label} ")
@@ -710,6 +710,10 @@ impl TuiApp {
                         .unwrap_or_else(|| "tool".to_string());
                     (sanitize_line(&format!("⚙ TOOL [{summary}]")), Color::Yellow)
                 }
+                "hook" => {
+                    let summary = m.tool_name.as_deref().unwrap_or("hook");
+                    (sanitize_line(&format!("⚡ HOOK [{summary}]")), Color::Cyan)
+                }
                 _ => ("SYS".to_string(), Color::Gray),
             };
             let truncated = m.truncated;
@@ -719,7 +723,8 @@ impl TuiApp {
             // the next rendered block is also a tool call, so consecutive tool
             // calls stack tightly while the first tool keeps the normal gap
             // after the USER/ARCHON header.
-            let compact = m.role == "tool" && self.next_rendered_is_tool(i);
+            let compact =
+                matches!(m.role.as_str(), "tool" | "hook") && self.next_rendered_is_tool(i);
 
             self.render_message_block(
                 i,

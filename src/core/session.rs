@@ -76,6 +76,24 @@ impl ChatMessage {
         }
     }
 
+    pub fn new_hook(
+        summary: impl Into<String>,
+        content: impl Into<String>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            role: "hook".into(),
+            content: content.into(),
+            truncated,
+            include_in_context: true,
+            tool_name: Some(summary.into()),
+            images: None,
+            image_names: None,
+            tool_calls: None,
+            thoughts: None,
+        }
+    }
+
     pub fn with_ui_image_placeholders(&self) -> Self {
         let count = self
             .images

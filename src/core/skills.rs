@@ -1,10 +1,48 @@
 use crate::core::config::{Config, expand_tilde, format_tilde_path};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
+
+fn default_hook_args() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookTrigger {
+    /// Run once when the skill is first activated in a session (default).
+    #[default]
+    #[serde(alias = "once", alias = "activate")]
+    OnActivate,
+    /// Run before every user turn while this skill is active.
+    #[serde(alias = "always", alias = "turn")]
+    EveryTurn,
+}
+
+impl HookTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnActivate => "on_activate",
+            Self::EveryTurn => "every_turn",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub struct SkillHook {
+    /// When to execute the hook: `on_activate` (default, once per session) or `every_turn`.
+    #[serde(default)]
+    pub trigger: HookTrigger,
+    /// Built-in tool name to execute (e.g. `"workspace_snapshot"`, `"repo_map"`, `"git"`).
+    pub tool: String,
+    /// Tool arguments object (e.g. `{"tree_only": true}`).
+    #[serde(default = "default_hook_args")]
+    pub args: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SkillDefinition {
@@ -12,6 +50,7 @@ pub struct SkillDefinition {
     pub description: String,
     pub command: String,
     pub tools: Vec<String>,
+    pub hooks: Vec<SkillHook>,
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
     pub is_trusted: bool,
@@ -24,10 +63,11 @@ struct SkillFrontmatter {
     description: String,
     command: String,
     tools: Vec<String>,
+    hooks: Vec<SkillHook>,
 }
 
 pub(crate) fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
-    let trimmed = raw.trim_start_matches('\u{feff}');
+    let trimmed = raw.trim_start_matches('\u{feff}').trim_start();
     let Some(rest) = trimmed
         .strip_prefix("+++\n")
         .or_else(|| trimmed.strip_prefix("+++\r\n"))
@@ -102,11 +142,27 @@ pub(crate) fn parse_skill_markdown(
         fm.description.trim().to_string()
     };
 
+    let hooks = fm
+        .hooks
+        .into_iter()
+        .filter_map(|mut h| {
+            h.tool = h.tool.trim().to_string();
+            if h.tool.is_empty() {
+                return None;
+            }
+            if h.args.is_null() {
+                h.args = default_hook_args();
+            }
+            Some(h)
+        })
+        .collect();
+
     Some(SkillDefinition {
         name,
         description,
         command: fm.command.trim().trim_start_matches('/').to_string(),
         tools: fm.tools,
+        hooks,
         prompt,
         dir_path: Some(dir_path.to_path_buf()),
         is_trusted,
@@ -209,9 +265,42 @@ pub fn parse_at_command(raw_prompt: &str) -> Option<(&str, &str)> {
     Some((cmd_token, args_str))
 }
 
+pub fn format_hook_summary(hook: &SkillHook) -> String {
+    let call = crate::tools::ToolCall {
+        function: crate::tools::ToolFunction {
+            name: hook.tool.clone(),
+            arguments: hook.args.clone(),
+        },
+        thought_signature: None,
+    };
+    let sig = crate::tools::call_signature(&call);
+    let Some(obj) = hook.args.as_object().filter(|o| !o.is_empty()) else {
+        return sig;
+    };
+    let has_sub = sig.contains(':');
+    let kvs: Vec<String> = obj
+        .iter()
+        .filter(|(k, _)| !(has_sub && k.as_str() == "action"))
+        .map(|(k, v)| match v.as_str() {
+            Some(s) => format!("{k}={s}"),
+            None => format!("{k}={v}"),
+        })
+        .collect();
+    if kvs.is_empty() {
+        sig
+    } else {
+        format!("{sig} ({})", kvs.join(", "))
+    }
+}
+
 pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
     let mut missing = Vec::new();
-    for raw in &skill.tools {
+    for raw in skill
+        .tools
+        .iter()
+        .map(String::as_str)
+        .chain(skill.hooks.iter().map(|h| h.tool.as_str()))
+    {
         let name = raw.trim();
         if name.is_empty() || name == "*" {
             continue;
@@ -232,7 +321,7 @@ pub fn check_skill_activation(
     let Some(skill) = find_skill(config, clean_name) else {
         return Err(format!("Skill '@{clean_name}' not found."));
     };
-    if !skill.tools.is_empty() && !enable_tools {
+    if (!skill.tools.is_empty() || !skill.hooks.is_empty()) && !enable_tools {
         return Err(format!(
             "Cannot activate skill '@{}': tools are currently disabled (press ^T to enable tools).",
             skill.name
