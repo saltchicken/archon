@@ -264,7 +264,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
         if line.trim_start().starts_with("```") {
             flush_table_buffer(&mut table_buf, &mut out, options);
             in_code_block = !in_code_block;
-            out.extend(wrap_single_line(line, options));
+            out.push(line.trim().to_string());
         } else if !in_code_block && is_table_line(line) {
             table_buf.push(line);
         } else {
@@ -342,9 +342,11 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
 
 fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
+    let mut code_fence_width = 7usize;
     let mut in_table_header = false;
     let mut in_params_block = false;
     let mut out = Vec::with_capacity(content_lines.len());
+    let border_style = Style::default().fg(Color::Blue);
 
     for line in content_lines {
         let trimmed = line.trim_start();
@@ -366,18 +368,32 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
 
         let formatted = if is_fence {
             in_params_block = false;
-            vec![
-                Span::raw("  "),
-                Span::styled(
-                    line.clone(),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]
+            if !in_code_block {
+                let lang = trimmed.trim_start_matches('`').trim();
+                if lang.is_empty() {
+                    code_fence_width = 7;
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(format!("╭{}", "─".repeat(code_fence_width)), border_style),
+                    ]
+                } else {
+                    code_fence_width = display_width(lang) + 6;
+                    vec![
+                        Span::raw("  "),
+                        Span::styled("╭─ ", border_style),
+                        Span::styled(lang.to_string(), border_style.add_modifier(Modifier::BOLD)),
+                        Span::styled(" ───", border_style),
+                    ]
+                }
+            } else {
+                vec![
+                    Span::raw("  "),
+                    Span::styled(format!("╰{}", "─".repeat(code_fence_width)), border_style),
+                ]
+            }
         } else if in_code_block {
             vec![
-                Span::styled("  │ ", Style::default().fg(Color::Blue)),
+                Span::styled("  │ ", border_style),
                 Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
             ]
         } else if in_params_block {
