@@ -1620,7 +1620,7 @@ impl TuiApp {
         };
 
         let mut header_spans = vec![Span::styled(
-            if header_label.starts_with("⚙ TOOL") || header_label.starts_with("⚡ HOOK") {
+            if header_label.starts_with("⚙ ") || header_label.starts_with("⚡ HOOK") {
                 format!("  {header_label} ")
             } else {
                 format!("━━ {header_label} ")
@@ -1875,7 +1875,7 @@ impl TuiApp {
                         .map(tools::call_signature)
                         .or_else(|| m.tool_name.clone())
                         .unwrap_or_else(|| "tool".to_string());
-                    (sanitize_line(&format!("⚙ TOOL [{summary}]")), Color::Yellow)
+                    (sanitize_line(&format!("⚙ [{summary}]")), Color::Yellow)
                 }
                 "hook" => {
                     let summary = m.tool_name.as_deref().unwrap_or("hook");

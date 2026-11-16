@@ -695,7 +695,7 @@ impl TuiApp {
                 } else {
                     String::new()
                 };
-                self.active_tool_status = Some(format!("⚙ TOOL [{summary}]{progress} ..."));
+                self.active_tool_status = Some(format!("⚙ [{summary}]{progress} ..."));
                 self.scroll_to_bottom();
             }
             EngineEvent::ToolCompleted { .. }
