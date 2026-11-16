@@ -559,15 +559,16 @@ impl TuiApp {
 
                 let prev_msg_count = if is_reset_or_reload {
                     self.msg_states.clear();
+                    self.styled_messages.clear();
                     0
                 } else {
                     self.msg_states.truncate(self.messages.len());
+                    self.styled_messages.truncate(self.messages.len());
                     self.messages.len()
                 };
 
                 self.messages = messages;
                 self.queued_messages = queued_messages;
-                self.styled_messages.clear();
                 self.finish_stream();
                 self.streaming_text.clear();
                 self.num_ctx = num_ctx;
@@ -744,7 +745,6 @@ impl TuiApp {
 
     fn push_error_message(&mut self, err: String) {
         self.messages.push(ChatMessage::new("error", err));
-        self.styled_messages.clear();
         self.msg_states.resize(
             self.messages.len() + 1 + self.queued_messages.len(),
             MsgUiState::default(),

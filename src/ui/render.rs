@@ -653,9 +653,15 @@ impl TuiApp {
             self.last_wrap_width = available_width;
         }
 
-        if self.styled_messages.len() != self.messages.len() {
-            self.styled_messages.clear();
-            for (i, m) in self.messages.iter().enumerate() {
+        if self.styled_messages.len() > self.messages.len() {
+            self.styled_messages.truncate(self.messages.len());
+        }
+
+        if self.styled_messages.len() < self.messages.len() {
+            let start_idx = self.styled_messages.len();
+            self.styled_messages
+                .reserve(self.messages.len() - start_idx);
+            for (i, m) in self.messages.iter().enumerate().skip(start_idx) {
                 let formatted = if m.role == "assistant" {
                     let resolved_count = self.messages[i + 1..]
                         .iter()
