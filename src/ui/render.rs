@@ -1590,10 +1590,7 @@ fn is_opening_code_fence(line: &Line<'_>) -> bool {
     line.spans
         .get(1)
         .is_some_and(|s| s.content.starts_with('╭'))
-        && line
-            .spans
-            .last()
-            .is_some_and(|s| s.content.as_ref() == "󰆏")
+        && line.spans.last().is_some_and(|s| s.content.as_ref() == "󰆏")
 }
 
 fn extract_code_block_from(styled_content: &[Line<'static>], fence_idx: usize) -> String {
@@ -1719,16 +1716,18 @@ impl TuiApp {
                                 .add_modifier(Modifier::BOLD),
                         );
                     }
-                    let total_w = spans_display_width(&rendered_line.spans);
+                    let prefix_w = spans_display_width(
+                        &rendered_line.spans[..rendered_line.spans.len().saturating_sub(1)],
+                    );
                     let badge_w = rendered_line
                         .spans
                         .last()
-                        .map_or(0, |s| display_width(s.content.as_ref()));
+                        .map_or(1, |s| display_width(s.content.as_ref()).max(2));
                     self.code_copy_buttons.push(CodeCopyButton {
                         msg_idx: idx,
                         content_idx,
                         visual_y,
-                        x_range: total_w.saturating_sub(badge_w + 1)..(total_w + 1),
+                        x_range: prefix_w.saturating_sub(1)..(prefix_w + badge_w + 1),
                         code: extract_code_block_from(styled_content, content_idx),
                     });
                     lines.push(rendered_line);
