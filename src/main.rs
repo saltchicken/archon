@@ -1,11 +1,15 @@
+mod cli;
 mod core;
 pub mod tools;
 mod ui;
 
 use anyhow::Result;
+use cli::{CliApp, CliArgs};
 use core::{
     CoreEngine,
-    config::{Config, archon_config_root, ensure_workspace_config, load_dotenv},
+    config::{
+        Config, archon_config_root, ensure_workspace_config, load_dotenv, workspace_config_dir_for,
+    },
     provider::Provider,
 };
 use std::env;
@@ -15,16 +19,25 @@ use ui::TuiApp;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        ui::restore_terminal(&mut std::io::stdout(), true);
-        original_hook(panic_info);
-    }));
+    let cli_args = CliArgs::parse()?;
+
+    if !cli_args.headless {
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            ui::restore_terminal(&mut std::io::stdout(), true);
+            original_hook(panic_info);
+        }));
+    }
 
     let cwd = env::current_dir()?;
-    let Some(ws_config_dir) = ensure_workspace_config(&cwd)? else {
-        println!("Exiting Archon.");
-        std::process::exit(0);
+    let ws_config_dir = if cli_args.headless {
+        workspace_config_dir_for(&cwd)
+    } else {
+        let Some(dir) = ensure_workspace_config(&cwd)? else {
+            println!("Exiting Archon.");
+            std::process::exit(0);
+        };
+        dir
     };
 
     // Load .env from the workspace config directory or working directory before reading config
@@ -41,7 +54,10 @@ async fn main() -> Result<()> {
         info!("Archon starting up. Config loaded successfully.");
     }
 
-    let target_model = env::args().nth(1).unwrap_or_else(|| config.startup_model());
+    let target_model = cli_args
+        .model
+        .clone()
+        .unwrap_or_else(|| config.startup_model());
     let provider = Provider::from_model(&target_model);
 
     info!(
@@ -65,7 +81,13 @@ async fn main() -> Result<()> {
     let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
     let engine_handle = tokio::spawn(engine.run(cmd_rx));
 
-    let res = TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await;
+    let res = if cli_args.headless {
+        CliApp::new(cli_args, target_model, config, cmd_tx)
+            .run(ev_rx)
+            .await
+    } else {
+        TuiApp::new(target_model, config, cmd_tx).run(ev_rx).await
+    };
     let _ = engine_handle.await;
     drop(guard);
 
