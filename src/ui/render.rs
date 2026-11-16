@@ -1434,7 +1434,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 let spans = if !in_code_block {
                     let lang = trimmed.trim_start_matches('`').trim();
                     let copy_badge = Span::styled(
-                        "[Copy]",
+                        "󰆏",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
@@ -1593,7 +1593,7 @@ fn is_opening_code_fence(line: &Line<'_>) -> bool {
         && line
             .spans
             .last()
-            .is_some_and(|s| s.content.as_ref() == "[Copy]")
+            .is_some_and(|s| s.content.as_ref() == "󰆏")
 }
 
 fn extract_code_block_from(styled_content: &[Line<'static>], fence_idx: usize) -> String {
@@ -1713,7 +1713,7 @@ impl TuiApp {
                     let mut rendered_line = line.clone();
                     if is_flashed && let Some(last_span) = rendered_line.spans.last_mut() {
                         *last_span = Span::styled(
-                            "[Copied!]",
+                            "󰄬",
                             Style::default()
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
@@ -1728,7 +1728,7 @@ impl TuiApp {
                         msg_idx: idx,
                         content_idx,
                         visual_y,
-                        x_range: total_w.saturating_sub(badge_w)..total_w,
+                        x_range: total_w.saturating_sub(badge_w + 1)..(total_w + 1),
                         code: extract_code_block_from(styled_content, content_idx),
                     });
                     lines.push(rendered_line);
