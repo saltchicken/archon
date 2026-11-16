@@ -25,11 +25,6 @@ pub(super) fn sanitize_line(s: &str) -> String {
     s.replace(['\r', '\u{fe0f}'], "").replace('\t', "    ")
 }
 
-fn format_tool_call_summary(c: &ToolCall) -> String {
-    let args = serde_json::to_string(&c.function.arguments).unwrap_or_default();
-    format!("{}({})", c.function.name, truncate_str(&args, 80))
-}
-
 fn format_param_value(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => truncate_str(&s.replace('\n', "\\n"), 120),
@@ -76,22 +71,9 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
     }
 }
 
-pub(super) fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> String {
+pub(super) fn format_assistant_display(m: &ChatMessage, _resolved_tool_count: usize) -> String {
     let mut text = sanitize_line(&m.content);
-    if let Some(calls) = m
-        .tool_calls
-        .as_ref()
-        .filter(|c| resolved_tool_count < c.len())
-    {
-        if !text.trim().is_empty() {
-            text.push_str("\n\n");
-        }
-        let pending: Vec<String> = calls[resolved_tool_count..]
-            .iter()
-            .map(|c| format!("⚙ [Pending Tool Approval: {}]", format_tool_call_summary(c)))
-            .collect();
-        text.push_str(&pending.join("\n"));
-    } else if text.trim().is_empty()
+    if text.trim().is_empty()
         && m.tool_calls.as_ref().is_none_or(Vec::is_empty)
         && m.thoughts.as_ref().is_some_and(|t| !t.is_empty())
     {
@@ -770,17 +752,17 @@ impl TuiApp {
             );
         } else if let Some(ref tool_status) = self.active_tool_status {
             let i = self.messages.len();
-            self.msg_states[i].unfolded = true;
-            let styled_tool = style_lines(&wrap_text(&sanitize_line(tool_status), &options));
-            self.render_message_block(
-                i,
-                "ARCHON (TOOL)",
-                Color::Yellow,
-                false,
-                &styled_tool,
-                &mut lines,
-                false,
-            );
+            let start_visual = lines.len();
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {} ", sanitize_line(tool_status)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+            self.msg_visual_ranges
+                .push((i, start_visual, lines.len(), false));
         }
 
         for q_idx in 0..self.queued_messages.len() {

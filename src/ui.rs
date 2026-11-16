@@ -550,6 +550,21 @@ impl TuiApp {
                         }
                     }
                 }
+                let is_reset_or_reload = messages.len() < self.messages.len()
+                    || self
+                        .messages
+                        .iter()
+                        .zip(messages.iter())
+                        .any(|(old, new)| old.role != new.role);
+
+                let prev_msg_count = if is_reset_or_reload {
+                    self.msg_states.clear();
+                    0
+                } else {
+                    self.msg_states.truncate(self.messages.len());
+                    self.messages.len()
+                };
+
                 self.messages = messages;
                 self.queued_messages = queued_messages;
                 self.styled_messages.clear();
@@ -557,27 +572,34 @@ impl TuiApp {
                 self.streaming_text.clear();
                 self.num_ctx = num_ctx;
                 self.sync_system_prompt(&system_prompt);
-                self.msg_states.clear();
                 self.msg_states.resize(
                     self.messages.len() + 1 + self.queued_messages.len(),
                     MsgUiState::default(),
                 );
 
-                for (i, m) in self.messages.iter().enumerate() {
-                    if m.role == "tool" {
-                        self.msg_states[i].collapsed = true;
-                    } else if m.role == "error" {
-                        self.msg_states[i].unfolded = true;
+                if is_reset_or_reload {
+                    for (i, m) in self.messages.iter().enumerate() {
+                        if m.role == "tool" {
+                            self.msg_states[i].collapsed = true;
+                        } else if m.role == "error" {
+                            self.msg_states[i].unfolded = true;
+                        }
                     }
-                }
-
-                // Unfold the latest assistant, local shell, or error response while keeping `tool` blocks collapsed.
-                if let Some(last_idx) = self
-                    .messages
-                    .iter()
-                    .rposition(|m| matches!(m.role.as_str(), "assistant" | "local" | "error"))
-                {
-                    self.msg_states[last_idx].unfolded = true;
+                    if let Some(last_idx) = self
+                        .messages
+                        .iter()
+                        .rposition(|m| matches!(m.role.as_str(), "assistant" | "local" | "error"))
+                    {
+                        self.msg_states[last_idx].unfolded = true;
+                    }
+                } else {
+                    for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
+                        if m.role == "tool" {
+                            self.msg_states[i].collapsed = true;
+                        } else if matches!(m.role.as_str(), "assistant" | "local" | "error") {
+                            self.msg_states[i].unfolded = true;
+                        }
+                    }
                 }
                 if self.messages.last().is_some_and(|m| m.role == "error") {
                     self.scroll_to_bottom();
@@ -626,8 +648,12 @@ impl TuiApp {
                 index,
                 total,
             } => {
-                self.active_tool_status =
-                    Some(format!("⚙ Running tool ({index}/{total}): {summary}..."));
+                let progress = if total > 1 {
+                    format!(" ({index}/{total})")
+                } else {
+                    String::new()
+                };
+                self.active_tool_status = Some(format!("⚙ TOOL [{summary}]{progress} ..."));
                 self.scroll_to_bottom();
             }
             EngineEvent::ToolCompleted { .. } | EngineEvent::ShellCommandCompleted { .. } => {
