@@ -580,7 +580,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# Overrides ~/.config/archon/config.toml for this directory.\n",
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
-            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"web_search\", \"workspace_snapshot\"]\n\n",
+            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
             "# tree_only = false\n",

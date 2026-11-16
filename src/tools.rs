@@ -12,7 +12,6 @@ mod search;
 mod skill;
 mod system;
 pub(crate) mod utils;
-mod web_search;
 mod workspace_snapshot;
 
 use crate::core::config::{Config, expand_tilde};
@@ -821,7 +820,6 @@ register_tools! {
     blocking: search,
     blocking: skill,
     async: system,
-    async: web_search,
     blocking: workspace_snapshot,
 }
 
