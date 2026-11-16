@@ -267,6 +267,17 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
             out.push(line.trim().to_string());
         } else if !in_code_block && is_table_line(line) {
             table_buf.push(line);
+        } else if let Some((level, hdr_content)) = (!in_code_block)
+            .then(|| parse_markdown_header(line))
+            .flatten()
+        {
+            flush_table_buffer(&mut table_buf, &mut out, options);
+            let prefix = "#".repeat(level);
+            let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
+                .break_words(options.break_words);
+            for part in wrap_single_line(hdr_content, &hdr_opts) {
+                out.push(format!("{prefix} {part}"));
+            }
         } else {
             flush_table_buffer(&mut table_buf, &mut out, options);
             out.extend(wrap_single_line(line, options));
@@ -310,21 +321,88 @@ fn style_table_row(line: &str, is_header: bool) -> Vec<Span<'static>> {
     spans
 }
 
-fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw("  ")];
+fn parse_markdown_header(line: &str) -> Option<(usize, &str)> {
     let trimmed = line.trim_start();
+    let level = trimmed.chars().take_while(|&c| c == '#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = &trimmed[level..];
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let trimmed_rest = rest.trim();
+    let stripped = trimmed_rest.trim_end_matches('#');
+    let content = if stripped.is_empty() || stripped.ends_with(char::is_whitespace) {
+        stripped.trim_end()
+    } else {
+        trimmed_rest
+    };
+    let content = content
+        .strip_prefix("**")
+        .and_then(|s| s.strip_suffix("**"))
+        .unwrap_or(content);
+    Some((level, content))
+}
 
+fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw("  ")];
+    match level {
+        1 => {
+            let accent = Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            spans.push(Span::styled("▌ ", accent));
+            spans.extend(style_inline_segments(content, text_style));
+        }
+        2 => {
+            let accent = Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled("▎ ", accent));
+            spans.extend(style_inline_segments(content, text_style));
+            spans.push(Span::styled(" ───", Style::default().fg(Color::Blue)));
+        }
+        3 => {
+            let accent = Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD);
+            spans.push(Span::styled("▸ ", accent));
+            spans.extend(style_inline_segments(content, text_style));
+        }
+        _ => {
+            let accent = Style::default().fg(Color::DarkGray);
+            let text_style = Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD | Modifier::ITALIC);
+            spans.push(Span::styled("• ", accent));
+            spans.extend(style_inline_segments(content, text_style));
+        }
+    }
+    spans
+}
+
+fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
+    let trimmed = line.trim_start();
+    if let Some((level, content)) = parse_markdown_header(trimmed) {
+        return style_markdown_header(level, content);
+    }
+
+    let mut spans = vec![Span::raw("  ")];
     let whole_line_style = if trimmed.starts_with("⚙ [") {
         Some(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::ITALIC),
-        )
-    } else if trimmed.starts_with('#') {
-        Some(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
         )
     } else if trimmed.starts_with(['┌', '├', '└']) {
         Some(Style::default().fg(Color::DarkGray))
@@ -728,7 +806,10 @@ impl TuiApp {
                 }
                 "hook" => {
                     let summary = m.tool_name.as_deref().unwrap_or("hook");
-                    (sanitize_line(&format!("⚡ HOOK [{summary}]")), Color::Yellow)
+                    (
+                        sanitize_line(&format!("⚡ HOOK [{summary}]")),
+                        Color::Yellow,
+                    )
                 }
                 _ => ("SYS".to_string(), Color::Gray),
             };
