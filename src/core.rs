@@ -99,6 +99,7 @@ pub enum EngineEvent {
     },
     QueuedInterjectionsUpdated(Vec<ChatMessage>),
     StreamStarted,
+    StreamThoughtChunk(String),
     StreamChunk(String),
     StreamDone {
         prompt_tokens: u64,
@@ -202,6 +203,7 @@ pub struct CoreEngine {
     messages: Vec<ChatMessage>,
     sent_images: HashSet<PathBuf>,
     stream_buffer: String,
+    thought_stream_buffer: String,
     active_task: Option<JoinHandle<()>>,
     internal_rx: Option<UnboundedReceiver<EngineEvent>>,
     executing_tool: bool,
@@ -251,6 +253,7 @@ impl CoreEngine {
             messages: Vec::new(),
             sent_images: HashSet::new(),
             stream_buffer: String::new(),
+            thought_stream_buffer: String::new(),
             active_task: None,
             internal_rx: None,
             executing_tool: false,
@@ -284,6 +287,7 @@ impl CoreEngine {
         self.pending_tools.clear();
         self.sent_images.clear();
         self.stream_buffer.clear();
+        self.thought_stream_buffer.clear();
     }
 
     fn unresolved_tool_names(&self) -> Vec<String> {
@@ -878,12 +882,24 @@ impl CoreEngine {
 
                 info!("User interrupted active turn (was_tool: {was_tool})");
                 let text = std::mem::take(&mut self.stream_buffer);
+                let thought_text = std::mem::take(&mut self.thought_stream_buffer);
                 let had_text = !text.trim().is_empty();
-                if had_text {
-                    self.messages.push(ChatMessage::new(
-                        "assistant",
-                        format!("{text}\n\n*[Generation cancelled]*"),
-                    ));
+                let had_thought = !thought_text.trim().is_empty();
+                if had_text || had_thought {
+                    let final_content = if had_text {
+                        format!("{text}\n\n*[Generation cancelled]*")
+                    } else {
+                        String::from("*[Generation cancelled]*")
+                    };
+                    self.messages.push(ChatMessage {
+                        thoughts: had_thought.then(|| {
+                            vec![ThoughtPart {
+                                text: Some(thought_text),
+                                thought_signature: None,
+                            }]
+                        }),
+                        ..ChatMessage::new("assistant", final_content)
+                    });
                 }
 
                 let closed = self.close_unresolved_tool_calls("Cancelled by user.");
@@ -892,7 +908,7 @@ impl CoreEngine {
                     return;
                 }
 
-                if had_text || closed > 0 {
+                if had_text || had_thought || closed > 0 {
                     self.save_session_bg(Vec::new()).await;
                 }
                 self.emit_chat();
@@ -1321,6 +1337,10 @@ impl CoreEngine {
 
     async fn handle_internal_event(&mut self, ev: EngineEvent) {
         match ev {
+            EngineEvent::StreamThoughtChunk(ref chunk) => {
+                self.thought_stream_buffer.push_str(chunk);
+                let _ = self.tx.send(ev);
+            }
             EngineEvent::StreamChunk(ref chunk) => {
                 self.stream_buffer.push_str(chunk);
                 let _ = self.tx.send(ev);
@@ -1333,6 +1353,7 @@ impl CoreEngine {
             } => {
                 self.finish_active_task();
                 let final_text = std::mem::take(&mut self.stream_buffer);
+                self.thought_stream_buffer.clear();
 
                 if !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty() {
                     self.messages.push(ChatMessage {
@@ -1363,11 +1384,24 @@ impl CoreEngine {
             EngineEvent::StreamError(ref err) => {
                 self.finish_active_task();
                 let partial = std::mem::take(&mut self.stream_buffer);
-                if !partial.trim().is_empty() {
-                    self.messages.push(ChatMessage::new(
-                        "assistant",
-                        format!("{partial}\n\n*[Stream interrupted]*"),
-                    ));
+                let partial_thought = std::mem::take(&mut self.thought_stream_buffer);
+                let had_text = !partial.trim().is_empty();
+                let had_thought = !partial_thought.trim().is_empty();
+                if had_text || had_thought {
+                    let final_content = if had_text {
+                        format!("{partial}\n\n*[Stream interrupted]*")
+                    } else {
+                        String::from("*[Stream interrupted]*")
+                    };
+                    self.messages.push(ChatMessage {
+                        thoughts: had_thought.then(|| {
+                            vec![ThoughtPart {
+                                text: Some(partial_thought),
+                                thought_signature: None,
+                            }]
+                        }),
+                        ..ChatMessage::new("assistant", final_content)
+                    });
                 }
                 error!("API Error: {err}");
                 self.messages.push(ChatMessage::new("error", err.clone()));
@@ -1682,6 +1716,7 @@ impl CoreEngine {
 
     async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
         self.stream_buffer.clear();
+        self.thought_stream_buffer.clear();
         self.flush_save_task().await;
 
         let sessions = Arc::clone(&self.sessions);

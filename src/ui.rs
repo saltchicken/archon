@@ -189,10 +189,14 @@ pub struct TuiApp {
     pub(super) messages: Vec<ChatMessage>,
     pub(super) queued_messages: Vec<ChatMessage>,
     pub(super) styled_messages: Vec<Vec<Line<'static>>>,
+    pub(super) styled_thoughts: Vec<Vec<Line<'static>>>,
     pub(super) styled_stream: Vec<Line<'static>>,
+    pub(super) styled_stream_thought: Vec<Line<'static>>,
     pub(super) stream_dirty: bool,
+    pub(super) stream_thought_dirty: bool,
     pub(super) last_wrap_width: usize,
     pub(super) streaming_text: String,
+    pub(super) streaming_thought: String,
     pub(super) is_streaming: bool,
     pub(super) active_tool_status: Option<String>,
 
@@ -219,11 +223,13 @@ pub struct TuiApp {
     pub(super) total_chat_lines: usize,
 
     pub(super) msg_states: Vec<MsgUiState>,
+    pub(super) thought_states: Vec<MsgUiState>,
 
     pub(super) term_area: Rect,
     pub(super) chat_area: Rect,
     pub(super) prompt_area: Rect,
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
+    pub(super) thought_visual_ranges: Vec<(usize, usize, usize, bool)>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) term_focused: bool,
@@ -325,10 +331,14 @@ impl TuiApp {
             messages: Vec::new(),
             queued_messages: Vec::new(),
             styled_messages: Vec::new(),
+            styled_thoughts: Vec::new(),
             styled_stream: Vec::new(),
+            styled_stream_thought: Vec::new(),
             stream_dirty: false,
+            stream_thought_dirty: false,
             last_wrap_width: 0,
             streaming_text: String::new(),
+            streaming_thought: String::new(),
             is_streaming: false,
             active_tool_status: None,
             model_idx,
@@ -352,10 +362,12 @@ impl TuiApp {
             tool_scroll: 0,
             total_chat_lines: 0,
             msg_states: Vec::new(),
+            thought_states: Vec::new(),
             term_area: Rect::default(),
             chat_area: Rect::default(),
             prompt_area: Rect::default(),
             msg_visual_ranges: Vec::new(),
+            thought_visual_ranges: Vec::new(),
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
@@ -559,11 +571,15 @@ impl TuiApp {
 
                 let prev_msg_count = if is_reset_or_reload {
                     self.msg_states.clear();
+                    self.thought_states.clear();
                     self.styled_messages.clear();
+                    self.styled_thoughts.clear();
                     0
                 } else {
                     self.msg_states.truncate(self.messages.len());
+                    self.thought_states.truncate(self.messages.len());
                     self.styled_messages.truncate(self.messages.len());
+                    self.styled_thoughts.truncate(self.messages.len());
                     self.messages.len()
                 };
 
@@ -571,15 +587,17 @@ impl TuiApp {
                 self.queued_messages = queued_messages;
                 self.finish_stream();
                 self.streaming_text.clear();
+                self.streaming_thought.clear();
                 self.num_ctx = num_ctx;
                 self.sync_system_prompt(&system_prompt);
-                self.msg_states.resize(
-                    self.messages.len() + 1 + self.queued_messages.len(),
-                    MsgUiState::default(),
-                );
+                let total_slots = self.messages.len() + 1 + self.queued_messages.len();
+                self.msg_states.resize(total_slots, MsgUiState::default());
+                self.thought_states
+                    .resize(total_slots, MsgUiState::default());
 
                 if is_reset_or_reload {
                     for (i, m) in self.messages.iter().enumerate() {
+                        self.thought_states[i].collapsed = true;
                         if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if m.role == "error" {
@@ -595,6 +613,7 @@ impl TuiApp {
                     }
                 } else {
                     for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
+                        self.thought_states[i].collapsed = true;
                         if matches!(m.role.as_str(), "tool" | "hook") {
                             self.msg_states[i].collapsed = true;
                         } else if matches!(m.role.as_str(), "assistant" | "local" | "error") {
@@ -614,11 +633,28 @@ impl TuiApp {
                 self.is_streaming = true;
                 self.active_tool_status = None;
                 self.streaming_text.clear();
+                self.streaming_thought.clear();
                 self.styled_stream.clear();
+                self.styled_stream_thought.clear();
                 self.stream_dirty = true;
+                self.stream_thought_dirty = true;
+                let stream_idx = self.messages.len();
+                if let Some(ts) = self.thought_states.get_mut(stream_idx) {
+                    *ts = MsgUiState::default();
+                }
                 self.scroll_to_bottom();
             }
+            EngineEvent::StreamThoughtChunk(c) => {
+                self.streaming_thought.push_str(&c);
+                self.stream_thought_dirty = true;
+            }
             EngineEvent::StreamChunk(c) => {
+                if self.streaming_text.is_empty() && !c.is_empty() {
+                    let stream_idx = self.messages.len();
+                    if let Some(ts) = self.thought_states.get_mut(stream_idx) {
+                        ts.collapsed = true;
+                    }
+                }
                 self.streaming_text.push_str(&c);
                 self.stream_dirty = true;
             }
@@ -632,12 +668,25 @@ impl TuiApp {
             }
             EngineEvent::StreamError(err) => {
                 let partial = std::mem::take(&mut self.streaming_text);
+                let partial_thought = std::mem::take(&mut self.streaming_thought);
                 self.finish_stream();
-                if !partial.trim().is_empty() {
-                    self.messages.push(ChatMessage::new(
-                        "assistant",
-                        format!("{partial}\n\n*[Stream interrupted]*"),
-                    ));
+                let had_text = !partial.trim().is_empty();
+                let had_thought = !partial_thought.trim().is_empty();
+                if had_text || had_thought {
+                    let final_content = if had_text {
+                        format!("{partial}\n\n*[Stream interrupted]*")
+                    } else {
+                        String::from("*[Stream interrupted]*")
+                    };
+                    self.messages.push(ChatMessage {
+                        thoughts: had_thought.then(|| {
+                            vec![crate::core::session::ThoughtPart {
+                                text: Some(partial_thought),
+                                thought_signature: None,
+                            }]
+                        }),
+                        ..ChatMessage::new("assistant", final_content)
+                    });
                 }
                 self.push_error_message(err);
             }
@@ -743,15 +792,17 @@ impl TuiApp {
         self.is_streaming = false;
         self.active_tool_status = None;
         self.styled_stream.clear();
+        self.styled_stream_thought.clear();
         self.stream_dirty = false;
+        self.stream_thought_dirty = false;
     }
 
     fn push_error_message(&mut self, err: String) {
         self.messages.push(ChatMessage::new("error", err));
-        self.msg_states.resize(
-            self.messages.len() + 1 + self.queued_messages.len(),
-            MsgUiState::default(),
-        );
+        let total_slots = self.messages.len() + 1 + self.queued_messages.len();
+        self.msg_states.resize(total_slots, MsgUiState::default());
+        self.thought_states
+            .resize(total_slots, MsgUiState::default());
         if let Some(last_idx) = self.messages.len().checked_sub(1) {
             self.msg_states[last_idx].unfolded = true;
         }

@@ -143,11 +143,27 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
     }
 }
 
+pub(super) fn format_thought_display(m: &ChatMessage) -> String {
+    let Some(thoughts) = m.thoughts.as_ref() else {
+        return String::new();
+    };
+    let joined = thoughts
+        .iter()
+        .filter_map(|tp| tp.text.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    sanitize_line(&joined)
+}
+
 pub(super) fn format_assistant_display(m: &ChatMessage, _resolved_tool_count: usize) -> String {
     let mut text = sanitize_line(&m.content);
+    let has_visible_thought = !format_thought_display(m).is_empty();
     if text.trim().is_empty()
         && m.tool_calls.as_ref().is_none_or(Vec::is_empty)
         && m.thoughts.as_ref().is_some_and(|t| !t.is_empty())
+        && !has_visible_thought
     {
         text = String::from("*[Model produced internal thoughts without a final response]*");
     }
@@ -1562,7 +1578,10 @@ impl TuiApp {
     fn next_rendered_is_tool(&self, i: usize) -> bool {
         for j in (i + 1)..self.messages.len() {
             let m = &self.messages[j];
-            if m.role == "assistant" && self.styled_messages.get(j).is_some_and(Vec::is_empty) {
+            if m.role == "assistant"
+                && self.styled_messages.get(j).is_some_and(Vec::is_empty)
+                && self.styled_thoughts.get(j).is_some_and(Vec::is_empty)
+            {
                 continue;
             }
             return matches!(m.role.as_str(), "tool" | "hook");
@@ -1570,19 +1589,20 @@ impl TuiApp {
         false
     }
 
-    fn render_message_block(
+    fn render_thought_block(
         &mut self,
         idx: usize,
         header_label: &str,
-        color: Color,
-        truncated: bool,
-        styled_content: &[Line<'static>],
+        styled_thought: &[Line<'static>],
         lines: &mut Vec<Line<'static>>,
-        compact: bool,
+        has_following_body: bool,
     ) {
+        if styled_thought.is_empty() {
+            return;
+        }
         let start_visual = lines.len();
-        let state = &mut self.msg_states[idx];
-        let total_content = styled_content.len();
+        let state = &mut self.thought_states[idx];
+        let total_content = styled_thought.len();
         let max_lines = if state.unfolded {
             usize::MAX
         } else {
@@ -1590,19 +1610,11 @@ impl TuiApp {
         };
 
         let mut header_spans = vec![Span::styled(
-            if header_label.starts_with("⚙ TOOL") || header_label.starts_with("⚡ HOOK") {
-                format!("  {header_label} ")
-            } else {
-                format!("━━ {header_label} ")
-            },
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            format!("  {header_label} "),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
         )];
-        if truncated {
-            header_spans.push(Span::styled(
-                "⚠ TRUNCATED ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        }
         if state.collapsed {
             header_spans.push(Span::styled(
                 format!("[+{total_content}]"),
@@ -1629,7 +1641,7 @@ impl TuiApp {
                 } else {
                     lines.push(Line::from(""));
                 }
-                lines.extend_from_slice(&styled_content[start..end]);
+                lines.extend_from_slice(&styled_thought[start..end]);
                 if end < total_content {
                     lines.push(Line::from(Span::styled(
                         format!("    ... ({}) ...", total_content - end),
@@ -1638,7 +1650,106 @@ impl TuiApp {
                 }
             } else {
                 lines.push(Line::from(""));
-                lines.extend_from_slice(styled_content);
+                lines.extend_from_slice(styled_thought);
+            }
+            if has_following_body {
+                lines.push(Line::from(""));
+            }
+        }
+
+        self.thought_visual_ranges
+            .push((idx, start_visual, lines.len(), is_truncated));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_message_block(
+        &mut self,
+        idx: usize,
+        header_label: &str,
+        color: Color,
+        truncated: bool,
+        thought_label: &str,
+        styled_thought: &[Line<'static>],
+        styled_content: &[Line<'static>],
+        lines: &mut Vec<Line<'static>>,
+        compact: bool,
+    ) {
+        let start_visual = lines.len();
+        let collapsed = self.msg_states[idx].collapsed;
+        let unfolded = self.msg_states[idx].unfolded;
+        let total_content = styled_content.len();
+        let total_for_badge = total_content + styled_thought.len();
+        let max_lines = if unfolded {
+            usize::MAX
+        } else {
+            self.config.app.max_msg_lines
+        };
+
+        let mut header_spans = vec![Span::styled(
+            if header_label.starts_with("⚙ TOOL") || header_label.starts_with("⚡ HOOK") {
+                format!("  {header_label} ")
+            } else {
+                format!("━━ {header_label} ")
+            },
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
+        if truncated {
+            header_spans.push(Span::styled(
+                "⚠ TRUNCATED ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if collapsed {
+            header_spans.push(Span::styled(
+                format!("[+{total_for_badge}]"),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+        lines.push(Line::from(header_spans));
+
+        let is_truncated = !collapsed && total_content > max_lines;
+
+        if !collapsed {
+            if !styled_thought.is_empty() {
+                lines.push(Line::from(""));
+                self.render_thought_block(
+                    idx,
+                    thought_label,
+                    styled_thought,
+                    lines,
+                    !styled_content.is_empty(),
+                );
+            }
+            if !styled_content.is_empty() {
+                if is_truncated {
+                    let state = &mut self.msg_states[idx];
+                    state.scroll = state.scroll.min(total_content.saturating_sub(max_lines));
+                    let start = state.scroll;
+                    let end = (start + max_lines).min(total_content);
+
+                    if start > 0 {
+                        lines.push(Line::from(Span::styled(
+                            format!("    ... ({start}) ..."),
+                            Style::default().fg(Color::Blue),
+                        )));
+                    } else if styled_thought.is_empty() {
+                        lines.push(Line::from(""));
+                    }
+                    lines.extend_from_slice(&styled_content[start..end]);
+                    if end < total_content {
+                        lines.push(Line::from(Span::styled(
+                            format!("    ... ({}) ...", total_content - end),
+                            Style::default().fg(Color::Blue),
+                        )));
+                    }
+                } else {
+                    if styled_thought.is_empty() {
+                        lines.push(Line::from(""));
+                    }
+                    lines.extend_from_slice(styled_content);
+                }
             }
         } else {
             lines.push(Line::from(""));
@@ -1777,27 +1888,33 @@ impl TuiApp {
         // against the vertical scrollbar rendered on the chat area's right edge.
         let available_width = self.chat_inner_area().width.saturating_sub(4).max(1) as usize;
 
-        self.msg_states.resize(
-            self.messages.len() + 1 + self.queued_messages.len(),
-            MsgUiState::default(),
-        );
+        let total_slots = self.messages.len() + 1 + self.queued_messages.len();
+        self.msg_states.resize(total_slots, MsgUiState::default());
+        self.thought_states
+            .resize(total_slots, MsgUiState::default());
         self.msg_visual_ranges.clear();
+        self.thought_visual_ranges.clear();
 
         let options = textwrap::Options::new(available_width).break_words(true);
 
         if self.last_wrap_width != available_width {
             self.styled_messages.clear();
+            self.styled_thoughts.clear();
             self.stream_dirty = true;
+            self.stream_thought_dirty = true;
             self.last_wrap_width = available_width;
         }
 
         if self.styled_messages.len() > self.messages.len() {
             self.styled_messages.truncate(self.messages.len());
+            self.styled_thoughts.truncate(self.messages.len());
         }
 
         if self.styled_messages.len() < self.messages.len() {
             let start_idx = self.styled_messages.len();
             self.styled_messages
+                .reserve(self.messages.len() - start_idx);
+            self.styled_thoughts
                 .reserve(self.messages.len() - start_idx);
             for (i, m) in self.messages.iter().enumerate().skip(start_idx) {
                 let formatted = if m.role == "assistant" {
@@ -1819,12 +1936,27 @@ impl TuiApp {
                     self.styled_messages
                         .push(style_lines(&wrap_text(&formatted, &options)));
                 }
+
+                let thought_text = if m.role == "assistant" {
+                    format_thought_display(m)
+                } else {
+                    String::new()
+                };
+                if thought_text.trim().is_empty() {
+                    self.styled_thoughts.push(Vec::new());
+                } else {
+                    self.styled_thoughts
+                        .push(style_lines(&wrap_text(&thought_text, &options)));
+                }
             }
         }
 
         let mut lines = Vec::new();
         for i in 0..self.messages.len() {
-            if self.messages[i].role == "assistant" && self.styled_messages[i].is_empty() {
+            if self.messages[i].role == "assistant"
+                && self.styled_messages[i].is_empty()
+                && self.styled_thoughts[i].is_empty()
+            {
                 continue;
             }
 
@@ -1859,6 +1991,7 @@ impl TuiApp {
             };
             let truncated = m.truncated;
             let styled_content = self.styled_messages[i].clone();
+            let styled_thought = self.styled_thoughts[i].clone();
 
             // Collapse the gap after this block when it is a tool call and
             // the next rendered block is also a tool call, so consecutive tool
@@ -1872,6 +2005,8 @@ impl TuiApp {
                 &header_label,
                 color,
                 truncated,
+                "THINKING",
+                &styled_thought,
                 &styled_content,
                 &mut lines,
                 compact,
@@ -1881,6 +2016,17 @@ impl TuiApp {
         if self.is_streaming {
             let i = self.messages.len();
             self.msg_states[i].unfolded = true;
+            self.thought_states[i].unfolded = true;
+
+            if self.stream_thought_dirty {
+                let sanitized_thought = sanitize_line(&self.streaming_thought);
+                self.styled_stream_thought = if sanitized_thought.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    style_lines(&wrap_text(&sanitized_thought, &options))
+                };
+                self.stream_thought_dirty = false;
+            }
 
             if self.stream_dirty {
                 let sanitized_stream = sanitize_line(&self.streaming_text);
@@ -1892,12 +2038,20 @@ impl TuiApp {
                 self.stream_dirty = false;
             }
 
+            let thought_label = if self.streaming_text.is_empty() {
+                "THINKING (...)"
+            } else {
+                "THINKING"
+            };
+            let styled_stream_thought = self.styled_stream_thought.clone();
             let styled_stream = self.styled_stream.clone();
             self.render_message_block(
                 i,
                 "ARCHON (...)",
                 Color::Yellow,
                 false,
+                thought_label,
+                &styled_stream_thought,
                 &styled_stream,
                 &mut lines,
                 false,
@@ -1928,6 +2082,8 @@ impl TuiApp {
                 &header,
                 Color::LightCyan,
                 false,
+                "THINKING",
+                &[],
                 &styled_queued,
                 &mut lines,
                 false,

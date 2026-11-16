@@ -311,7 +311,14 @@ pub fn build_payload(
         }
     }
 
-    let mut payload = json!({ "contents": contents });
+    let mut payload = json!({
+        "contents": contents,
+        "generationConfig": {
+            "thinkingConfig": {
+                "includeThoughts": true
+            }
+        }
+    });
     if !system_prompt.trim().is_empty() {
         payload["systemInstruction"] = json!({ "parts": [{ "text": system_prompt }] });
     }
@@ -537,6 +544,9 @@ pub async fn stream_chat(
             for part in cand.content.and_then(|c| c.parts).into_iter().flatten() {
                 if let Some(fc) = part.function_call {
                     if part.thought {
+                        if let Some(ref t) = part.text.as_ref().filter(|t| !t.is_empty()) {
+                            let _ = tx.send(EngineEvent::StreamThoughtChunk((*t).clone()));
+                        }
                         push_thought_part(&mut collected_thoughts, part.text, None);
                     }
                     collected_tools.push(ToolCall {
@@ -547,6 +557,9 @@ pub async fn stream_chat(
                         thought_signature: part.thought_signature,
                     });
                 } else if part.thought {
+                    if let Some(ref t) = part.text.as_ref().filter(|t| !t.is_empty()) {
+                        let _ = tx.send(EngineEvent::StreamThoughtChunk((*t).clone()));
+                    }
                     push_thought_part(&mut collected_thoughts, part.text, part.thought_signature);
                 } else {
                     if let Some(text) = part.text.filter(|t| !t.is_empty()) {

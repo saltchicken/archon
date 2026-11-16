@@ -344,6 +344,13 @@ pub fn format_payload_inspection(
                 format!(" ({})", tags.join(", "))
             };
             let _ = writeln!(out, "[#{} {}]{}", idx + 1, m.role.to_uppercase(), meta);
+            if let Some(ref th) = m.thoughts {
+                for tp in th {
+                    if let Some(ref text) = tp.text.as_ref().filter(|s| !s.trim().is_empty()) {
+                        let _ = writeln!(out, "<thinking>\n{}\n</thinking>", text.trim());
+                    }
+                }
+            }
             if !m.content.is_empty() {
                 let _ = writeln!(out, "{}", m.content);
             }
