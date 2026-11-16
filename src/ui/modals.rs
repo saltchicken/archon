@@ -303,7 +303,7 @@ impl TuiApp {
         ];
         if pending.collapsed {
             preview_header.push(Span::styled(
-                format!("[+{total_content}]"),
+                format!("+{total_content}"),
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
