@@ -30,6 +30,12 @@ enum GitAction {
     Stash,
     /// Apply and remove a stashed state (`git stash pop [target]`). Optional `target` like `stash@{0}`.
     StashPop,
+    /// Switch to a branch (`git switch <target>`), or create it first when `create` is set (`git switch -c <target>`). `target` is required.
+    Switch,
+    /// Merge the branch named in `target` into the current branch (`git merge <target>`).
+    Merge,
+    /// Delete a local branch that is fully merged (`git branch --delete <target>`).
+    BranchDelete,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -45,6 +51,9 @@ pub struct GitArgs {
     /// Maximum number of log entries to return for `log` (default: 15, max: 100).
     #[serde(default)]
     limit: Option<usize>,
+    /// When `true` and `action` is `switch`, create the branch if it does not exist (`git switch -c <target>`). Defaults to `false` (`git switch <target>`).
+    #[serde(default)]
+    create: bool,
     /// Commit message (required when `action` is `commit`, optional description when `action` is `stash`).
     #[serde(default)]
     message: String,
@@ -95,7 +104,7 @@ fn push_optional_path(cmd_args: &mut Vec<String>, raw_path: &str, ctx: &ToolCont
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "git";
-    const DESCRIPTION: &'static str = "Executes git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, stash_pop) within the workspace.";
+    const DESCRIPTION: &'static str = "Executes git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, stash_pop, switch, merge, branch_delete) within the workspace.";
     type Args = GitArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -181,6 +190,35 @@ impl AsyncTool for Tool {
                     cmd_args.push(t.into());
                 }
                 "Stash popped successfully."
+            }
+            GitAction::Switch => {
+                let name = validate_git_target(&args.target, false)?.ok_or_else(|| {
+                    anyhow::anyhow!("'target' (branch name) is required for switch")
+                })?;
+                cmd_args.push("switch".into());
+                if args.create {
+                    cmd_args.push("-c".into());
+                }
+                cmd_args.push(name.into());
+                if args.create {
+                    "Branch created and checked out."
+                } else {
+                    "Switched branch."
+                }
+            }
+            GitAction::Merge => {
+                let src = validate_git_target(&args.target, false)?.ok_or_else(|| {
+                    anyhow::anyhow!("'target' (branch to merge) is required for merge")
+                })?;
+                cmd_args.extend(["merge".into(), src.into()]);
+                "Merge complete."
+            }
+            GitAction::BranchDelete => {
+                let name = validate_git_target(&args.target, false)?.ok_or_else(|| {
+                    anyhow::anyhow!("'target' (branch to delete) is required for branch_delete")
+                })?;
+                cmd_args.extend(["branch".into(), "--delete".into(), name.into()]);
+                "Branch deleted."
             }
         };
 
