@@ -379,8 +379,17 @@ impl TuiApp {
         }
     }
 
+    pub(super) fn chat_area_block<'a>(&self, title: impl Into<Line<'a>>) -> Block<'a> {
+        titled_block(title).padding(Padding::new(
+            self.config.ui.chat_padding_left,
+            self.config.ui.chat_padding_right,
+            1,
+            1,
+        ))
+    }
+
     pub(super) fn chat_inner_area(&self) -> Rect {
-        chat_block("").inner(self.chat_area)
+        self.chat_area_block("").inner(self.chat_area)
     }
 
     pub(super) fn chat_view_height(&self) -> usize {

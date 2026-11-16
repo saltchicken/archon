@@ -1,4 +1,4 @@
-use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, chat_block, titled_block};
+use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::{self, ToolCall},
@@ -13,6 +13,9 @@ use ratatui::{
     },
 };
 use textwrap::core::display_width;
+
+/// Horizontal columns occupied by the leading `"  "` body indent before message text.
+const MESSAGE_BODY_INDENT_WIDTH: usize = 2;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ColAlign {
@@ -1790,9 +1793,9 @@ impl TuiApp {
 
         self.chat_area = chunks[0];
         self.prompt_area = chunks[1];
-        // Reserve an extra column on the right so wrapped text doesn't butt up
-        // against the vertical scrollbar rendered on the chat area's right edge.
-        let available_width = self.chat_inner_area().width.saturating_sub(4).max(1) as usize;
+        let available_width = usize::from(self.chat_inner_area().width)
+            .saturating_sub(MESSAGE_BODY_INDENT_WIDTH)
+            .max(1);
 
         let total_slots = self.messages.len() + 1 + self.queued_messages.len();
         self.msg_states.resize(total_slots, MsgUiState::default());
@@ -1999,7 +2002,7 @@ impl TuiApp {
 
         f.render_widget(
             Paragraph::new(visible_lines)
-                .block(chat_block(format!(" Conversation [{}] ", self.model))),
+                .block(self.chat_area_block(format!(" Conversation [{}] ", self.model))),
             chunks[0],
         );
 

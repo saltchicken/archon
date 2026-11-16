@@ -230,6 +230,7 @@ impl Memory {
 #[serde(default)]
 pub struct Config {
     pub app: AppSettings,
+    pub ui: UiSettings,
     #[serde(skip)]
     pub global_memory: Memory,
     #[serde(skip)]
@@ -256,6 +257,13 @@ pub struct AppSettings {
     pub skills_dir: String,
     pub enabled_tools: Vec<String>,
     pub auto_approve: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiSettings {
+    pub chat_padding_left: u16,
+    pub chat_padding_right: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +359,15 @@ impl Default for AppSettings {
     }
 }
 
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            chat_padding_left: 2,
+            chat_padding_right: 2,
+        }
+    }
+}
+
 impl Default for WorkspaceSnapshotSettings {
     fn default() -> Self {
         Self {
@@ -377,6 +394,7 @@ impl Default for Config {
         };
         Self {
             app: AppSettings::default(),
+            ui: UiSettings::default(),
             global_memory: Memory::default(),
             workspace_memory: Memory::empty(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
@@ -581,6 +599,9 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
             "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
+            "[ui]\n",
+            "# chat_padding_left = 2\n",
+            "# chat_padding_right = 2\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
             "# tree_only = false\n",
