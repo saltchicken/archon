@@ -1251,7 +1251,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                         spans,
                     });
                 }
-            } else if trimmed.starts_with("⚙ [") {
+            } else if trimmed.starts_with("⚙ ") {
                 let style = Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::ITALIC);
@@ -1875,7 +1875,7 @@ impl TuiApp {
                         .map(tools::call_signature)
                         .or_else(|| m.tool_name.clone())
                         .unwrap_or_else(|| "tool".to_string());
-                    (sanitize_line(&format!("⚙ [{summary}]")), Color::Yellow)
+                    (sanitize_line(&format!("⚙ {summary}")), Color::Yellow)
                 }
                 "hook" => {
                     let summary = m.tool_name.as_deref().unwrap_or("hook");

@@ -291,7 +291,7 @@ impl TuiApp {
 
         let mut preview_header = vec![
             Span::styled(
-                format!("  ⚙ [{}] ", sanitize_line(&pending.summary)),
+                format!("  ⚙ {} ", sanitize_line(&pending.summary)),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
