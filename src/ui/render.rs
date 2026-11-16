@@ -299,9 +299,19 @@ fn tokenize_inline_markdown(text: &str) -> Vec<InlineToken> {
             let after_open = pos + tick_count;
             if let Some(rel_close) = find_closing_backticks(&text[after_open..], tick_count) {
                 flush_text(&mut tokens, text_start, pos);
+                let raw_inner = &text[after_open..after_open + rel_close];
+                let inner = if raw_inner.len() >= 2
+                    && raw_inner.starts_with(' ')
+                    && raw_inner.ends_with(' ')
+                    && raw_inner.bytes().any(|b| b != b' ')
+                {
+                    &raw_inner[1..raw_inner.len() - 1]
+                } else {
+                    raw_inner
+                };
                 let end_pos = after_open + rel_close + tick_count;
                 tokens.push(InlineToken {
-                    kind: InlineTokenKind::Code(text[pos..end_pos].to_string()),
+                    kind: InlineTokenKind::Code(inner.to_string()),
                     modifiers: Modifier::empty(),
                 });
                 pos = end_pos;
