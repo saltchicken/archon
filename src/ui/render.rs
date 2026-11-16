@@ -21,6 +21,59 @@ enum ColAlign {
     Right,
 }
 
+#[derive(Clone)]
+enum ListMarker {
+    Bullet {
+        depth: usize,
+    },
+    Ordered {
+        number: String,
+        delim: char,
+        depth: usize,
+    },
+    Task {
+        checked: bool,
+        depth: usize,
+        ordered: Option<(String, char)>,
+    },
+}
+
+enum WrappedLine {
+    CodeFence(String),
+    CodeLine(String),
+    TableBorder(String),
+    TableRow {
+        text: String,
+        is_header: bool,
+    },
+    Header {
+        level: usize,
+        text: String,
+    },
+    ListItem {
+        indent: usize,
+        marker: ListMarker,
+        text: String,
+    },
+    ListContinuation {
+        indent: usize,
+        text: String,
+    },
+    Plain(String),
+}
+
+enum ParsedListKind {
+    Bullet,
+    Ordered {
+        number: String,
+        delim: char,
+    },
+    Task {
+        checked: bool,
+        ordered: Option<(String, char)>,
+    },
+}
+
 pub(super) fn sanitize_line(s: &str) -> String {
     s.replace(['\r', '\u{fe0f}'], "").replace('\t', "    ")
 }
@@ -157,7 +210,7 @@ fn draw_table_border(col_widths: &[usize], left: char, mid: char, right: char) -
     format!("{left}{}{right}", segments.join(&mid.to_string()))
 }
 
-fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<Vec<String>> {
+fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<Vec<WrappedLine>> {
     if raw_lines.len() < 2 {
         return None;
     }
@@ -191,10 +244,20 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         }
     }
 
-    let mut out = vec![draw_table_border(&col_widths, '┌', '┬', '┐')];
+    let mut out = vec![WrappedLine::TableBorder(draw_table_border(
+        &col_widths,
+        '┌',
+        '┬',
+        '┐',
+    ))];
     for (r_idx, row) in parsed_rows.iter().enumerate() {
         if r_idx == 1 {
-            out.push(draw_table_border(&col_widths, '├', '┼', '┤'));
+            out.push(WrappedLine::TableBorder(draw_table_border(
+                &col_widths,
+                '├',
+                '┼',
+                '┤',
+            )));
             continue;
         }
 
@@ -218,11 +281,19 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
                     pad_cell(part, col_widths[c_idx], aligns[c_idx])
                 ));
             }
-            out.push(line);
+            out.push(WrappedLine::TableRow {
+                text: line,
+                is_header: r_idx == 0,
+            });
         }
     }
 
-    out.push(draw_table_border(&col_widths, '└', '┴', '┘'));
+    out.push(WrappedLine::TableBorder(draw_table_border(
+        &col_widths,
+        '└',
+        '┴',
+        '┘',
+    )));
     Some(out)
 }
 
@@ -239,51 +310,270 @@ fn wrap_single_line(line: &str, options: &textwrap::Options<'_>) -> Vec<String> 
 
 fn flush_table_buffer(
     table_buf: &mut Vec<&str>,
-    out: &mut Vec<String>,
+    out: &mut Vec<WrappedLine>,
     options: &textwrap::Options<'_>,
+    list_levels: &mut Vec<(usize, usize)>,
 ) {
     if table_buf.is_empty() {
         return;
     }
     if let Some(formatted) = format_markdown_table(table_buf, options.width) {
+        list_levels.clear();
         out.extend(formatted);
     } else {
+        list_levels.clear();
         for raw in table_buf.iter() {
-            out.extend(wrap_single_line(raw, options));
+            for part in wrap_single_line(raw, options) {
+                out.push(WrappedLine::Plain(part));
+            }
         }
     }
     table_buf.clear();
 }
 
-fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<String> {
+fn is_thematic_break(trimmed: &str) -> bool {
+    let mut non_ws = trimmed.chars().filter(|c| !c.is_whitespace());
+    let Some(first @ ('-' | '*' | '_')) = non_ws.next() else {
+        return false;
+    };
+    let count = 1 + non_ws.filter(|&c| c == first).count();
+    count >= 3 && trimmed.chars().all(|c| c == first || c.is_whitespace())
+}
+
+fn parse_task_prefix(content: &str) -> Option<(bool, &str)> {
+    let bytes = content.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'[' || bytes[2] != b']' {
+        return None;
+    }
+    let checked = match bytes[1] {
+        b' ' => false,
+        b'x' | b'X' => true,
+        _ => return None,
+    };
+    let rest = &content[3..];
+    if rest.is_empty() {
+        Some((checked, ""))
+    } else if rest.starts_with(' ') {
+        Some((checked, rest.trim_start_matches(' ')))
+    } else {
+        None
+    }
+}
+
+fn parse_list_item(line: &str) -> Option<(usize, ParsedListKind, &str)> {
+    let raw_indent = line.bytes().take_while(|&b| b == b' ').count();
+    let rest = &line[raw_indent..];
+    if rest.is_empty() || is_thematic_break(rest) {
+        return None;
+    }
+
+    let bytes = rest.as_bytes();
+    if matches!(bytes[0], b'-' | b'*' | b'+') && bytes.get(1) == Some(&b' ') {
+        let content = rest[1..].trim_start_matches(' ');
+        if let Some((checked, task_text)) = parse_task_prefix(content) {
+            return Some((
+                raw_indent,
+                ParsedListKind::Task {
+                    checked,
+                    ordered: None,
+                },
+                task_text,
+            ));
+        }
+        return Some((raw_indent, ParsedListKind::Bullet, content));
+    }
+
+    let digit_count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    if (1..=9).contains(&digit_count)
+        && let Some(&delim @ (b'.' | b')')) = bytes.get(digit_count)
+        && bytes.get(digit_count + 1) == Some(&b' ')
+    {
+        let number = rest[..digit_count].to_string();
+        let delim = delim as char;
+        let content = rest[digit_count + 1..].trim_start_matches(' ');
+        if let Some((checked, task_text)) = parse_task_prefix(content) {
+            return Some((
+                raw_indent,
+                ParsedListKind::Task {
+                    checked,
+                    ordered: Some((number, delim)),
+                },
+                task_text,
+            ));
+        }
+        return Some((
+            raw_indent,
+            ParsedListKind::Ordered { number, delim },
+            content,
+        ));
+    }
+
+    None
+}
+
+fn list_marker_width(marker: &ListMarker) -> usize {
+    match marker {
+        ListMarker::Bullet { .. } => 2,
+        ListMarker::Ordered { number, .. } => number.len() + 2,
+        ListMarker::Task { ordered, .. } => ordered.as_ref().map_or(0, |(n, _)| n.len() + 2) + 2,
+    }
+}
+
+fn is_diff_hunk_header(line: &str) -> bool {
+    line.starts_with("@@ ") && line[3..].contains(" @@")
+}
+
+fn is_diff_body_line(line: &str) -> bool {
+    !line.is_empty()
+        && line.starts_with([' ', '+', '-', '\\'])
+        && !line.starts_with("--- ")
+        && !line.starts_with("+++ ")
+}
+
+fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine> {
     let mut out = Vec::new();
     let mut table_buf: Vec<&str> = Vec::new();
+    let mut list_levels: Vec<(usize, usize)> = Vec::new();
     let mut in_code_block = false;
+    let mut in_diff_hunk = false;
 
     for line in content.lines() {
         if line.trim_start().starts_with("```") {
-            flush_table_buffer(&mut table_buf, &mut out, options);
+            flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+            in_diff_hunk = false;
             in_code_block = !in_code_block;
-            out.push(line.trim().to_string());
-        } else if !in_code_block && is_table_line(line) {
+            out.push(WrappedLine::CodeFence(line.trim().to_string()));
+            continue;
+        }
+
+        if in_code_block {
+            out.push(WrappedLine::CodeLine(line.to_string()));
+            continue;
+        }
+
+        if is_diff_hunk_header(line) {
+            flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+            list_levels.clear();
+            in_diff_hunk = true;
+            for part in wrap_single_line(line, options) {
+                out.push(WrappedLine::Plain(part));
+            }
+            continue;
+        }
+
+        if in_diff_hunk {
+            if is_diff_body_line(line) {
+                for part in wrap_single_line(line, options) {
+                    out.push(WrappedLine::Plain(part));
+                }
+                continue;
+            }
+            in_diff_hunk = false;
+        }
+
+        if is_table_line(line) {
             table_buf.push(line);
-        } else if let Some((level, hdr_content)) = (!in_code_block)
-            .then(|| parse_markdown_header(line))
-            .flatten()
-        {
-            flush_table_buffer(&mut table_buf, &mut out, options);
-            let prefix = "#".repeat(level);
+            continue;
+        }
+
+        flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+
+        if let Some((level, hdr_content)) = parse_markdown_header(line) {
+            list_levels.clear();
             let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
                 .break_words(options.break_words);
             for part in wrap_single_line(hdr_content, &hdr_opts) {
-                out.push(format!("{prefix} {part}"));
+                out.push(WrappedLine::Header { level, text: part });
             }
+        } else if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
+            while list_levels
+                .last()
+                .is_some_and(|&(top_indent, _)| top_indent > raw_indent)
+            {
+                list_levels.pop();
+            }
+            let depth = if let Some(&(top_indent, _)) = list_levels.last() {
+                if raw_indent > top_indent {
+                    list_levels.len()
+                } else {
+                    list_levels.len().saturating_sub(1)
+                }
+            } else {
+                0
+            };
+
+            let marker = match kind {
+                ParsedListKind::Bullet => ListMarker::Bullet { depth },
+                ParsedListKind::Ordered { number, delim } => ListMarker::Ordered {
+                    number,
+                    delim,
+                    depth,
+                },
+                ParsedListKind::Task { checked, ordered } => ListMarker::Task {
+                    checked,
+                    depth,
+                    ordered,
+                },
+            };
+
+            let max_indent = options.width.saturating_sub(8);
+            let visual_indent = (depth * 2).min(max_indent);
+            let marker_width = list_marker_width(&marker);
+            let hanging_indent =
+                (visual_indent + marker_width).min(options.width.saturating_sub(1));
+
+            if list_levels
+                .last()
+                .is_none_or(|&(top_indent, _)| raw_indent > top_indent)
+            {
+                list_levels.push((raw_indent, hanging_indent));
+            } else if let Some(top) = list_levels.last_mut() {
+                top.1 = hanging_indent;
+            }
+
+            let text_width = options.width.saturating_sub(hanging_indent).max(1);
+            let item_opts = textwrap::Options::new(text_width).break_words(options.break_words);
+            let mut wrapped = wrap_single_line(item_text, &item_opts).into_iter();
+            if let Some(first) = wrapped.next() {
+                out.push(WrappedLine::ListItem {
+                    indent: visual_indent,
+                    marker,
+                    text: first,
+                });
+            }
+            for cont in wrapped {
+                out.push(WrappedLine::ListContinuation {
+                    indent: hanging_indent,
+                    text: cont,
+                });
+            }
+        } else if line.trim().is_empty() {
+            out.push(WrappedLine::Plain(String::new()));
         } else {
-            flush_table_buffer(&mut table_buf, &mut out, options);
-            out.extend(wrap_single_line(line, options));
+            let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+            while list_levels
+                .last()
+                .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
+            {
+                list_levels.pop();
+            }
+            if let Some(&(_, hanging_indent)) = list_levels.last() {
+                let text_width = options.width.saturating_sub(hanging_indent).max(1);
+                let cont_opts = textwrap::Options::new(text_width).break_words(options.break_words);
+                for part in wrap_single_line(line.trim_start(), &cont_opts) {
+                    out.push(WrappedLine::ListContinuation {
+                        indent: hanging_indent,
+                        text: part,
+                    });
+                }
+            } else {
+                for part in wrap_single_line(line, options) {
+                    out.push(WrappedLine::Plain(part));
+                }
+            }
         }
     }
-    flush_table_buffer(&mut table_buf, &mut out, options);
+    flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
     out
 }
 
@@ -391,109 +681,205 @@ fn style_markdown_header(level: usize, content: &str) -> Vec<Span<'static>> {
     spans
 }
 
+fn ordered_marker_style(depth: usize) -> Style {
+    match depth {
+        0 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        1 => Style::default()
+            .fg(Color::LightBlue)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::Gray)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
+    match marker {
+        ListMarker::Bullet { depth } => {
+            let (glyph, style) = match depth {
+                0 => (
+                    "• ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                1 => ("◦ ", Style::default().fg(Color::LightBlue)),
+                2 => (
+                    "▪ ",
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                _ => ("▹ ", Style::default().fg(Color::DarkGray)),
+            };
+            vec![Span::styled(glyph, style)]
+        }
+        ListMarker::Ordered {
+            number,
+            delim,
+            depth,
+        } => {
+            vec![Span::styled(
+                format!("{number}{delim} "),
+                ordered_marker_style(*depth),
+            )]
+        }
+        ListMarker::Task {
+            checked,
+            depth,
+            ordered,
+        } => {
+            let mut spans = Vec::new();
+            if let Some((number, delim)) = ordered {
+                spans.push(Span::styled(
+                    format!("{number}{delim} "),
+                    ordered_marker_style(*depth),
+                ));
+            }
+            let (box_glyph, box_style) = if *checked {
+                (
+                    "☑ ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ("☐ ", Style::default().fg(Color::Gray))
+            };
+            spans.push(Span::styled(box_glyph, box_style));
+            spans
+        }
+    }
+}
+
 fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
-    if let Some((level, content)) = parse_markdown_header(trimmed) {
-        return style_markdown_header(level, content);
-    }
-
     let mut spans = vec![Span::raw("  ")];
-    let whole_line_style = if trimmed.starts_with("⚙ [") {
-        Some(
+    if trimmed.starts_with("⚙ [") {
+        spans.push(Span::styled(
+            line.to_string(),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::ITALIC),
-        )
-    } else if trimmed.starts_with(['┌', '├', '└']) {
-        Some(Style::default().fg(Color::DarkGray))
-    } else {
-        None
-    };
-
-    if let Some(style) = whole_line_style {
-        spans.push(Span::styled(line.to_string(), style));
+        ));
     } else {
         spans.extend(style_inline_segments(line, Style::default()));
     }
     spans
 }
 
-fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
+fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut code_fence_width = 7usize;
-    let mut in_table_header = false;
     let mut in_params_block = false;
     let mut out = Vec::with_capacity(content_lines.len());
     let border_style = Style::default().fg(Color::Blue);
 
-    for line in content_lines {
-        let trimmed = line.trim_start();
-        let is_fence = trimmed.starts_with("```");
-
-        if !in_code_block {
-            if trimmed == "Parameters:" {
-                in_params_block = true;
-            } else if trimmed.is_empty() {
+    for item in content_lines {
+        let formatted = match item {
+            WrappedLine::CodeFence(trimmed) => {
                 in_params_block = false;
-            }
-
-            if trimmed.starts_with('┌') {
-                in_table_header = true;
-            } else if trimmed.starts_with(['├', '└']) {
-                in_table_header = false;
-            }
-        }
-
-        let formatted = if is_fence {
-            in_params_block = false;
-            if !in_code_block {
-                let lang = trimmed.trim_start_matches('`').trim();
-                if lang.is_empty() {
-                    code_fence_width = 7;
-                    vec![
-                        Span::raw("  "),
-                        Span::styled(format!("╭{}", "─".repeat(code_fence_width)), border_style),
-                    ]
+                let spans = if !in_code_block {
+                    let lang = trimmed.trim_start_matches('`').trim();
+                    if lang.is_empty() {
+                        code_fence_width = 7;
+                        vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("╭{}", "─".repeat(code_fence_width)),
+                                border_style,
+                            ),
+                        ]
+                    } else {
+                        code_fence_width = display_width(lang) + 6;
+                        vec![
+                            Span::raw("  "),
+                            Span::styled("╭─ ", border_style),
+                            Span::styled(
+                                lang.to_string(),
+                                border_style.add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" ───", border_style),
+                        ]
+                    }
                 } else {
-                    code_fence_width = display_width(lang) + 6;
                     vec![
                         Span::raw("  "),
-                        Span::styled("╭─ ", border_style),
-                        Span::styled(lang.to_string(), border_style.add_modifier(Modifier::BOLD)),
-                        Span::styled(" ───", border_style),
+                        Span::styled(format!("╰{}", "─".repeat(code_fence_width)), border_style),
                     ]
-                }
-            } else {
+                };
+                in_code_block = !in_code_block;
+                spans
+            }
+            WrappedLine::CodeLine(line) => {
                 vec![
-                    Span::raw("  "),
-                    Span::styled(format!("╰{}", "─".repeat(code_fence_width)), border_style),
+                    Span::styled("  │ ", border_style),
+                    Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
                 ]
             }
-        } else if in_code_block {
-            vec![
-                Span::styled("  │ ", border_style),
-                Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
-            ]
-        } else if in_params_block {
-            let style = if trimmed == "Parameters:" {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Yellow)
-            };
-            vec![Span::raw("  "), Span::styled(line.clone(), style)]
-        } else if trimmed.starts_with('│') && trimmed.ends_with('│') {
-            style_table_row(line, in_table_header)
-        } else {
-            style_inline_markdown(line)
+            WrappedLine::TableBorder(line) => {
+                in_params_block = false;
+                vec![
+                    Span::raw("  "),
+                    Span::styled(line.clone(), Style::default().fg(Color::DarkGray)),
+                ]
+            }
+            WrappedLine::TableRow { text, is_header } => {
+                in_params_block = false;
+                style_table_row(text, *is_header)
+            }
+            WrappedLine::Header { level, text } => {
+                in_params_block = false;
+                style_markdown_header(*level, text)
+            }
+            WrappedLine::ListItem {
+                indent,
+                marker,
+                text,
+            } => {
+                in_params_block = false;
+                let mut spans = vec![Span::raw("  ")];
+                if *indent > 0 {
+                    spans.push(Span::raw(" ".repeat(*indent)));
+                }
+                spans.extend(style_list_marker(marker));
+                spans.extend(style_inline_segments(text, Style::default()));
+                spans
+            }
+            WrappedLine::ListContinuation { indent, text } => {
+                in_params_block = false;
+                let mut spans = vec![Span::raw("  ")];
+                if *indent > 0 {
+                    spans.push(Span::raw(" ".repeat(*indent)));
+                }
+                spans.extend(style_inline_segments(text, Style::default()));
+                spans
+            }
+            WrappedLine::Plain(line) => {
+                let trimmed = line.trim_start();
+                if trimmed == "Parameters:" {
+                    in_params_block = true;
+                } else if trimmed.is_empty() {
+                    in_params_block = false;
+                }
+
+                if in_params_block {
+                    let style = if trimmed == "Parameters:" {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Yellow)
+                    };
+                    vec![Span::raw("  "), Span::styled(line.clone(), style)]
+                } else {
+                    style_inline_markdown(line)
+                }
+            }
         };
         out.push(Line::from(formatted));
-
-        if is_fence {
-            in_code_block = !in_code_block;
-            in_table_header = false;
-        }
     }
     out
 }
