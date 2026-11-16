@@ -906,7 +906,10 @@ fn cargo_registry_src_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("Cannot determine ~/.cargo directory"))?;
     let src = base.join("registry").join("src");
     if !src.is_dir() {
-        bail!("Cargo registry source directory not found at '{}'", src.display());
+        bail!(
+            "Cargo registry source directory not found at '{}'",
+            src.display()
+        );
     }
     Ok(dunce::canonicalize(&src).unwrap_or(src))
 }

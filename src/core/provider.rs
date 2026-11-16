@@ -132,11 +132,9 @@ impl Provider {
                 turn.num_ctx,
                 tools_schema,
             ),
-            Self::Gemini => gemini::build_payload(
-                &sanitized_messages,
-                &effective_system_prompt,
-                tools_schema,
-            ),
+            Self::Gemini => {
+                gemini::build_payload(&sanitized_messages, &effective_system_prompt, tools_schema)
+            }
         };
 
         (effective_system_prompt, sanitized_messages, payload)
@@ -172,9 +170,7 @@ impl Provider {
 
         let messages = vec![ChatMessage::new("user", prompt)];
         let payload = match self {
-            Self::Ollama => {
-                ollama::build_payload(&model, &messages, system_prompt, num_ctx, None)
-            }
+            Self::Ollama => ollama::build_payload(&model, &messages, system_prompt, num_ctx, None),
             Self::Gemini => gemini::build_payload(&messages, system_prompt, None),
         };
 
@@ -319,11 +315,7 @@ pub fn format_payload_inspection(
         let _ = writeln!(out, "{}", draft);
     }
 
-    let _ = writeln!(
-        out,
-        "\n--- CONVERSATION MESSAGES ({}) ---",
-        messages.len()
-    );
+    let _ = writeln!(out, "\n--- CONVERSATION MESSAGES ({}) ---", messages.len());
     if messages.is_empty() {
         let _ = writeln!(out, "(No messages in context)");
     } else {
@@ -378,12 +370,7 @@ pub fn format_payload_inspection(
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|t| {
-                    t.get("function")?
-                        .get("name")?
-                        .as_str()
-                        .map(String::from)
-                })
+                .filter_map(|t| t.get("function")?.get("name")?.as_str().map(String::from))
                 .collect(),
             Provider::Gemini => tools_val
                 .as_array()

@@ -53,7 +53,12 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
     let Some(call) = find_associated_tool_call(messages, tool_msg_idx) else {
         return body;
     };
-    let Some(obj) = call.function.arguments.as_object().filter(|o| !o.is_empty()) else {
+    let Some(obj) = call
+        .function
+        .arguments
+        .as_object()
+        .filter(|o| !o.is_empty())
+    else {
         return body;
     };
 
@@ -430,6 +435,21 @@ fn image_badge(m: &ChatMessage) -> String {
 }
 
 impl TuiApp {
+    /// Whether the next *rendered* block after message `i` is a tool call.
+    ///
+    /// The render loop skips assistant messages that have no content, so we
+    /// walk past those to find the block that will actually be drawn.
+    fn next_rendered_is_tool(&self, i: usize) -> bool {
+        for j in (i + 1)..self.messages.len() {
+            let m = &self.messages[j];
+            if m.role == "assistant" && self.styled_messages.get(j).is_some_and(Vec::is_empty) {
+                continue;
+            }
+            return m.role == "tool";
+        }
+        false
+    }
+
     fn render_message_block(
         &mut self,
         idx: usize,
@@ -438,6 +458,7 @@ impl TuiApp {
         truncated: bool,
         styled_content: &[Line<'static>],
         lines: &mut Vec<Line<'static>>,
+        compact: bool,
     ) {
         let start_visual = lines.len();
         let state = &mut self.msg_states[idx];
@@ -505,8 +526,12 @@ impl TuiApp {
 
         // Blank line(s) between the end of this message and the next header.
         // Add/remove blank lines here to control the gap.
-        lines.push(Line::from(""));
-        lines.push(Line::from(""));
+        // Consecutive tool calls are grouped tightly (no blank line) so they
+        // don't carry the same visual weight as the main message headers.
+        if !compact {
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+        }
         self.msg_visual_ranges
             .push((idx, start_visual, lines.len(), is_truncated));
     }
@@ -688,6 +713,12 @@ impl TuiApp {
             let truncated = m.truncated;
             let styled_content = self.styled_messages[i].clone();
 
+            // Collapse the gap after this block when it is a tool call and
+            // the next rendered block is also a tool call, so consecutive tool
+            // calls stack tightly while the first tool keeps the normal gap
+            // after the USER/ARCHON header.
+            let compact = m.role == "tool" && self.next_rendered_is_tool(i);
+
             self.render_message_block(
                 i,
                 &header_label,
@@ -695,6 +726,7 @@ impl TuiApp {
                 truncated,
                 &styled_content,
                 &mut lines,
+                compact,
             );
         }
 
@@ -720,6 +752,7 @@ impl TuiApp {
                 false,
                 &styled_stream,
                 &mut lines,
+                false,
             );
         } else if let Some(ref tool_status) = self.active_tool_status {
             let i = self.messages.len();
@@ -732,6 +765,7 @@ impl TuiApp {
                 false,
                 &styled_tool,
                 &mut lines,
+                false,
             );
         }
 
@@ -748,6 +782,7 @@ impl TuiApp {
                 false,
                 &styled_queued,
                 &mut lines,
+                false,
             );
         }
 

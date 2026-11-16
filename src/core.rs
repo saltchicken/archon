@@ -513,7 +513,8 @@ impl CoreEngine {
     ) {
         match source {
             PendingTruncatedSource::ModelTool { tool_name } => {
-                self.complete_tool_result(tool_name, output, truncated).await;
+                self.complete_tool_result(tool_name, output, truncated)
+                    .await;
             }
             PendingTruncatedSource::ManualShell { command } => {
                 self.complete_shell_result(command, output, truncated, true)
@@ -949,36 +950,34 @@ impl CoreEngine {
                         )
                         .await;
                     }
-                    TruncatedToolAction::Discard => {
-                        match pending.source {
-                            PendingTruncatedSource::ModelTool { tool_name } => {
-                                let mut msg = format!(
-                                    "[DISCARDED: Output from '{}' ({} bytes) exceeded the {} byte limit and was discarded by the user. Try a more targeted query or read smaller ranges.]",
-                                    pending.summary,
-                                    pending.raw_bytes,
-                                    self.active_max_tool_output_size
-                                );
-                                if let Some(ref note) = guide_opt {
-                                    msg.push_str(&format!("\n\n[User attached a message]: {note}"));
-                                }
-                                self.complete_tool_result(tool_name, msg, false).await;
+                    TruncatedToolAction::Discard => match pending.source {
+                        PendingTruncatedSource::ModelTool { tool_name } => {
+                            let mut msg = format!(
+                                "[DISCARDED: Output from '{}' ({} bytes) exceeded the {} byte limit and was discarded by the user. Try a more targeted query or read smaller ranges.]",
+                                pending.summary,
+                                pending.raw_bytes,
+                                self.active_max_tool_output_size
+                            );
+                            if let Some(ref note) = guide_opt {
+                                msg.push_str(&format!("\n\n[User attached a message]: {note}"));
                             }
-                            PendingTruncatedSource::ManualShell { .. } => {
-                                info!(
-                                    "Discarded truncated manual shell command output for '{}'",
-                                    pending.summary
-                                );
-                                let _ = self.tx.send(EngineEvent::ToolCompleted {
-                                    output: String::new(),
-                                    full_output: String::new(),
-                                    raw_bytes: 0,
-                                    truncated: false,
-                                });
-                                self.emit_chat();
-                                self.flush_queued_interjections().await;
-                            }
+                            self.complete_tool_result(tool_name, msg, false).await;
                         }
-                    }
+                        PendingTruncatedSource::ManualShell { .. } => {
+                            info!(
+                                "Discarded truncated manual shell command output for '{}'",
+                                pending.summary
+                            );
+                            let _ = self.tx.send(EngineEvent::ToolCompleted {
+                                output: String::new(),
+                                full_output: String::new(),
+                                raw_bytes: 0,
+                                truncated: false,
+                            });
+                            self.emit_chat();
+                            self.flush_queued_interjections().await;
+                        }
+                    },
                     TruncatedToolAction::CondenseTruncated => {
                         self.spawn_tool_condensation(&pending, false, guide_opt);
                         self.pending_truncated = Some(pending);
@@ -1209,14 +1208,9 @@ impl CoreEngine {
                 self.internal_rx = Some(rx);
 
                 self.active_task = Some(tokio::spawn(async move {
-                    let res = tools::run_manual_command(
-                        &parts[0],
-                        &parts[1..],
-                        &cfg,
-                        max_out,
-                        full_cap,
-                    )
-                    .await;
+                    let res =
+                        tools::run_manual_command(&parts[0], &parts[1..], &cfg, max_out, full_cap)
+                            .await;
                     let _ = tx.send(EngineEvent::ShellCommandCompleted {
                         command: cmd_str,
                         output: res.truncated_output,
@@ -1251,8 +1245,7 @@ impl CoreEngine {
                             &self.config,
                         ) {
                             turn.active_skill = Some(skill_name);
-                            turn.skill_args =
-                                (!args_str.is_empty()).then(|| args_str.to_string());
+                            turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
                         }
                         if args_str.is_empty() {
                             trimmed_draft.to_string()
@@ -1391,7 +1384,8 @@ impl CoreEngine {
                     return;
                 }
 
-                self.complete_tool_result(tool_name, output, truncated).await;
+                self.complete_tool_result(tool_name, output, truncated)
+                    .await;
             }
             EngineEvent::ToolCondensed(res) => {
                 self.finish_active_task();

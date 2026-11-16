@@ -394,15 +394,13 @@ impl TuiApp {
             )),
         ]);
 
-        let widget = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                chat_block(format!(
-                    " ⚠ Tool Output Truncated ({}/{}) ",
-                    pending.index, pending.total
-                ))
-                .border_style(Style::default().fg(Color::LightRed)),
-            );
+        let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            chat_block(format!(
+                " ⚠ Tool Output Truncated ({}/{}) ",
+                pending.index, pending.total
+            ))
+            .border_style(Style::default().fg(Color::LightRed)),
+        );
         render_modal_at(f, area, widget);
     }
 
@@ -502,10 +500,14 @@ impl TuiApp {
             );
         f.render_widget(widget, chunks[0]);
 
-        let payload_footer: Vec<Line> = [" [↑/↓/PgUp/PgDn/Home/End] Scroll", " [C] Copy to Clipboard", " [Esc/^G] Close"]
-            .iter()
-            .map(|s| Line::from(Span::styled(*s, Style::default().fg(Color::Yellow))))
-            .collect();
+        let payload_footer: Vec<Line> = [
+            " [↑/↓/PgUp/PgDn/Home/End] Scroll",
+            " [C] Copy to Clipboard",
+            " [Esc/^G] Close",
+        ]
+        .iter()
+        .map(|s| Line::from(Span::styled(*s, Style::default().fg(Color::Yellow))))
+        .collect();
         f.render_widget(Paragraph::new(payload_footer), chunks[1]);
     }
 
