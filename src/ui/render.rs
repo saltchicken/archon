@@ -1,7 +1,7 @@
 use super::{ActiveModal, MsgUiState, SlashCommand, TuiApp, chat_block, titled_block};
 use crate::{
     core::session::{ChatMessage, truncate_str},
-    tools::ToolCall,
+    tools::{self, ToolCall},
 };
 use ratatui::{
     Frame,
@@ -28,6 +28,47 @@ pub(super) fn sanitize_line(s: &str) -> String {
 fn format_tool_call_summary(c: &ToolCall) -> String {
     let args = serde_json::to_string(&c.function.arguments).unwrap_or_default();
     format!("{}({})", c.function.name, truncate_str(&args, 80))
+}
+
+fn format_param_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => truncate_str(&s.replace('\n', "\\n"), 120),
+        serde_json::Value::Array(arr) => {
+            if arr.iter().all(serde_json::Value::is_object) {
+                format!("[{} items]", arr.len())
+            } else {
+                let s = serde_json::to_string(v).unwrap_or_default();
+                truncate_str(&s.replace('\n', "\\n"), 120)
+            }
+        }
+        _ => {
+            let s = serde_json::to_string(v).unwrap_or_default();
+            truncate_str(&s.replace('\n', "\\n"), 120)
+        }
+    }
+}
+
+fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMessage) -> String {
+    let body = sanitize_line(&m.content);
+    let Some(call) = find_associated_tool_call(messages, tool_msg_idx) else {
+        return body;
+    };
+    let Some(obj) = call.function.arguments.as_object().filter(|o| !o.is_empty()) else {
+        return body;
+    };
+
+    let mut param_lines = vec![String::from("Parameters:")];
+    for (k, v) in obj {
+        let val_str = sanitize_line(&format_param_value(v));
+        param_lines.push(format!("  {k}: {val_str}"));
+    }
+    let params_block = param_lines.join("\n");
+
+    if body.trim().is_empty() {
+        params_block
+    } else {
+        format!("{params_block}\n\n{body}")
+    }
 }
 
 pub(super) fn format_assistant_display(m: &ChatMessage, resolved_tool_count: usize) -> String {
@@ -315,6 +356,7 @@ fn style_inline_markdown(line: &str) -> Vec<Span<'static>> {
 fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut in_table_header = false;
+    let mut in_params_block = false;
     let mut out = Vec::with_capacity(content_lines.len());
 
     for line in content_lines {
@@ -322,6 +364,12 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
         let is_fence = trimmed.starts_with("```");
 
         if !in_code_block {
+            if trimmed == "Parameters:" {
+                in_params_block = true;
+            } else if trimmed.is_empty() {
+                in_params_block = false;
+            }
+
             if trimmed.starts_with('┌') {
                 in_table_header = true;
             } else if trimmed.starts_with(['├', '└']) {
@@ -330,6 +378,7 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
         }
 
         let formatted = if is_fence {
+            in_params_block = false;
             vec![
                 Span::raw("  "),
                 Span::styled(
@@ -344,6 +393,15 @@ fn style_lines(content_lines: &[String]) -> Vec<Line<'static>> {
                 Span::styled("  │ ", Style::default().fg(Color::Blue)),
                 Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
             ]
+        } else if in_params_block {
+            let style = if trimmed == "Parameters:" {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            vec![Span::raw("  "), Span::styled(line.clone(), style)]
         } else if trimmed.starts_with('│') && trimmed.ends_with('│') {
             style_table_row(line, in_table_header)
         } else {
@@ -584,6 +642,8 @@ impl TuiApp {
                         .take_while(|n| n.role == "tool")
                         .count();
                     format_assistant_display(m, resolved_count)
+                } else if m.role == "tool" {
+                    format_tool_display(&self.messages, i, m)
                 } else {
                     sanitize_line(&m.content)
                 };
@@ -618,7 +678,9 @@ impl TuiApp {
                 }
                 "tool" => {
                     let summary = find_associated_tool_call(&self.messages, i)
-                        .map_or_else(|| "tool".to_string(), format_tool_call_summary);
+                        .map(tools::call_signature)
+                        .or_else(|| m.tool_name.clone())
+                        .unwrap_or_else(|| "tool".to_string());
                     (sanitize_line(&format!("⚙ TOOL [{summary}]")), Color::Yellow)
                 }
                 _ => ("SYS".to_string(), Color::Gray),
