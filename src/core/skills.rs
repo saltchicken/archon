@@ -1,7 +1,14 @@
-use crate::core::config::{Config, expand_tilde, format_tilde_path};
+use crate::{
+    core::{
+        config::{Config, expand_tilde, format_tilde_path},
+        session::ChatMessage,
+    },
+    tools::{ToolCall, ToolFunction},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -266,8 +273,8 @@ pub fn parse_at_command(raw_prompt: &str) -> Option<(&str, &str)> {
 }
 
 pub fn format_hook_summary(hook: &SkillHook) -> String {
-    let call = crate::tools::ToolCall {
-        function: crate::tools::ToolFunction {
+    let call = ToolCall {
+        function: ToolFunction {
             name: hook.tool.clone(),
             arguments: hook.args.clone(),
         },
@@ -291,6 +298,91 @@ pub fn format_hook_summary(hook: &SkillHook) -> String {
     } else {
         format!("{sig} ({})", kvs.join(", "))
     }
+}
+
+pub fn hook_execution_key(skill_name: &str, idx: usize, hook: &SkillHook) -> String {
+    format!(
+        "{}::{idx}::{}::{}",
+        skill_name.to_ascii_lowercase(),
+        hook.tool,
+        hook.args
+    )
+}
+
+pub fn is_hook_already_in_session(
+    key: &str,
+    summary: &str,
+    executed_hooks: &HashSet<String>,
+    messages: &[ChatMessage],
+) -> bool {
+    executed_hooks.contains(key)
+        || messages
+            .iter()
+            .any(|m| m.role == "hook" && m.tool_name.as_deref() == Some(summary))
+}
+
+pub fn preview_due_hooks(
+    config: &Config,
+    active_skill: Option<&str>,
+    executed_hooks: &HashSet<String>,
+    messages: &[ChatMessage],
+) -> Vec<String> {
+    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
+        return Vec::new();
+    };
+    skill
+        .hooks
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, hook)| {
+            let summary = format_hook_summary(hook);
+            let key = hook_execution_key(&skill.name, idx, hook);
+            let due = match hook.trigger {
+                HookTrigger::OnActivate => {
+                    !is_hook_already_in_session(&key, &summary, executed_hooks, messages)
+                }
+                HookTrigger::EveryTurn => true,
+            };
+            due.then_some(summary)
+        })
+        .collect()
+}
+
+pub fn collect_due_hooks(
+    config: &Config,
+    active_skill: Option<&str>,
+    executed_hooks: &mut HashSet<String>,
+    messages: &[ChatMessage],
+) -> Vec<(String, ToolCall)> {
+    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
+        return Vec::new();
+    };
+    let mut due_hooks = Vec::new();
+    for (idx, hook) in skill.hooks.iter().enumerate() {
+        let summary = format_hook_summary(hook);
+        let key = hook_execution_key(&skill.name, idx, hook);
+        let due = match hook.trigger {
+            HookTrigger::OnActivate => {
+                let already = is_hook_already_in_session(&key, &summary, executed_hooks, messages);
+                executed_hooks.insert(key);
+                !already
+            }
+            HookTrigger::EveryTurn => true,
+        };
+        if due {
+            due_hooks.push((
+                summary,
+                ToolCall {
+                    function: ToolFunction {
+                        name: hook.tool.clone(),
+                        arguments: hook.args.clone(),
+                    },
+                    thought_signature: None,
+                },
+            ));
+        }
+    }
+    due_hooks
 }
 
 pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {

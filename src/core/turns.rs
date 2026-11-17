@@ -1,0 +1,459 @@
+use super::{
+    CoreEngine, EngineEvent, TurnConfig,
+    provider::{self, Provider},
+    session::{ChatMessage, ThoughtPart},
+    skills,
+};
+use crate::tools::{self, ToolCall};
+use std::{collections::VecDeque, sync::Arc};
+use tracing::{debug, error, info, warn};
+
+pub(super) struct QueuedInterjection {
+    pub(super) msg: ChatMessage,
+    pub(super) new_images: Vec<(String, Vec<u8>)>,
+    pub(super) turn: TurnConfig,
+}
+
+impl CoreEngine {
+    pub(super) fn queued_ui_messages(&self) -> Vec<ChatMessage> {
+        self.inflight
+            .queued_interjections
+            .iter()
+            .map(|q| q.msg.with_ui_image_placeholders())
+            .collect()
+    }
+
+    pub(super) fn emit_queued_interjections(&self) {
+        let _ = self.tx.send(EngineEvent::QueuedInterjectionsUpdated(
+            self.queued_ui_messages(),
+        ));
+    }
+
+    pub(super) fn flush_interrupted_stream_buffers(&mut self, tag: &str) -> bool {
+        let text = std::mem::take(&mut self.inflight.stream_buffer);
+        let thought_text = std::mem::take(&mut self.inflight.thought_stream_buffer);
+        let had_text = !text.trim().is_empty();
+        let had_thought = !thought_text.trim().is_empty();
+        if had_text || had_thought {
+            let final_content = if had_text {
+                format!("{text}\n\n*[{tag}]*")
+            } else {
+                format!("*[{tag}]*")
+            };
+            self.session.messages.push(ChatMessage {
+                thoughts: had_thought.then(|| {
+                    vec![ThoughtPart {
+                        text: Some(thought_text),
+                        thought_signature: None,
+                    }]
+                }),
+                ..ChatMessage::new("assistant", final_content)
+            });
+        }
+        had_text || had_thought
+    }
+
+    pub(super) async fn flush_queued_interjections(&mut self) -> bool {
+        if self.inflight.queued_interjections.is_empty() {
+            return false;
+        }
+        let skipped = self.close_unresolved_tool_calls(
+            "Skipped remaining tool call to process user interjection.",
+        );
+        if skipped > 0 {
+            info!("Skipped {skipped} remaining tool call(s) due to queued user interjection");
+        }
+        if self
+            .inflight
+            .queued_interjections
+            .iter()
+            .any(|i| i.turn.active_skill.is_some())
+        {
+            self.refresh_skills();
+        }
+        let mut new_images = Vec::new();
+        let mut has_valid_prompt = false;
+        for item in std::mem::take(&mut self.inflight.queued_interjections) {
+            if let Some(ref skill_name) = item.turn.active_skill
+                && let Err(reason) =
+                    skills::check_skill_activation(skill_name, item.turn.enable_tools, &self.config)
+            {
+                warn!("{reason}");
+                self.session
+                    .messages
+                    .push(ChatMessage::new("error", reason));
+                continue;
+            }
+            self.turn = item.turn;
+            self.session.messages.push(item.msg);
+            new_images.extend(item.new_images);
+            has_valid_prompt = true;
+        }
+        self.save_and_emit_chat(new_images).await;
+        if has_valid_prompt {
+            let turn = self.turn.clone();
+            self.start_user_turn(&turn).await;
+        }
+        true
+    }
+
+    pub(super) async fn start_user_turn(&mut self, turn: &TurnConfig) {
+        let hooks = skills::collect_due_hooks(
+            &self.config,
+            turn.active_skill.as_deref(),
+            &mut self.session.executed_skill_hooks,
+            &self.session.messages,
+        );
+        if hooks.is_empty() {
+            self.spawn_model_turn(turn).await;
+            return;
+        }
+
+        let total = hooks.len();
+        info!("Running {total} pre-turn skill hook(s) before model stream");
+        self.inflight.executing_tool = true;
+        let cfg = self.config.clone();
+        let active_skill = turn.active_skill.clone();
+        let max_out = self.active_max_tool_output_size;
+        let full_cap = self.context_padded_capture_limit();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.inflight.internal_rx = Some(rx);
+
+        self.inflight.active_task = Some(tokio::spawn(async move {
+            for (idx, (summary, call)) in hooks.into_iter().enumerate() {
+                let _ = tx.send(EngineEvent::ToolStarted {
+                    summary: format!("hook: {summary}"),
+                    index: idx + 1,
+                    total,
+                });
+                let res =
+                    tools::execute_hook(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
+                        .await;
+                let _ = tx.send(EngineEvent::HookCompleted {
+                    tool_name: call.function.name,
+                    summary,
+                    output: res.truncated_output,
+                    truncated: res.truncated,
+                });
+            }
+            let _ = tx.send(EngineEvent::HooksFinished);
+        }));
+    }
+
+    pub(super) async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
+        self.inflight.stream_buffer.clear();
+        self.inflight.thought_stream_buffer.clear();
+        self.flush_save_task().await;
+
+        let sessions = Arc::clone(&self.sessions);
+        let session_id = self.session.id.clone();
+
+        // Clone lightweight messages (without Base64 payloads) and hydrate Base64
+        // strings directly from the SQLite database into the transient `hydrated_msgs`.
+        let mut msgs = self.session.messages.clone();
+        let hydrated_msgs = tokio::task::spawn_blocking(move || {
+            for msg in &mut msgs {
+                let Some(names) = &msg.image_names else {
+                    continue;
+                };
+                let b64s = sessions.load_images_base64(&session_id, names);
+                if !b64s.is_empty() {
+                    msg.images = Some(b64s);
+                }
+            }
+            msgs
+        })
+        .await
+        .unwrap_or_else(|_| self.session.messages.clone());
+
+        let _ = self.tx.send(EngineEvent::StreamStarted);
+        let provider = self.provider;
+        let client = self.client.clone();
+        let model = self.model.clone();
+        let config = self.config.clone();
+        let turn_cfg = turn.clone();
+        let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.inflight.internal_rx = Some(internal_rx);
+
+        self.inflight.active_task = Some(tokio::spawn(async move {
+            provider
+                .stream_turn(client, model, config, hydrated_msgs, turn_cfg, internal_tx)
+                .await;
+        }));
+    }
+
+    pub(super) async fn handle_send_prompt(&mut self, prompt: String, mut turn: TurnConfig) {
+        if turn.active_skill.is_some() {
+            self.refresh_skills();
+        }
+        if let Some(ref skill_name) = turn.active_skill
+            && let Err(reason) =
+                skills::check_skill_activation(skill_name, turn.enable_tools, &self.config)
+        {
+            warn!("{reason}");
+            self.emit_error(reason).await;
+            return;
+        }
+        if let Some(ref skill_name) = turn.active_skill
+            && let Some(skill) = skills::find_skill(&self.config, skill_name)
+        {
+            turn.active_skill = Some(skill.name.clone());
+        }
+
+        info!(
+            "User submitted prompt. Enable tools: {}, Active skill: {:?}",
+            turn.enable_tools, turn.active_skill
+        );
+        debug!("Prompt content: {}", prompt.replace('\n', " "));
+
+        let (image_names, new_image_blobs) = self.collect_unsent_images().await;
+        let user_msg = ChatMessage {
+            images: None,
+            image_names,
+            ..ChatMessage::new("user", prompt)
+        };
+
+        // If a model stream or a tool execution is currently in flight, queue the
+        // interjection so the active process finishes cleanly before reading it.
+        if self.is_turn_active() {
+            info!(
+                "Queuing user interjection while process is active (executing_tool: {})",
+                self.inflight.executing_tool
+            );
+            self.inflight.queued_interjections.push(QueuedInterjection {
+                msg: user_msg,
+                new_images: new_image_blobs,
+                turn,
+            });
+            self.emit_queued_interjections();
+            return;
+        }
+
+        let skipped = self
+            .close_unresolved_tool_calls("The user skipped this tool call and sent a new message.");
+        if skipped > 0 {
+            warn!("Auto-declined {skipped} unresolved tool call(s) before new prompt");
+        }
+
+        self.turn = turn.clone();
+        self.session.messages.push(user_msg);
+
+        self.save_and_emit_chat(new_image_blobs).await;
+        self.start_user_turn(&turn).await;
+    }
+
+    pub(super) async fn handle_cancel_stream(&mut self) {
+        let (had_task, was_tool) = self.finish_active_task();
+        if !had_task
+            && self.inflight.pending_truncated.is_none()
+            && self.inflight.pending_tools.is_empty()
+            && self.inflight.queued_interjections.is_empty()
+        {
+            return;
+        }
+
+        info!("User interrupted active turn (was_tool: {was_tool})");
+        let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
+        let closed = self.close_unresolved_tool_calls("Cancelled by user.");
+
+        if self.flush_queued_interjections().await {
+            return;
+        }
+
+        if flushed || closed > 0 {
+            self.save_session_bg(Vec::new()).await;
+        }
+        self.emit_chat();
+    }
+
+    pub(super) async fn handle_switch_model(
+        &mut self,
+        model: String,
+        num_ctx: u32,
+        max_tool_output_size: usize,
+    ) {
+        if self.is_turn_active()
+            || self.inflight.pending_truncated.is_some()
+            || !self.inflight.pending_tools.is_empty()
+            || !self.inflight.queued_interjections.is_empty()
+        {
+            self.emit_error("Cannot switch models while a turn or tool approval is active.")
+                .await;
+            return;
+        }
+
+        let new_provider = Provider::from_model(&model);
+        info!(
+            "Hot-swapping to model '{}' ({:?}, ctx: {}, tool_max: {})",
+            model, new_provider, num_ctx, max_tool_output_size
+        );
+
+        if let Err(e) = new_provider.run_preflight(&model, &self.config).await {
+            let msg = format!("Model switch to '{model}' failed preflight: {e}");
+            error!("{msg}");
+            self.emit_error(msg).await;
+            return;
+        }
+
+        let new_client = match new_provider.build_client(&self.config) {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = format!("Failed to build HTTP client for '{model}': {e}");
+                error!("{msg}");
+                self.emit_error(msg).await;
+                return;
+            }
+        };
+
+        self.model = model;
+        self.provider = new_provider;
+        self.client = new_client;
+        self.turn.num_ctx = num_ctx.max(512);
+        self.active_max_tool_output_size = max_tool_output_size.max(1024);
+
+        self.save_session_bg(Vec::new()).await;
+        self.emit_model_config();
+    }
+
+    pub(super) fn handle_inspect_payload(&mut self, draft_prompt: String, mut turn: TurnConfig) {
+        let mut preview_msgs = self
+            .session
+            .messages
+            .iter()
+            .map(ChatMessage::with_ui_image_placeholders)
+            .collect::<Vec<_>>();
+
+        let trimmed_draft = draft_prompt.trim();
+        let effective_draft = if !trimmed_draft.is_empty()
+            && !trimmed_draft.starts_with('/')
+            && !trimmed_draft.starts_with('!')
+        {
+            let user_content =
+                if let Some((cmd_token, args_str)) = skills::parse_at_command(trimmed_draft) {
+                    self.refresh_skills();
+                    if let Ok(skill_name) =
+                        skills::check_skill_activation(cmd_token, turn.enable_tools, &self.config)
+                    {
+                        turn.active_skill = Some(skill_name);
+                        turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
+                    }
+                    if args_str.is_empty() {
+                        trimmed_draft.to_string()
+                    } else {
+                        args_str.to_string()
+                    }
+                } else {
+                    trimmed_draft.to_string()
+                };
+            preview_msgs.push(ChatMessage::new("user", user_content.clone()));
+            for summary in skills::preview_due_hooks(
+                &self.config,
+                turn.active_skill.as_deref(),
+                &self.session.executed_skill_hooks,
+                &self.session.messages,
+            ) {
+                preview_msgs.push(ChatMessage::new_hook(
+                    summary,
+                    "[Hook will execute automatically before turn is sent]",
+                    false,
+                ));
+            }
+            Some(user_content)
+        } else {
+            None
+        };
+
+        let (effective_sys, sanitized_msgs, payload) =
+            self.provider
+                .build_turn_payload(&self.model, &self.config, preview_msgs, &turn);
+        let formatted = provider::format_payload_inspection(
+            self.provider,
+            &self.model,
+            &turn,
+            &effective_sys,
+            &sanitized_msgs,
+            &payload,
+            effective_draft.as_deref(),
+        );
+        let _ = self.tx.send(EngineEvent::PayloadInspectorOpened(formatted));
+    }
+
+    pub(super) async fn on_stream_done(
+        &mut self,
+        ev: EngineEvent,
+        prompt_tokens: u64,
+        eval_tokens: u64,
+        tool_calls: Vec<ToolCall>,
+        thoughts: Vec<ThoughtPart>,
+    ) {
+        self.finish_active_task();
+        let final_text = std::mem::take(&mut self.inflight.stream_buffer);
+        self.inflight.thought_stream_buffer.clear();
+
+        if !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty() {
+            self.session.messages.push(ChatMessage {
+                tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
+                thoughts: (!thoughts.is_empty()).then_some(thoughts),
+                ..ChatMessage::new("assistant", final_text)
+            });
+            self.save_and_emit_chat(Vec::new()).await;
+        } else {
+            warn!(
+                "Stream finished with empty content and no tool calls (Prompt: {prompt_tokens}, Eval: {eval_tokens})"
+            );
+            self.session.messages.push(ChatMessage::new(
+                "error",
+                "Model returned an empty response (no content or tool calls).",
+            ));
+            self.save_and_emit_chat(Vec::new()).await;
+        }
+
+        let _ = self.tx.send(ev);
+        if !tool_calls.is_empty() {
+            self.inflight.pending_tools = VecDeque::from(tool_calls);
+            self.process_pending_tools().await;
+        } else {
+            self.flush_queued_interjections().await;
+        }
+    }
+
+    pub(super) async fn on_stream_error(&mut self, ev: EngineEvent, err: String) {
+        self.finish_active_task();
+        self.flush_interrupted_stream_buffers("Stream interrupted");
+        error!("API Error: {err}");
+        self.session.messages.push(ChatMessage::new("error", err));
+        self.save_session_bg(Vec::new()).await;
+        let _ = self.tx.send(ev);
+        self.flush_queued_interjections().await;
+    }
+
+    pub(super) async fn on_hook_completed(
+        &mut self,
+        tool_name: String,
+        summary: String,
+        output: String,
+        truncated: bool,
+    ) {
+        self.sync_tool_side_effects(&tool_name);
+        info!("Skill hook '{summary}' completed (truncated: {truncated})");
+        self.session
+            .messages
+            .push(ChatMessage::new_hook(summary, output, truncated));
+        self.save_and_emit_chat(Vec::new()).await;
+    }
+
+    pub(super) async fn on_hooks_finished(&mut self) {
+        self.finish_active_task();
+        let _ = self.tx.send(EngineEvent::ToolCompleted {
+            output: String::new(),
+            full_output: String::new(),
+            raw_bytes: 0,
+            truncated: false,
+        });
+        if self.flush_queued_interjections().await {
+            return;
+        }
+        let turn = self.turn.clone();
+        self.spawn_model_turn(&turn).await;
+    }
+}

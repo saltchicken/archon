@@ -114,6 +114,20 @@ impl ChatMessage {
     }
 }
 
+pub const FORK_TITLE_PREFIX: &str = "󰘬 ";
+
+pub fn strip_fork_prefix(title: &str) -> &str {
+    title.strip_prefix(FORK_TITLE_PREFIX).unwrap_or(title)
+}
+
+pub fn default_title_for_messages(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .find(|m| m.role == "user" && !m.content.trim().is_empty())
+        .and_then(|m| m.content.lines().next())
+        .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub id: String,
@@ -125,6 +139,19 @@ pub struct SessionData {
     #[serde(default)]
     pub pinned: bool,
     pub messages: Vec<ChatMessage>,
+}
+
+impl SessionData {
+    pub fn is_fork(&self) -> bool {
+        self.title.starts_with(FORK_TITLE_PREFIX)
+    }
+
+    pub fn custom_title(&self) -> Option<String> {
+        let raw_title = strip_fork_prefix(&self.title);
+        let default_title = default_title_for_messages(&self.messages);
+        (raw_title != default_title && raw_title != "Untitled Session")
+            .then(|| raw_title.to_string())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,15 +283,9 @@ impl SessionManager {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| truncate_str(s, 50))
-            .unwrap_or_else(|| {
-                clean_msgs
-                    .iter()
-                    .find(|m| m.role == "user" && !m.content.trim().is_empty())
-                    .and_then(|m| m.content.lines().next())
-                    .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50))
-            });
+            .unwrap_or_else(|| default_title_for_messages(&clean_msgs));
         let title = if is_fork {
-            format!("󰘬 {base_title}")
+            format!("{FORK_TITLE_PREFIX}{base_title}")
         } else {
             base_title
         };
