@@ -1,5 +1,12 @@
-use super::{SessionView, TuiApp, chat_block, render::sanitize_line, titled_block};
-use crate::core::config::MemoryScope;
+use super::{
+    ActiveModal, SessionView, TuiApp, chat_block, create_memory_area, render::sanitize_line,
+    titled_block,
+};
+use crate::core::{
+    EngineCommand, TruncatedToolAction,
+    config::{Memory, MemoryScope, global_memory_path, load_scoped_memory_file},
+    session::SessionSummary,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -126,6 +133,128 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
 }
 
 impl TuiApp {
+    pub(super) fn filtered_sessions(&self) -> Vec<&SessionSummary> {
+        let want_pinned = self.session_view == SessionView::Pinned;
+        self.sessions
+            .iter()
+            .filter(|s| s.pinned == want_pinned)
+            .collect()
+    }
+
+    pub(super) fn toggle_session_view(&mut self) {
+        self.session_view = self.session_view.toggle();
+        let filtered = self.filtered_sessions();
+        self.session_idx = filtered
+            .iter()
+            .position(|s| !self.session_id.is_empty() && s.id == self.session_id)
+            .unwrap_or(0);
+    }
+
+    pub(super) fn commit_active_memory_scope_draft(&mut self) {
+        let raw_text = self.memory_area.lines().join("\n");
+        let mem = Memory::from_editor_text(&raw_text, self.memory_enabled_draft);
+        match self.memory_scope {
+            MemoryScope::Global => self.global_memory_draft = mem,
+            MemoryScope::Workspace => self.workspace_memory_draft = mem,
+        }
+    }
+
+    pub(super) fn load_active_memory_scope_draft(&mut self) {
+        let draft = match self.memory_scope {
+            MemoryScope::Global => &self.global_memory_draft,
+            MemoryScope::Workspace => &self.workspace_memory_draft,
+        };
+        self.memory_area = create_memory_area(self.memory_scope, &draft.to_editor_text());
+        self.memory_enabled_draft = draft.enabled;
+    }
+
+    pub(super) fn toggle_memory_scope(&mut self) {
+        self.commit_active_memory_scope_draft();
+        self.memory_scope = self.memory_scope.toggle();
+        self.load_active_memory_scope_draft();
+    }
+
+    pub(super) fn save_memory_modal(&mut self) {
+        self.commit_active_memory_scope_draft();
+        self.modal = ActiveModal::None;
+
+        let active_scope = self.memory_scope;
+        let inactive_scope = active_scope.toggle();
+
+        let inactive_draft = match inactive_scope {
+            MemoryScope::Global => self.global_memory_draft.clone(),
+            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
+        };
+        if &inactive_draft != self.config.scoped_memory(inactive_scope) {
+            self.config
+                .set_scoped_memory(inactive_scope, inactive_draft.clone());
+            let _ = self.cmd_tx.send(EngineCommand::SetMemory {
+                scope: inactive_scope,
+                memory: inactive_draft,
+            });
+        }
+
+        let active_draft = match active_scope {
+            MemoryScope::Global => self.global_memory_draft.clone(),
+            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
+        };
+        self.config
+            .set_scoped_memory(active_scope, active_draft.clone());
+        let _ = self.cmd_tx.send(EngineCommand::SetMemory {
+            scope: active_scope,
+            memory: active_draft,
+        });
+    }
+
+    pub(super) fn open_memory_modal(&mut self) {
+        let global_mem = load_scoped_memory_file(&global_memory_path(), true)
+            .map(|(_, m)| m)
+            .unwrap_or_else(|_| self.config.global_memory.clone());
+        let ws_mem = load_scoped_memory_file(&self.config.workspace_memory_path(), false)
+            .map(|(_, m)| m)
+            .unwrap_or_else(|_| self.config.workspace_memory.clone());
+
+        self.config.global_memory = global_mem.clone();
+        self.config.workspace_memory = ws_mem.clone();
+        self.global_memory_draft = global_mem;
+        self.workspace_memory_draft = ws_mem;
+        self.load_active_memory_scope_draft();
+        self.modal = ActiveModal::Memory;
+    }
+
+    pub(super) fn request_payload_inspector(&mut self) {
+        let draft_prompt = self.text_area.lines().join("\n");
+        let _ = self.cmd_tx.send(EngineCommand::InspectPayload {
+            draft_prompt,
+            turn: self.current_turn_config(),
+        });
+    }
+
+    pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {
+        if self.pending_tool.take().is_some() {
+            self.modal = ActiveModal::None;
+            self.follow_tail = true;
+            let _ = self.cmd_tx.send(EngineCommand::ResolveTool {
+                approved,
+                always_approve,
+                feedback: std::mem::take(&mut self.tool_feedback),
+                turn: self.current_turn_config(),
+            });
+        }
+    }
+
+    pub(super) fn resolve_truncated_modal(&mut self, action: TruncatedToolAction) {
+        if self.pending_truncated.take().is_some() {
+            self.modal = ActiveModal::None;
+            self.follow_tail = true;
+            let _ = self.cmd_tx.send(EngineCommand::ResolveTruncatedTool {
+                action,
+                guide_prompt: std::mem::take(&mut self.truncated_guide_prompt),
+                turn: self.current_turn_config(),
+            });
+        }
+    }
+
     pub(super) fn draw_file_modal(&self, f: &mut Frame) {
         let widget = Paragraph::new(format!(
             "Press ⏎ or drag-and-drop image path:\n\n> {}\n\n[⏎] Import\n[Esc] Cancel",
