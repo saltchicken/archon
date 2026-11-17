@@ -2,7 +2,7 @@
 name = "coder"
 description = "Software engineering and refactoring mode"
 command = "coder"
-tools = ["repo_map", "read_file", "edit_file", "cargo"]
+tools = ["repo_map", "read_file", "edit_file", "cargo", "create_file", "search"]
 
 [[hooks]]
 trigger = "on_activate"
