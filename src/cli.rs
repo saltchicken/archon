@@ -389,7 +389,7 @@ async fn prompt_tool_approval_tty(
 
         let _ = write!(
             stderr,
-            "\x1b[33mApprove? [y]es / [a]lways / [n]o / [c]ancel (optional `: <feedback>`): \x1b[0m"
+            "\x1b[33mApprove? [↵]/y]es / [a]lways / [n]o / [c]ancel (optional `: <feedback>`): \x1b[0m"
         );
         let _ = stderr.flush();
 
@@ -410,7 +410,7 @@ async fn prompt_tool_approval_tty(
         };
 
         match choice.as_str() {
-            "y" | "yes" => TtyApprovalDecision::Resolve {
+            "" | "y" | "yes" => TtyApprovalDecision::Resolve {
                 approved: true,
                 always_approve: false,
                 feedback,
