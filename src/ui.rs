@@ -88,6 +88,7 @@ pub(super) enum SlashCommand {
     Fork,
     Inspect,
     Memory,
+    Rename,
     Reset,
     Run,
 }
@@ -98,6 +99,7 @@ impl SlashCommand {
         ("fork", Self::Fork),
         ("inspect", Self::Inspect),
         ("memory", Self::Memory),
+        ("rename", Self::Rename),
         ("reset", Self::Reset),
         ("run", Self::Run),
     ];
@@ -1147,6 +1149,17 @@ impl TuiApp {
                     let _ = self
                         .cmd_tx
                         .send(EngineCommand::SetMemory { scope, memory: mem });
+                    return false;
+                }
+                Some(SlashCommand::Rename) => {
+                    self.record_prompt_and_clear(&raw_prompt);
+                    if args.is_empty() {
+                        self.push_error_message("Usage: /rename <new_title>".into());
+                    } else {
+                        let _ = self
+                            .cmd_tx
+                            .send(EngineCommand::RenameSession(args.to_string()));
+                    }
                     return false;
                 }
                 Some(_) if !args.is_empty() => return false,

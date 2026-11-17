@@ -213,6 +213,7 @@ impl SessionManager {
     pub fn save(
         &self,
         id: &str,
+        custom_title: Option<&str>,
         model: &str,
         system_prompt: &str,
         num_ctx: u32,
@@ -220,7 +221,7 @@ impl SessionManager {
         new_images: &[(String, Vec<u8>)],
         is_fork: bool,
     ) -> Result<()> {
-        if messages.is_empty() && new_images.is_empty() {
+        if messages.is_empty() && new_images.is_empty() && custom_title.is_none() {
             return Ok(());
         }
 
@@ -231,11 +232,17 @@ impl SessionManager {
                 ..m.clone()
             })
             .collect();
-        let base_title = clean_msgs
-            .iter()
-            .find(|m| m.role == "user" && !m.content.trim().is_empty())
-            .and_then(|m| m.content.lines().next())
-            .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50));
+        let base_title = custom_title
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| truncate_str(s, 50))
+            .unwrap_or_else(|| {
+                clean_msgs
+                    .iter()
+                    .find(|m| m.role == "user" && !m.content.trim().is_empty())
+                    .and_then(|m| m.content.lines().next())
+                    .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50))
+            });
         let title = if is_fork {
             format!("󰘬 {base_title}")
         } else {

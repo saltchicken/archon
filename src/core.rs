@@ -66,6 +66,7 @@ pub enum EngineCommand {
     },
     LoadSession(String),
     ForkSession(usize),
+    RenameSession(String),
     DeleteSession(String),
     RefreshSessions,
     ResetChat,
@@ -200,6 +201,7 @@ pub struct CoreEngine {
     sessions: Arc<SessionManager>,
     session_id: String,
     session_is_fork: bool,
+    session_custom_title: Option<String>,
     turn: TurnConfig,
     active_max_tool_output_size: usize,
     session_auto_approve: HashSet<String>,
@@ -245,6 +247,7 @@ impl CoreEngine {
             sessions,
             session_id: SessionManager::new_id(),
             session_is_fork: false,
+            session_custom_title: None,
             turn: TurnConfig {
                 system_prompt: String::new(),
                 num_ctx,
@@ -1073,6 +1076,19 @@ impl CoreEngine {
                         self.sent_images.extend(restored_staging_paths);
                         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
+                        let raw_title = data.title.strip_prefix("󰘬 ").unwrap_or(&data.title);
+                        let default_title = data
+                            .messages
+                            .iter()
+                            .find(|m| m.role == "user" && !m.content.trim().is_empty())
+                            .and_then(|m| m.content.lines().next())
+                            .map_or_else(
+                                || String::from("Untitled Session"),
+                                |line| session::truncate_str(line, 50),
+                            );
+                        self.session_custom_title = (raw_title != default_title
+                            && raw_title != "Untitled Session")
+                            .then(|| raw_title.to_string());
                         self.session_id = data.id;
                         self.session_is_fork = data.title.starts_with("󰘬 ");
                         self.turn.system_prompt = data.system_prompt;
@@ -1184,6 +1200,20 @@ impl CoreEngine {
                 let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
                 self.save_and_emit_chat(image_blobs).await;
             }
+            EngineCommand::RenameSession(new_title) => {
+                let trimmed = new_title.trim().strip_prefix("󰘬 ").map_or_else(
+                    || new_title.trim(),
+                    str::trim,
+                );
+                if trimmed.is_empty() {
+                    self.emit_error("Session title cannot be empty.").await;
+                    return;
+                }
+                info!("Renaming session {} to '{trimmed}'", self.session_id);
+                self.session_custom_title = Some(trimmed.to_string());
+                self.save_session_bg(Vec::new()).await;
+                self.emit_sessions(None).await;
+            }
             EngineCommand::DeleteSession(session_id) => {
                 info!("Deleting session: {session_id}");
                 self.emit_sessions(Some(session_id)).await;
@@ -1196,6 +1226,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_is_fork = false;
+                self.session_custom_title = None;
                 self.session_auto_approve.clear();
                 self.executed_skill_hooks.clear();
                 self.reset_skill_and_sync_model_limits();
@@ -1657,13 +1688,23 @@ impl CoreEngine {
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
         let is_fork = self.session_is_fork;
+        let custom_title = self.session_custom_title.clone();
         let model = self.model.clone();
         let sys = self.turn.system_prompt.clone();
         let ctx = self.turn.num_ctx;
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images, is_fork) {
+            if let Err(e) = sessions.save(
+                &id,
+                custom_title.as_deref(),
+                &model,
+                &sys,
+                ctx,
+                &msgs,
+                &new_images,
+                is_fork,
+            ) {
                 error!("Failed to save session {id}: {e}");
             }
         }));
