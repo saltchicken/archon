@@ -35,7 +35,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, Padding},
 };
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 use std::{io, time::Duration};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
@@ -262,6 +262,7 @@ fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
     ta.set_block(titled_block(title).border_style(Style::default().fg(Color::Cyan)));
     ta.set_cursor_line_style(Style::default());
     ta.set_cursor_style(cursor_style(true));
+    ta.set_wrap_mode(WrapMode::WordOrGlyph);
     ta
 }
 
