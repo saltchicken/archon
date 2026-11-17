@@ -76,9 +76,8 @@ impl TuiApp {
                 self.active_tool_status = Some(format!("⚙ {summary}{progress} ..."));
                 self.scroll_to_bottom();
             }
-            EngineEvent::ToolCompleted { .. }
-            | EngineEvent::ShellCommandCompleted { .. }
-            | EngineEvent::ManualToolCompleted { .. }
+            EngineEvent::ToolCompleted
+            | EngineEvent::ToolExecFinished(..)
             | EngineEvent::HookCompleted { .. }
             | EngineEvent::HooksFinished => {
                 self.active_tool_status = None;
@@ -226,14 +225,16 @@ impl TuiApp {
         let total_slots = self.messages.len() + 1 + self.queued_messages.len();
         self.msg_states.resize(total_slots, MsgUiState::default());
 
-        if is_reset_or_reload {
-            for (i, m) in self.messages.iter().enumerate() {
-                if matches!(m.role.as_str(), "tool" | "hook") {
-                    self.msg_states[i].collapsed = true;
-                } else if m.role == "error" {
-                    self.msg_states[i].unfolded = true;
-                }
+        for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
+            if matches!(m.role.as_str(), "tool" | "hook") {
+                self.msg_states[i].collapsed = true;
+            } else if m.role == "error"
+                || (!is_reset_or_reload && matches!(m.role.as_str(), "assistant" | "local"))
+            {
+                self.msg_states[i].unfolded = true;
             }
+        }
+        if is_reset_or_reload {
             if let Some(last_idx) = self
                 .messages
                 .iter()
@@ -242,16 +243,7 @@ impl TuiApp {
                 self.msg_states[last_idx].unfolded = true;
             }
             self.scroll_to_bottom();
-        } else {
-            for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
-                if matches!(m.role.as_str(), "tool" | "hook") {
-                    self.msg_states[i].collapsed = true;
-                } else if matches!(m.role.as_str(), "assistant" | "local" | "error") {
-                    self.msg_states[i].unfolded = true;
-                }
-            }
-        }
-        if self.messages.last().is_some_and(|m| m.role == "error") {
+        } else if self.messages.last().is_some_and(|m| m.role == "error") {
             self.scroll_to_bottom();
         }
     }

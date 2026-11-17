@@ -142,24 +142,28 @@ impl CoreEngine {
         let staging = Arc::clone(&self.attachments);
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let mut data = sessions.load(&session_id)?;
-            let mut all_image_names = Vec::new();
-
             for msg in &mut data.messages {
                 msg.images = None;
-                if let Some(names) = &msg.image_names {
-                    all_image_names.extend(names.iter().cloned());
-                }
             }
+            let all_image_names: Vec<String> = data
+                .messages
+                .iter()
+                .filter_map(|m| m.image_names.as_ref())
+                .flatten()
+                .cloned()
+                .collect();
 
             let image_blobs = sessions.load_images(&data.id, &all_image_names);
             let restored_paths = staging.restore_from_bytes(&image_blobs);
             let attachments = staging.list_attachments();
             Ok((data, restored_paths, attachments))
         })
-        .await;
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
 
         match res {
-            Ok(Ok((data, restored_staging_paths, attachments))) => {
+            Ok((data, restored_staging_paths, attachments)) => {
                 self.abort_active_state();
                 self.session.executed_skill_hooks.clear();
                 self.session.sent_images.extend(restored_staging_paths);
@@ -208,13 +212,8 @@ impl CoreEngine {
                     self.process_pending_tools().await;
                 }
             }
-            Ok(Err(e)) => {
-                let msg = format!("Failed to load session: {e}");
-                error!("{msg}");
-                self.emit_error(msg).await;
-            }
             Err(e) => {
-                let msg = format!("Session load task panicked: {e}");
+                let msg = format!("Failed to load session: {e}");
                 error!("{msg}");
                 self.emit_error(msg).await;
             }
@@ -257,12 +256,14 @@ impl CoreEngine {
         self.session.is_fork = true;
         self.session.is_pinned = false;
 
-        let mut all_image_names = Vec::new();
-        for msg in &self.session.messages {
-            if let Some(names) = &msg.image_names {
-                all_image_names.extend(names.iter().cloned());
-            }
-        }
+        let all_image_names: Vec<String> = self
+            .session
+            .messages
+            .iter()
+            .filter_map(|m| m.image_names.as_ref())
+            .flatten()
+            .cloned()
+            .collect();
 
         let sessions = Arc::clone(&self.sessions);
         let staging = Arc::clone(&self.attachments);
@@ -311,18 +312,15 @@ impl CoreEngine {
                 info!("Toggled pin state for session {target_id}: {new_state}");
                 Ok(sessions.list())
             })
-            .await;
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
             match list_res {
-                Ok(Ok(list)) => {
+                Ok(list) => {
                     let _ = self.tx.send(EngineEvent::SessionsListed(list));
                 }
-                Ok(Err(e)) => {
-                    let msg = format!("Failed to toggle session pin: {e}");
-                    error!("{msg}");
-                    self.emit_error(msg).await;
-                }
                 Err(e) => {
-                    let msg = format!("Session pin task panicked: {e}");
+                    let msg = format!("Failed to toggle session pin: {e}");
                     error!("{msg}");
                     self.emit_error(msg).await;
                 }
@@ -368,10 +366,12 @@ impl CoreEngine {
         let save_res = tokio::task::spawn_blocking(move || {
             config::save_scoped_memory(scope, ws_dir.as_deref(), &mem_to_save)
         })
-        .await;
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
 
         match save_res {
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 let (global_memory, workspace_memory) = config::reload_memories(&self.config);
                 self.config.global_memory = global_memory.clone();
                 self.config.workspace_memory = workspace_memory.clone();
@@ -380,12 +380,8 @@ impl CoreEngine {
                     workspace_memory,
                 });
             }
-            Ok(Err(e)) => {
-                error!("Failed to persist Memory: {e}");
-                self.config.set_scoped_memory(scope, memory);
-            }
             Err(e) => {
-                error!("Memory save task panicked: {e}");
+                error!("Failed to persist Memory: {e}");
                 self.config.set_scoped_memory(scope, memory);
             }
         }

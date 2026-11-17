@@ -150,6 +150,13 @@ impl TuiApp {
             .unwrap_or(0);
     }
 
+    fn memory_draft(&self, scope: MemoryScope) -> &Memory {
+        match scope {
+            MemoryScope::Global => &self.global_memory_draft,
+            MemoryScope::Workspace => &self.workspace_memory_draft,
+        }
+    }
+
     pub(super) fn commit_active_memory_scope_draft(&mut self) {
         let raw_text = self.memory_area.lines().join("\n");
         let mem = Memory::from_editor_text(&raw_text, self.memory_enabled_draft);
@@ -160,12 +167,10 @@ impl TuiApp {
     }
 
     pub(super) fn load_active_memory_scope_draft(&mut self) {
-        let draft = match self.memory_scope {
-            MemoryScope::Global => &self.global_memory_draft,
-            MemoryScope::Workspace => &self.workspace_memory_draft,
-        };
-        self.memory_area = create_memory_area(self.memory_scope, &draft.to_editor_text());
+        let draft = self.memory_draft(self.memory_scope);
+        let text = draft.to_editor_text();
         self.memory_enabled_draft = draft.enabled;
+        self.memory_area = create_memory_area(self.memory_scope, &text);
     }
 
     pub(super) fn toggle_memory_scope(&mut self) {
@@ -181,29 +186,16 @@ impl TuiApp {
         let active_scope = self.memory_scope;
         let inactive_scope = active_scope.toggle();
 
-        let inactive_draft = match inactive_scope {
-            MemoryScope::Global => self.global_memory_draft.clone(),
-            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
-        };
-        if &inactive_draft != self.config.scoped_memory(inactive_scope) {
-            self.config
-                .set_scoped_memory(inactive_scope, inactive_draft.clone());
-            let _ = self.cmd_tx.send(EngineCommand::SetMemory {
-                scope: inactive_scope,
-                memory: inactive_draft,
-            });
+        for (scope, force_save) in [(inactive_scope, false), (active_scope, true)] {
+            let draft = self.memory_draft(scope).clone();
+            if force_save || &draft != self.config.scoped_memory(scope) {
+                self.config.set_scoped_memory(scope, draft.clone());
+                let _ = self.cmd_tx.send(EngineCommand::SetMemory {
+                    scope,
+                    memory: draft,
+                });
+            }
         }
-
-        let active_draft = match active_scope {
-            MemoryScope::Global => self.global_memory_draft.clone(),
-            MemoryScope::Workspace => self.workspace_memory_draft.clone(),
-        };
-        self.config
-            .set_scoped_memory(active_scope, active_draft.clone());
-        let _ = self.cmd_tx.send(EngineCommand::SetMemory {
-            scope: active_scope,
-            memory: active_draft,
-        });
     }
 
     pub(super) fn open_memory_modal(&mut self) {
@@ -528,41 +520,36 @@ impl TuiApp {
         lines.push(Line::from(preview_header));
 
         if !pending.collapsed {
-            if total_content > max_lines {
-                let max_scroll = total_content.saturating_sub(max_lines);
-                pending.scroll = pending.scroll.min(max_scroll);
-                let start = pending.scroll;
-                let end = (start + max_lines).min(total_content);
-
-                if start > 0 {
-                    lines.push(Line::from(Span::styled(
-                        format!("    ... ({start}) ..."),
-                        Style::default().fg(Color::Blue),
-                    )));
-                } else {
-                    lines.push(Line::from(""));
-                }
-                for l in &preview_lines[start..end] {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {l}"),
-                        Style::default().fg(Color::Gray),
-                    )));
-                }
-                if end < total_content {
-                    lines.push(Line::from(Span::styled(
-                        format!("    ... ({}) ...", total_content - end),
-                        Style::default().fg(Color::Blue),
-                    )));
-                }
+            let (start, end) = if total_content > max_lines {
+                pending.scroll = pending.scroll.min(total_content.saturating_sub(max_lines));
+                (
+                    pending.scroll,
+                    (pending.scroll + max_lines).min(total_content),
+                )
             } else {
                 pending.scroll = 0;
+                (0, total_content)
+            };
+
+            if start > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("    ... ({start}) ..."),
+                    Style::default().fg(Color::Blue),
+                )));
+            } else {
                 lines.push(Line::from(""));
-                for l in &preview_lines {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {l}"),
-                        Style::default().fg(Color::Gray),
-                    )));
-                }
+            }
+            for l in &preview_lines[start..end] {
+                lines.push(Line::from(Span::styled(
+                    format!("  {l}"),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            if end < total_content {
+                lines.push(Line::from(Span::styled(
+                    format!("    ... ({}) ...", total_content - end),
+                    Style::default().fg(Color::Blue),
+                )));
             }
         }
 

@@ -111,15 +111,12 @@ impl CoreEngine {
 
         let total = hooks.len();
         info!("Running {total} pre-turn skill hook(s) before model stream");
-        self.inflight.executing_tool = true;
         let cfg = self.config.clone();
         let active_skill = turn.active_skill.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(rx);
 
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |tx| async move {
             for (idx, (summary, call)) in hooks.into_iter().enumerate() {
                 let _ = tx.send(EngineEvent::ToolStarted {
                     summary: format!("hook: {summary}"),
@@ -137,7 +134,7 @@ impl CoreEngine {
                 });
             }
             let _ = tx.send(EngineEvent::HooksFinished);
-        }));
+        });
     }
 
     pub(super) async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
@@ -172,14 +169,12 @@ impl CoreEngine {
         let model = self.model.clone();
         let config = self.config.clone();
         let turn_cfg = turn.clone();
-        let (internal_tx, internal_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(internal_rx);
 
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |internal_tx| async move {
             provider
                 .stream_turn(client, model, config, hydrated_msgs, turn_cfg, internal_tx)
                 .await;
-        }));
+        });
     }
 
     pub(super) async fn handle_send_prompt(&mut self, prompt: String, mut turn: TurnConfig) {
@@ -216,10 +211,7 @@ impl CoreEngine {
         // If a model stream or a tool execution is currently in flight, queue the
         // interjection so the active process finishes cleanly before reading it.
         if self.is_turn_active() {
-            info!(
-                "Queuing user interjection while process is active (executing_tool: {})",
-                self.inflight.executing_tool
-            );
+            info!("Queuing user interjection while turn is active");
             self.inflight.queued_interjections.push(QueuedInterjection {
                 msg: user_msg,
                 new_images: new_image_blobs,
@@ -243,7 +235,7 @@ impl CoreEngine {
     }
 
     pub(super) async fn handle_cancel_stream(&mut self) {
-        let (had_task, was_tool) = self.finish_active_task();
+        let had_task = self.finish_active_task();
         if !had_task
             && self.inflight.pending_truncated.is_none()
             && self.inflight.pending_tools.is_empty()
@@ -252,7 +244,7 @@ impl CoreEngine {
             return;
         }
 
-        info!("User interrupted active turn (was_tool: {was_tool})");
+        info!("User interrupted active turn");
         let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
         let closed = self.close_unresolved_tool_calls("Cancelled by user.");
 
@@ -445,12 +437,7 @@ impl CoreEngine {
 
     pub(super) async fn on_hooks_finished(&mut self) {
         self.finish_active_task();
-        let _ = self.tx.send(EngineEvent::ToolCompleted {
-            output: String::new(),
-            full_output: String::new(),
-            raw_bytes: 0,
-            truncated: false,
-        });
+        let _ = self.tx.send(EngineEvent::ToolCompleted);
         if self.flush_queued_interjections().await {
             return;
         }

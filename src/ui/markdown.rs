@@ -422,6 +422,19 @@ fn wrap_styled_spans(
     }
 
     let mut pieces: Vec<(bool, Vec<Span<'static>>)> = Vec::new();
+    let push_piece =
+        |pieces: &mut Vec<(bool, Vec<Span<'static>>)>, is_space: bool, seg: &str, style: Style| {
+            if let Some((last_space, last_vec)) = pieces.last_mut()
+                && *last_space == is_space
+            {
+                push_merged_span(last_vec, seg, style);
+            } else {
+                let mut v = Vec::new();
+                push_merged_span(&mut v, seg, style);
+                pieces.push((is_space, v));
+            }
+        };
+
     for span in spans {
         let s = span.content.as_ref();
         let style = span.style;
@@ -432,16 +445,7 @@ fn wrap_styled_spans(
             let is_space = ch == ' ';
             if let Some(prev_space) = cur_is_space {
                 if prev_space != is_space {
-                    let seg = &s[start..idx];
-                    if let Some((last_space, last_vec)) = pieces.last_mut()
-                        && *last_space == prev_space
-                    {
-                        push_merged_span(last_vec, seg, style);
-                    } else {
-                        let mut v = Vec::new();
-                        push_merged_span(&mut v, seg, style);
-                        pieces.push((prev_space, v));
-                    }
+                    push_piece(&mut pieces, prev_space, &s[start..idx], style);
                     start = idx;
                     cur_is_space = Some(is_space);
                 }
@@ -451,16 +455,7 @@ fn wrap_styled_spans(
         }
 
         if let Some(prev_space) = cur_is_space {
-            let seg = &s[start..];
-            if let Some((last_space, last_vec)) = pieces.last_mut()
-                && *last_space == prev_space
-            {
-                push_merged_span(last_vec, seg, style);
-            } else {
-                let mut v = Vec::new();
-                push_merged_span(&mut v, seg, style);
-                pieces.push((prev_space, v));
-            }
+            push_piece(&mut pieces, prev_space, &s[start..], style);
         }
     }
 
@@ -592,6 +587,16 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
     let num_cols = parsed_rows.iter().map(Vec::len).max().filter(|&n| n > 0)?;
     aligns.resize(num_cols, ColAlign::Left);
 
+    let row_style = |r_idx: usize| {
+        if r_idx == 0 {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
+    };
+
     let styled_rows: Vec<Vec<Vec<Span<'static>>>> = parsed_rows
         .iter()
         .enumerate()
@@ -599,13 +604,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
             if r_idx == 1 {
                 return Vec::new();
             }
-            let cell_style = if r_idx == 0 {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+            let cell_style = row_style(r_idx);
             (0..num_cols)
                 .map(|c_idx| {
                     let text = row.get(c_idx).map_or("", String::as_str);
@@ -616,9 +615,8 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         .collect();
 
     let mut col_widths = vec![1usize; num_cols];
-    for (r_idx, row) in styled_rows.iter().enumerate().filter(|&(i, _)| i != 1) {
+    for row in &styled_rows {
         for (c_idx, cell_spans) in row.iter().enumerate() {
-            let _ = r_idx;
             col_widths[c_idx] = col_widths[c_idx].max(spans_display_width(cell_spans));
         }
     }
@@ -658,13 +656,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
             continue;
         }
 
-        let cell_style = if r_idx == 0 {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
+        let cell_style = row_style(r_idx);
 
         let wrapped_cells: Vec<Vec<Vec<Span<'static>>>> = row
             .into_iter()
@@ -1206,35 +1198,20 @@ fn style_markdown_header_inner(
     level: usize,
     content_spans: &[Span<'static>],
 ) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    match level {
-        1 => {
-            let accent = Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD);
-            spans.push(Span::styled("▌ ", accent));
-            spans.extend(content_spans.iter().cloned());
-        }
-        2 => {
-            let accent = Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD);
-            spans.push(Span::styled("▎ ", accent));
-            spans.extend(content_spans.iter().cloned());
-            spans.push(Span::styled(" ───", Style::default().fg(Color::Blue)));
-        }
-        3 => {
-            let accent = Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD);
-            spans.push(Span::styled("▸ ", accent));
-            spans.extend(content_spans.iter().cloned());
-        }
-        _ => {
-            let accent = Style::default().fg(Color::DarkGray);
-            spans.push(Span::styled("• ", accent));
-            spans.extend(content_spans.iter().cloned());
-        }
+    let blue_bold = Style::default()
+        .fg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let (prefix, accent) = match level {
+        1 => ("▌ ", blue_bold),
+        2 => ("▎ ", blue_bold),
+        3 => ("▸ ", blue_bold),
+        _ => ("• ", Style::default().fg(Color::DarkGray)),
+    };
+    let mut spans = Vec::with_capacity(content_spans.len() + 2);
+    spans.push(Span::styled(prefix, accent));
+    spans.extend(content_spans.iter().cloned());
+    if level == 2 {
+        spans.push(Span::styled(" ───", Style::default().fg(Color::Blue)));
     }
     spans
 }
@@ -1403,10 +1380,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 marker,
                 spans: item_spans,
             } => {
-                let mut spans = vec![Span::raw("  ")];
-                if *indent > 0 {
-                    spans.push(Span::raw(" ".repeat(*indent)));
-                }
+                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
                 spans.extend(style_list_marker(marker));
                 spans.extend(item_spans.iter().cloned());
                 spans
@@ -1415,10 +1389,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 indent,
                 spans: cont_spans,
             } => {
-                let mut spans = vec![Span::raw("  ")];
-                if *indent > 0 {
-                    spans.push(Span::raw(" ".repeat(*indent)));
-                }
+                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
                 spans.extend(cont_spans.iter().cloned());
                 spans
             }
@@ -1427,10 +1398,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                 depth,
                 content,
             } => {
-                let mut spans = vec![Span::raw("  ")];
-                if *indent > 0 {
-                    spans.push(Span::raw(" ".repeat(*indent)));
-                }
+                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
                 spans.extend(style_blockquote_bars(*depth));
                 match content {
                     QuoteContent::Plain(q_spans) => {

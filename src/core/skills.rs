@@ -60,7 +60,16 @@ pub struct SkillDefinition {
     pub hooks: Vec<SkillHook>,
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
-    pub is_trusted: bool,
+}
+
+impl SkillDefinition {
+    pub fn trigger(&self) -> &str {
+        if self.command.is_empty() {
+            &self.name
+        } else {
+            &self.command
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -105,11 +114,7 @@ pub(crate) fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
     (None, trimmed)
 }
 
-pub(crate) fn parse_skill_markdown(
-    raw: &str,
-    dir_path: &Path,
-    is_trusted: bool,
-) -> Option<SkillDefinition> {
+pub(crate) fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
     let fallback_name = dir_path.file_name()?.to_str()?.trim().to_string();
     let (fm_str, body) = split_toml_frontmatter(raw);
     let fm: SkillFrontmatter = match fm_str {
@@ -172,11 +177,10 @@ pub(crate) fn parse_skill_markdown(
         hooks,
         prompt,
         dir_path: Some(dir_path.to_path_buf()),
-        is_trusted,
     })
 }
 
-pub(crate) fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefinition> {
+pub(crate) fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -185,30 +189,27 @@ pub(crate) fn scan_skills_dir(dir: &Path, is_trusted: bool) -> Vec<SkillDefiniti
 
     let mut skills = Vec::new();
     for path in entries {
-        if path.is_dir() {
-            let md_path = path.join("SKILL.md");
-            match fs::read_to_string(&md_path) {
-                Ok(raw) => {
-                    if let Some(skill) = parse_skill_markdown(&raw, &path, is_trusted) {
-                        skills.push(skill);
-                    }
-                }
-                Err(e) if md_path.exists() => {
-                    tracing::warn!("Failed to read skill file '{}': {e}", md_path.display());
-                }
-                Err(_) => {}
+        let (md_path, skill_dir) = if path.is_dir() {
+            let md = path.join("SKILL.md");
+            if !md.exists() {
+                continue;
             }
+            (md, path)
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            match fs::read_to_string(&path) {
-                Ok(raw) => {
-                    let stem_dir = path.with_extension("");
-                    if let Some(skill) = parse_skill_markdown(&raw, &stem_dir, is_trusted) {
-                        skills.push(skill);
-                    }
+            let stem = path.with_extension("");
+            (path, stem)
+        } else {
+            continue;
+        };
+
+        match fs::read_to_string(&md_path) {
+            Ok(raw) => {
+                if let Some(skill) = parse_skill_markdown(&raw, &skill_dir) {
+                    skills.push(skill);
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to read skill file '{}': {e}", path.display());
-                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read skill file '{}': {e}", md_path.display());
             }
         }
     }
@@ -225,9 +226,6 @@ pub fn discover_skills(
             .iter_mut()
             .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
         {
-            if existing.is_trusted && !incoming.is_trusted {
-                return;
-            }
             *existing = incoming;
         } else {
             list.push(incoming);
@@ -235,12 +233,12 @@ pub fn discover_skills(
     };
 
     let global_dir = expand_tilde(skills_dir);
-    for skill in scan_skills_dir(&global_dir, true) {
+    for skill in scan_skills_dir(&global_dir) {
         upsert(&mut merged, skill);
     }
 
     if let Some(ws_dir) = workspace_skills_dir {
-        for skill in scan_skills_dir(ws_dir, true) {
+        for skill in scan_skills_dir(ws_dir) {
             upsert(&mut merged, skill);
         }
     }
@@ -311,24 +309,10 @@ pub fn preview_due_hooks(
     executed_hooks: &HashSet<String>,
     messages: &[ChatMessage],
 ) -> Vec<String> {
-    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
-        return Vec::new();
-    };
-    skill
-        .hooks
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, hook)| {
-            let summary = format_hook_summary(hook);
-            let key = hook_execution_key(&skill.name, idx, hook);
-            let due = match hook.trigger {
-                HookTrigger::OnActivate => {
-                    !is_hook_already_in_session(&key, &summary, executed_hooks, messages)
-                }
-                HookTrigger::EveryTurn => true,
-            };
-            due.then_some(summary)
-        })
+    let mut temp = executed_hooks.clone();
+    collect_due_hooks(config, active_skill, &mut temp, messages)
+        .into_iter()
+        .map(|(summary, _)| summary)
         .collect()
 }
 

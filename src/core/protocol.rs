@@ -5,9 +5,40 @@ use crate::{
         session::{ChatMessage, SessionSummary, ThoughtPart},
         skills::SkillDefinition,
     },
-    tools::ToolCall,
+    tools::{ToolCall, ToolExecutionOutput},
 };
 use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub enum ToolExecSource {
+    Model {
+        tool_name: String,
+        summary: String,
+    },
+    ManualShell {
+        command: String,
+        include_in_context: bool,
+    },
+    ManualTool {
+        tool_name: String,
+        summary: String,
+        include_in_context: bool,
+    },
+}
+
+impl ToolExecSource {
+    pub fn include_in_context(&self) -> bool {
+        match self {
+            Self::Model { .. } => true,
+            Self::ManualShell {
+                include_in_context, ..
+            }
+            | Self::ManualTool {
+                include_in_context, ..
+            } => *include_in_context,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
@@ -108,29 +139,8 @@ pub enum EngineEvent {
         index: usize,
         total: usize,
     },
-    ToolCompleted {
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-    },
-    ShellCommandCompleted {
-        command: String,
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-        include_in_context: bool,
-    },
-    ManualToolCompleted {
-        tool_name: String,
-        summary: String,
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-        include_in_context: bool,
-    },
+    ToolCompleted,
+    ToolExecFinished(ToolExecSource, ToolExecutionOutput),
     HookCompleted {
         tool_name: String,
         summary: String,

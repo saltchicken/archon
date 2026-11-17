@@ -1,17 +1,12 @@
 use super::{
-    CoreEngine, EngineEvent, TruncatedToolAction, TurnConfig, config, session::ChatMessage,
+    CoreEngine, EngineEvent, ToolExecSource, TruncatedToolAction, TurnConfig, config,
+    session::ChatMessage,
 };
-use crate::tools::{self, ToolCall};
+use crate::tools::{self, ToolCall, ToolExecutionOutput};
 use tracing::{error, info, warn};
 
-pub(super) enum PendingTruncatedSource {
-    ModelTool { tool_name: String },
-    ManualShell { command: String },
-    ManualTool { summary: String },
-}
-
 pub(super) struct PendingTruncatedTool {
-    pub(super) source: PendingTruncatedSource,
+    pub(super) source: ToolExecSource,
     pub(super) summary: String,
     pub(super) truncated_output: String,
     pub(super) full_output: String,
@@ -50,8 +45,6 @@ impl CoreEngine {
         let unresolved_names = self.unresolved_tool_names();
         let count = unresolved_names.len();
         self.inflight.pending_tools.clear();
-        self.inflight.active_tool_name = None;
-        self.inflight.active_tool_summary = None;
         self.inflight.pending_truncated = None;
         for name in unresolved_names {
             self.session
@@ -121,85 +114,52 @@ impl CoreEngine {
         avail_tokens.saturating_mul(4)
     }
 
-    async fn complete_tool_result(&mut self, tool_name: String, output: String, truncated: bool) {
-        self.sync_tool_side_effects(&tool_name);
-        let raw_bytes = output.len();
-        self.session
-            .messages
-            .push(ChatMessage::new_tool(tool_name, output.clone(), truncated));
-        self.save_and_emit_chat(Vec::new()).await;
-        let _ = self.tx.send(EngineEvent::ToolCompleted {
-            output,
-            full_output: String::new(),
-            raw_bytes,
-            truncated,
-        });
-        info!("Tool execution completed and recorded to chat history.");
-        self.process_pending_tools().await;
-    }
-
-    async fn complete_shell_result(
+    async fn complete_tool_exec(
         &mut self,
-        command: String,
-        output: String,
-        truncated: bool,
-        include_in_context: bool,
-    ) {
-        let mut msg = ChatMessage::new("local", format!("$ {command}\n{output}"));
-        msg.truncated = truncated;
-        msg.include_in_context = include_in_context;
-        self.session.messages.push(msg);
-        self.save_and_emit_chat(Vec::new()).await;
-        let _ = self.tx.send(EngineEvent::ToolCompleted {
-            output: String::new(),
-            full_output: String::new(),
-            raw_bytes: 0,
-            truncated,
-        });
-        self.flush_queued_interjections().await;
-    }
-
-    async fn complete_manual_tool_result(
-        &mut self,
-        summary: String,
-        output: String,
-        truncated: bool,
-        include_in_context: bool,
-    ) {
-        let mut msg = ChatMessage::new("local", output);
-        msg.truncated = truncated;
-        msg.include_in_context = include_in_context;
-        msg.tool_name = Some(summary);
-        self.session.messages.push(msg);
-        self.save_and_emit_chat(Vec::new()).await;
-        let _ = self.tx.send(EngineEvent::ToolCompleted {
-            output: String::new(),
-            full_output: String::new(),
-            raw_bytes: 0,
-            truncated,
-        });
-        self.flush_queued_interjections().await;
-    }
-
-    async fn finalize_pending_truncated(
-        &mut self,
-        source: PendingTruncatedSource,
+        source: ToolExecSource,
         output: String,
         truncated: bool,
     ) {
+        let is_model_tool = matches!(source, ToolExecSource::Model { .. });
         match source {
-            PendingTruncatedSource::ModelTool { tool_name } => {
-                self.complete_tool_result(tool_name, output, truncated)
-                    .await;
+            ToolExecSource::Model { tool_name, .. } => {
+                self.sync_tool_side_effects(&tool_name);
+                self.session
+                    .messages
+                    .push(ChatMessage::new_tool(tool_name, output, truncated));
+                info!("Tool execution completed and recorded to chat history.");
             }
-            PendingTruncatedSource::ManualShell { command } => {
-                self.complete_shell_result(command, output, truncated, true)
-                    .await;
+            ToolExecSource::ManualShell {
+                command,
+                include_in_context,
+            } => {
+                self.session.messages.push(ChatMessage {
+                    truncated,
+                    include_in_context,
+                    ..ChatMessage::new("local", format!("$ {command}\n{output}"))
+                });
             }
-            PendingTruncatedSource::ManualTool { summary } => {
-                self.complete_manual_tool_result(summary, output, truncated, true)
-                    .await;
+            ToolExecSource::ManualTool {
+                tool_name,
+                summary,
+                include_in_context,
+            } => {
+                self.sync_tool_side_effects(&tool_name);
+                self.session.messages.push(ChatMessage {
+                    truncated,
+                    include_in_context,
+                    tool_name: Some(summary),
+                    ..ChatMessage::new("local", output)
+                });
             }
+        }
+
+        self.save_and_emit_chat(Vec::new()).await;
+        let _ = self.tx.send(EngineEvent::ToolCompleted);
+        if is_model_tool {
+            self.process_pending_tools().await;
+        } else {
+            self.flush_queued_interjections().await;
         }
     }
 
@@ -209,14 +169,11 @@ impl CoreEngine {
         use_full: bool,
         guide_prompt: Option<String>,
     ) {
-        self.inflight.executing_tool = true;
         let tool_name = match &pending.source {
-            PendingTruncatedSource::ModelTool { tool_name } => tool_name.clone(),
-            PendingTruncatedSource::ManualShell { .. } => "shell_command".to_string(),
-            PendingTruncatedSource::ManualTool { summary } => summary.clone(),
+            ToolExecSource::Model { tool_name, .. } => tool_name.clone(),
+            ToolExecSource::ManualShell { .. } => "shell_command".to_string(),
+            ToolExecSource::ManualTool { summary, .. } => summary.clone(),
         };
-        self.inflight.active_tool_name = Some(tool_name.clone());
-        self.inflight.active_tool_summary = Some(pending.summary.clone());
         let mode_label = if use_full { "full" } else { "truncated" };
         let _ = self.tx.send(EngineEvent::ToolStarted {
             summary: format!("condensing ({mode_label}) {}", pending.summary),
@@ -250,10 +207,7 @@ impl CoreEngine {
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(rx);
-
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |tx| async move {
             let res = provider
                 .condense_tool_output(
                     client,
@@ -269,7 +223,7 @@ impl CoreEngine {
                 )
                 .await;
             let _ = tx.send(EngineEvent::ToolCondensed(res));
-        }));
+        });
     }
 
     fn spawn_tool_execution(
@@ -280,11 +234,8 @@ impl CoreEngine {
         feedback: Option<String>,
     ) {
         let sig = tools::call_signature(&call);
-        self.inflight.executing_tool = true;
-        self.inflight.active_tool_name = Some(call.function.name.clone());
-        self.inflight.active_tool_summary = Some(sig.clone());
         let _ = self.tx.send(EngineEvent::ToolStarted {
-            summary: sig,
+            summary: sig.clone(),
             index,
             total,
         });
@@ -293,10 +244,12 @@ impl CoreEngine {
         let active_skill = self.active_turn_skill().map(String::from);
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(rx);
+        let source = ToolExecSource::Model {
+            tool_name: call.function.name.clone(),
+            summary: sig,
+        };
 
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |tx| async move {
             let mut res =
                 tools::execute(&call, &cfg, active_skill.as_deref(), max_out, full_cap).await;
             if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
@@ -304,13 +257,8 @@ impl CoreEngine {
                 res.truncated_output.push_str(&suffix);
                 res.full_output.push_str(&suffix);
             }
-            let _ = tx.send(EngineEvent::ToolCompleted {
-                output: res.truncated_output,
-                full_output: res.full_output,
-                raw_bytes: res.raw_bytes,
-                truncated: res.truncated,
-            });
-        }));
+            let _ = tx.send(EngineEvent::ToolExecFinished(source, res));
+        });
     }
 
     pub(super) async fn process_pending_tools(&mut self) {
@@ -439,20 +387,16 @@ impl CoreEngine {
 
         match action {
             TruncatedToolAction::ProceedTruncated => {
-                self.finalize_pending_truncated(pending.source, pending.truncated_output, true)
+                self.complete_tool_exec(pending.source, pending.truncated_output, true)
                     .await;
             }
             TruncatedToolAction::ProceedFull => {
                 let still_truncated = pending.raw_bytes > pending.full_cap_bytes;
-                self.finalize_pending_truncated(
-                    pending.source,
-                    pending.full_output,
-                    still_truncated,
-                )
-                .await;
+                self.complete_tool_exec(pending.source, pending.full_output, still_truncated)
+                    .await;
             }
             TruncatedToolAction::Discard => match pending.source {
-                PendingTruncatedSource::ModelTool { tool_name } => {
+                ToolExecSource::Model { .. } => {
                     let mut msg = format!(
                         "[DISCARDED: Output from '{}' ({} bytes) exceeded the {} byte limit and was discarded by the user. Try a more targeted query or read smaller ranges.]",
                         pending.summary, pending.raw_bytes, self.active_max_tool_output_size
@@ -460,20 +404,14 @@ impl CoreEngine {
                     if let Some(ref note) = guide_opt {
                         msg.push_str(&format!("\n\n[User attached a message]: {note}"));
                     }
-                    self.complete_tool_result(tool_name, msg, false).await;
+                    self.complete_tool_exec(pending.source, msg, false).await;
                 }
-                PendingTruncatedSource::ManualShell { .. }
-                | PendingTruncatedSource::ManualTool { .. } => {
+                ToolExecSource::ManualShell { .. } | ToolExecSource::ManualTool { .. } => {
                     info!(
                         "Discarded truncated manual command/tool output for '{}'",
                         pending.summary
                     );
-                    let _ = self.tx.send(EngineEvent::ToolCompleted {
-                        output: String::new(),
-                        full_output: String::new(),
-                        raw_bytes: 0,
-                        truncated: false,
-                    });
+                    let _ = self.tx.send(EngineEvent::ToolCompleted);
                     self.emit_chat();
                     self.flush_queued_interjections().await;
                 }
@@ -501,7 +439,6 @@ impl CoreEngine {
 
         let prefix = if include_in_context { "!!" } else { "!" };
         info!("Executing manual shell command ({prefix}): {cmd_str}");
-        self.inflight.executing_tool = true;
         let _ = self.tx.send(EngineEvent::ToolStarted {
             summary: format!("{prefix} {cmd_str}"),
             index: 1,
@@ -511,21 +448,16 @@ impl CoreEngine {
         let cfg = self.config.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(rx);
+        let source = ToolExecSource::ManualShell {
+            command: cmd_str,
+            include_in_context,
+        };
 
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |tx| async move {
             let res =
                 tools::run_manual_command(&parts[0], &parts[1..], &cfg, max_out, full_cap).await;
-            let _ = tx.send(EngineEvent::ShellCommandCompleted {
-                command: cmd_str,
-                output: res.truncated_output,
-                full_output: res.full_output,
-                raw_bytes: res.raw_bytes,
-                truncated: res.truncated,
-                include_in_context,
-            });
-        }));
+            let _ = tx.send(EngineEvent::ToolExecFinished(source, res));
+        });
     }
 
     pub(super) async fn handle_run_manual_tool(
@@ -547,9 +479,6 @@ impl CoreEngine {
 
         let prefix = if include_in_context { "##" } else { "#" };
         info!("Executing manual tool call ({prefix}): {summary}");
-        self.inflight.executing_tool = true;
-        self.inflight.active_tool_name = Some(call.function.name.clone());
-        self.inflight.active_tool_summary = Some(summary.clone());
         let _ = self.tx.send(EngineEvent::ToolStarted {
             summary: format!("{prefix}{summary}"),
             index: 1,
@@ -560,116 +489,69 @@ impl CoreEngine {
         let active_skill = self.active_turn_skill().map(String::from);
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.internal_rx = Some(rx);
+        let source = ToolExecSource::ManualTool {
+            tool_name: call.function.name.clone(),
+            summary,
+            include_in_context,
+        };
 
-        self.inflight.active_task = Some(tokio::spawn(async move {
+        self.spawn_with_tx(move |tx| async move {
             let res =
                 tools::execute_manual(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
                     .await;
-            let _ = tx.send(EngineEvent::ManualToolCompleted {
-                tool_name: call.function.name,
-                summary,
-                output: res.truncated_output,
-                full_output: res.full_output,
-                raw_bytes: res.raw_bytes,
-                truncated: res.truncated,
-                include_in_context,
-            });
-        }));
+            let _ = tx.send(EngineEvent::ToolExecFinished(source, res));
+        });
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn on_manual_tool_completed(
+    pub(super) async fn on_tool_exec_finished(
         &mut self,
-        tool_name: String,
-        summary: String,
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-        include_in_context: bool,
+        source: ToolExecSource,
+        res: ToolExecutionOutput,
     ) {
         self.finish_active_task();
-        self.inflight.active_tool_name = None;
-        self.inflight.active_tool_summary = None;
-        self.sync_tool_side_effects(&tool_name);
+        if let ToolExecSource::ManualTool { ref tool_name, .. } = source {
+            self.sync_tool_side_effects(tool_name);
+        }
 
-        if truncated && include_in_context && self.inflight.queued_interjections.is_empty() {
-            let modal_summary = format!("##{summary}");
-            let preview = output.clone();
+        if res.truncated
+            && source.include_in_context()
+            && self.inflight.queued_interjections.is_empty()
+        {
+            let (tool_name, modal_summary, index, total) = match &source {
+                ToolExecSource::Model { tool_name, summary } => {
+                    let (idx, tot) = self.tool_batch_progress();
+                    (
+                        tool_name.clone(),
+                        summary.clone(),
+                        idx.saturating_sub(1).max(1),
+                        tot,
+                    )
+                }
+                ToolExecSource::ManualShell { command, .. } => {
+                    ("shell".into(), format!("!! {command}"), 1, 1)
+                }
+                ToolExecSource::ManualTool {
+                    tool_name, summary, ..
+                } => (tool_name.clone(), format!("##{summary}"), 1, 1),
+            };
+
+            let preview = res.truncated_output.clone();
             let full_cap_bytes = self.context_padded_capture_limit();
             self.inflight.pending_truncated = Some(PendingTruncatedTool {
-                source: PendingTruncatedSource::ManualTool {
-                    summary: summary.clone(),
-                },
+                source,
                 summary: modal_summary.clone(),
-                truncated_output: output,
-                full_output,
-                raw_bytes,
+                truncated_output: res.truncated_output,
+                full_output: res.full_output,
+                raw_bytes: res.raw_bytes,
                 full_cap_bytes,
-                index: 1,
-                total: 1,
+                index,
+                total,
             });
             let _ = self.tx.send(EngineEvent::TruncatedToolResolutionRequested {
                 tool_name,
                 summary: modal_summary,
                 preview,
-                raw_bytes,
-                max_size: self.active_max_tool_output_size,
-                full_cap_bytes,
-                index: 1,
-                total: 1,
-            });
-            return;
-        }
-
-        self.complete_manual_tool_result(summary, output, truncated, include_in_context)
-            .await;
-    }
-
-    pub(super) async fn on_tool_completed(
-        &mut self,
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-    ) {
-        self.finish_active_task();
-        let tool_name = self
-            .inflight
-            .active_tool_name
-            .take()
-            .or_else(|| self.unresolved_tool_names().into_iter().next())
-            .unwrap_or_else(|| "tool_execution".into());
-        let summary = self
-            .inflight
-            .active_tool_summary
-            .take()
-            .unwrap_or_else(|| tool_name.clone());
-
-        if truncated && self.inflight.queued_interjections.is_empty() {
-            let (mut index, total) = self.tool_batch_progress();
-            index = index.saturating_sub(1).max(1);
-            let preview = output.clone();
-            let full_cap_bytes = self.context_padded_capture_limit();
-            self.inflight.pending_truncated = Some(PendingTruncatedTool {
-                source: PendingTruncatedSource::ModelTool {
-                    tool_name: tool_name.clone(),
-                },
-                summary: summary.clone(),
-                truncated_output: output,
-                full_output,
-                raw_bytes,
-                full_cap_bytes,
-                index,
-                total,
-            });
-            let _ = self.tx.send(EngineEvent::TruncatedToolResolutionRequested {
-                tool_name,
-                summary,
-                preview,
-                raw_bytes,
+                raw_bytes: res.raw_bytes,
                 max_size: self.active_max_tool_output_size,
                 full_cap_bytes,
                 index,
@@ -678,7 +560,7 @@ impl CoreEngine {
             return;
         }
 
-        self.complete_tool_result(tool_name, output, truncated)
+        self.complete_tool_exec(source, res.truncated_output, res.truncated)
             .await;
     }
 
@@ -687,8 +569,6 @@ impl CoreEngine {
         let Some(pending) = self.inflight.pending_truncated.take() else {
             return;
         };
-        self.inflight.active_tool_name = None;
-        self.inflight.active_tool_summary = None;
 
         match res {
             Ok(condensed) => {
@@ -699,7 +579,7 @@ impl CoreEngine {
                     self.active_max_tool_output_size,
                     condensed.trim()
                 );
-                self.finalize_pending_truncated(pending.source, final_out, false)
+                self.complete_tool_exec(pending.source, final_out, false)
                     .await;
             }
             Err(err) => {
@@ -711,52 +591,9 @@ impl CoreEngine {
                     "Failed to condense truncated tool output: {err}. Proceeding with truncated output."
                 ))
                 .await;
-                self.finalize_pending_truncated(pending.source, pending.truncated_output, true)
+                self.complete_tool_exec(pending.source, pending.truncated_output, true)
                     .await;
             }
         }
-    }
-
-    pub(super) async fn on_shell_command_completed(
-        &mut self,
-        command: String,
-        output: String,
-        full_output: String,
-        raw_bytes: usize,
-        truncated: bool,
-        include_in_context: bool,
-    ) {
-        self.finish_active_task();
-        if truncated && include_in_context && self.inflight.queued_interjections.is_empty() {
-            let summary = format!("!! {command}");
-            let preview = output.clone();
-            let full_cap_bytes = self.context_padded_capture_limit();
-            self.inflight.pending_truncated = Some(PendingTruncatedTool {
-                source: PendingTruncatedSource::ManualShell {
-                    command: command.clone(),
-                },
-                summary: summary.clone(),
-                truncated_output: output,
-                full_output,
-                raw_bytes,
-                full_cap_bytes,
-                index: 1,
-                total: 1,
-            });
-            let _ = self.tx.send(EngineEvent::TruncatedToolResolutionRequested {
-                tool_name: "shell".into(),
-                summary,
-                preview,
-                raw_bytes,
-                max_size: self.active_max_tool_output_size,
-                full_cap_bytes,
-                index: 1,
-                total: 1,
-            });
-            return;
-        }
-
-        self.complete_shell_result(command, output, truncated, include_in_context)
-            .await;
     }
 }

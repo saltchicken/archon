@@ -69,7 +69,7 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
     }
 }
 
-pub(super) fn format_assistant_display(m: &ChatMessage, _resolved_tool_count: usize) -> String {
+pub(super) fn format_assistant_display(m: &ChatMessage) -> String {
     let mut text = sanitize_line(&m.content);
     if text.trim().is_empty()
         && m.tool_calls.as_ref().is_none_or(Vec::is_empty)
@@ -174,12 +174,7 @@ impl TuiApp {
                 .reserve(self.messages.len() - start_idx);
             for (i, m) in self.messages.iter().enumerate().skip(start_idx) {
                 let formatted = if m.role == "assistant" {
-                    let resolved_count = self.messages[i + 1..]
-                        .iter()
-                        .filter(|n| n.role != "error")
-                        .take_while(|n| n.role == "tool")
-                        .count();
-                    format_assistant_display(m, resolved_count)
+                    format_assistant_display(m)
                 } else if m.role == "tool" {
                     format_tool_display(&self.messages, i, m)
                 } else {
@@ -317,14 +312,7 @@ impl TuiApp {
                         (!s.command.is_empty() && s.command.starts_with(rest))
                             || s.name.starts_with(rest)
                     })
-                    .map(|s| {
-                        let trigger = if s.command.is_empty() {
-                            &s.name
-                        } else {
-                            &s.command
-                        };
-                        format!("@{trigger}")
-                    })
+                    .map(|s| format!("@{}", s.trigger()))
                     .take(4)
                     .collect();
                 (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))

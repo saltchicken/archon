@@ -693,122 +693,51 @@ fn parse_manual_arg_value(raw: &str) -> Value {
 }
 
 fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<String, Value>) {
-    match tool_name {
-        "repo_map" => {
-            if !map.contains_key("action") && matches!(token, "map" | "definition" | "references") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("symbol") {
-                map.insert("symbol".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("target_path") {
-                map.insert("target_path".into(), Value::String(token.to_string()));
-            }
+    if tool_name == "read_file" && map.contains_key("file_path") {
+        if let Ok(n) = token.parse::<usize>()
+            && let Some(&k) = ["start_line", "end_line"]
+                .iter()
+                .find(|&&k| !map.contains_key(k))
+        {
+            map.insert(k.into(), Value::Number(n.into()));
         }
-        "cargo" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("package") {
-                map.insert("package".into(), Value::String(token.to_string()));
-            }
+        return;
+    }
+    if tool_name == "workspace_snapshot" {
+        if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
+            map.insert("tree_only".into(), Value::Bool(true));
         }
-        "git" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else {
-                let act = map.get("action").and_then(Value::as_str).unwrap_or("");
-                if matches!(act, "blame" | "add" | "unstage") && !map.contains_key("path") {
-                    map.insert("path".into(), Value::String(token.to_string()));
-                } else if act == "commit" && !map.contains_key("message") {
-                    map.insert("message".into(), Value::String(token.to_string()));
-                } else if !map.contains_key("target") {
-                    map.insert("target".into(), Value::String(token.to_string()));
-                } else if !map.contains_key("path") {
-                    map.insert("path".into(), Value::String(token.to_string()));
-                }
-            }
+        return;
+    }
+
+    let keys: &[&str] = match tool_name {
+        "repo_map" if matches!(token, "map" | "definition" | "references") => {
+            &["action", "symbol", "target_path"]
         }
-        "fs" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("path") {
-                map.insert("path".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("destination") {
-                map.insert("destination".into(), Value::String(token.to_string()));
-            }
-        }
-        "dotfiles" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("path") {
-                map.insert("path".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("pattern") {
-                map.insert("pattern".into(), Value::String(token.to_string()));
-            }
-        }
-        "skill" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("name") {
-                map.insert("name".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("file") {
-                map.insert("file".into(), Value::String(token.to_string()));
-            }
-        }
-        "memory" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("scope") && matches!(token, "global" | "workspace") {
-                map.insert("scope".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("item") {
-                map.insert("item".into(), Value::String(token.to_string()));
-            }
-        }
-        "system" => {
-            if !map.contains_key("action") {
-                map.insert("action".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("query") {
-                map.insert("query".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("target") {
-                map.insert("target".into(), Value::String(token.to_string()));
-            }
-        }
-        "read_file" => {
-            if !map.contains_key("file_path") {
-                map.insert("file_path".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("start_line")
-                && let Ok(n) = token.parse::<usize>()
-            {
-                map.insert("start_line".into(), Value::Number(n.into()));
-            } else if !map.contains_key("end_line")
-                && let Ok(n) = token.parse::<usize>()
-            {
-                map.insert("end_line".into(), Value::Number(n.into()));
-            }
-        }
-        "search" => {
-            if !map.contains_key("pattern") {
-                map.insert("pattern".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("path") {
-                map.insert("path".into(), Value::String(token.to_string()));
-            }
-        }
-        "fetch_url" => {
-            if !map.contains_key("url") {
-                map.insert("url".into(), Value::String(token.to_string()));
-            }
-        }
-        "workspace_snapshot" => {
-            if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
-                map.insert("tree_only".into(), Value::Bool(true));
-            }
-        }
-        "create_file" => {
-            if !map.contains_key("file_path") {
-                map.insert("file_path".into(), Value::String(token.to_string()));
-            } else if !map.contains_key("content") {
-                map.insert("content".into(), Value::String(token.to_string()));
-            }
-        }
-        _ => {}
+        "repo_map" => &["symbol", "target_path"],
+        "cargo" => &["action", "package"],
+        "git" if !map.contains_key("action") => &["action"],
+        "git" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
+            "blame" | "add" | "unstage" => &["path"],
+            "commit" => &["message", "target", "path"],
+            _ => &["target", "path"],
+        },
+        "fs" => &["action", "path", "destination"],
+        "dotfiles" => &["action", "path", "pattern"],
+        "skill" => &["action", "name", "file"],
+        "memory" if !map.contains_key("action") => &["action"],
+        "memory" if matches!(token, "global" | "workspace") => &["scope", "item"],
+        "memory" => &["item"],
+        "system" => &["action", "query", "target"],
+        "read_file" => &["file_path"],
+        "search" => &["pattern", "path"],
+        "fetch_url" => &["url"],
+        "create_file" => &["file_path", "content"],
+        _ => &[],
+    };
+
+    if let Some(&k) = keys.iter().find(|&&k| !map.contains_key(k)) {
+        map.insert(k.into(), Value::String(token.to_string()));
     }
 }
 
@@ -957,10 +886,10 @@ fn append_diff_result(out: &mut String, res: Result<(String, String, String, Opt
     }
 }
 
-fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
+fn format_edit_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
     let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
     let _ = writeln!(out, "  file_path: {file_path}");
-    append_filtered_kvs(&mut out, obj, &["file_path", "edits"]);
+    append_filtered_kvs(out, obj, &["file_path", "edits"]);
 
     let preview = parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
         .and_then(|parsed| edit_file::preview_edits(&parsed, &ToolContext::from_cwd()?));
@@ -968,82 +897,78 @@ fn format_edit_approval(mut out: String, args: &Value, obj: &Map<String, Value>)
     match preview {
         Ok((_, original, updated, hunk_count)) => {
             let _ = writeln!(out, "  hunks: {hunk_count}");
-            append_unified_diff(&mut out, file_path, &original, &updated);
+            append_unified_diff(out, file_path, &original, &updated);
         }
         Err(e) => {
-            append_warning(&mut out, &e);
+            append_warning(out, &e);
             let (raw_search, raw_replace) =
                 parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
                     .map(|parsed| edit_file::fallback_hunk_preview(&parsed))
                     .unwrap_or_default();
-            append_unified_diff(&mut out, file_path, &raw_search, &raw_replace);
+            append_unified_diff(out, file_path, &raw_search, &raw_replace);
         }
     }
-    out.trim_end().to_string()
 }
 
-fn format_fs_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    append_filtered_kvs(&mut out, obj, &[]);
+fn format_fs_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+    append_filtered_kvs(out, obj, &[]);
     let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME)
         .and_then(|parsed| fs::preview_action(&parsed, &ToolContext::from_cwd()?));
     match preview {
         Ok((summary, maybe_diff)) => {
             let _ = write!(out, "\n--- OPERATION ---\n{summary}\n");
             if let Some((file_path, deleted_content)) = maybe_diff {
-                append_unified_diff(&mut out, &file_path, &deleted_content, "");
+                append_unified_diff(out, &file_path, &deleted_content, "");
             }
         }
-        Err(e) => append_warning(&mut out, &e),
+        Err(e) => append_warning(out, &e),
     }
-    out.trim_end().to_string()
 }
 
-fn format_dotfiles_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    append_filtered_kvs(&mut out, obj, &["edits", "content"]);
+fn format_dotfiles_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+    append_filtered_kvs(out, obj, &["edits", "content"]);
 
     if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME)
         && let Ok(ctx) = ToolContext::from_cwd()
     {
         match parsed.action {
             dotfiles::DotfilesAction::Edit => append_diff_result(
-                &mut out,
+                out,
                 dotfiles::preview_edit(&parsed, &ctx.config)
                     .map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
             ),
             dotfiles::DotfilesAction::Create => append_diff_result(
-                &mut out,
+                out,
                 dotfiles::preview_create(&parsed, &ctx.config)
                     .map(|(_, d)| (d, String::new(), parsed.content, None)),
             ),
             _ => {}
         }
     }
-    out.trim_end().to_string()
 }
 
-fn format_skill_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    append_filtered_kvs(&mut out, obj, &["edits", "content", "prompt"]);
+fn format_skill_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+    append_filtered_kvs(out, obj, &["edits", "content", "prompt"]);
 
     if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
         && let Ok(ctx) = ToolContext::from_cwd()
     {
         match parsed.action {
             skill::SkillAction::Modify => append_diff_result(
-                &mut out,
+                out,
                 skill::preview_modify(&parsed, &ctx).map(|(_, d, o, u, n)| (d, o, u, Some(n))),
             ),
             skill::SkillAction::Create => append_diff_result(
-                &mut out,
+                out,
                 skill::preview_create(&parsed, &ctx).map(|(_, d, r)| (d, String::new(), r, None)),
             ),
             _ => {}
         }
     }
-    out.trim_end().to_string()
 }
 
-fn format_memory_approval(mut out: String, args: &Value, obj: &Map<String, Value>) -> String {
-    append_filtered_kvs(&mut out, obj, &[]);
+fn format_memory_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+    append_filtered_kvs(out, obj, &[]);
 
     if let Ok(parsed) = parse_args::<memory::MemoryArgs>(args, memory::Tool::NAME)
         && let Ok(ctx) = ToolContext::from_cwd()
@@ -1053,11 +978,10 @@ fn format_memory_approval(mut out: String, args: &Value, obj: &Map<String, Value
         )
     {
         append_diff_result(
-            &mut out,
+            out,
             memory::preview_mutation(&parsed, &ctx).map(|(_, d, o, u, _)| (d, o, u, None)),
         );
     }
-    out.trim_end().to_string()
 }
 
 pub fn format_approval(call: &ToolCall) -> String {
@@ -1074,27 +998,26 @@ pub fn format_approval(call: &ToolCall) -> String {
 
     let mut out = format!("Tool: {name} (Rule: {sig})\n");
     match name.as_str() {
-        "edit_file" => return format_edit_approval(out, args, obj),
-        "fs" => return format_fs_approval(out, args, obj),
-        "dotfiles" => return format_dotfiles_approval(out, args, obj),
-        "skill" => return format_skill_approval(out, args, obj),
-        "memory" => return format_memory_approval(out, args, obj),
-        _ => {}
-    }
-
-    let mut multiline_blocks = Vec::new();
-    for (k, v) in obj {
-        match v.as_str() {
-            Some(s) if s.contains('\n') || matches!(k.as_str(), "content" | "message") => {
-                multiline_blocks.push((k, s));
+        "edit_file" => format_edit_approval(&mut out, args, obj),
+        "fs" => format_fs_approval(&mut out, args, obj),
+        "dotfiles" => format_dotfiles_approval(&mut out, args, obj),
+        "skill" => format_skill_approval(&mut out, args, obj),
+        "memory" => format_memory_approval(&mut out, args, obj),
+        _ => {
+            let mut multiline_blocks = Vec::new();
+            for (k, v) in obj {
+                match v.as_str() {
+                    Some(s) if s.contains('\n') || matches!(k.as_str(), "content" | "message") => {
+                        multiline_blocks.push((k, s));
+                    }
+                    _ => out.push_str(&format_kv(k, v)),
+                }
             }
-            _ => out.push_str(&format_kv(k, v)),
+            multiline_blocks.sort_by(|a, b| b.0.cmp(a.0));
+            for (k, s) in multiline_blocks {
+                out.push_str(&format!("\n--- {} ---\n{s}\n", k.to_uppercase()));
+            }
         }
-    }
-
-    multiline_blocks.sort_by(|a, b| b.0.cmp(a.0));
-    for (k, s) in multiline_blocks {
-        out.push_str(&format!("\n--- {} ---\n{s}\n", k.to_uppercase()));
     }
 
     out.trim_end().to_string()
@@ -1193,11 +1116,24 @@ register_tools! {
     blocking: workspace_snapshot,
 }
 
+#[derive(Debug, Clone)]
 pub struct ToolExecutionOutput {
     pub truncated_output: String,
     pub full_output: String,
     pub raw_bytes: usize,
     pub truncated: bool,
+}
+
+impl ToolExecutionOutput {
+    fn error(msg: String) -> Self {
+        let raw_bytes = msg.len();
+        Self {
+            truncated_output: msg.clone(),
+            full_output: msg,
+            raw_bytes,
+            truncated: false,
+        }
+    }
 }
 
 fn truncate_at_limit(mut out: String, limit: usize) -> (String, bool) {
@@ -1237,14 +1173,7 @@ pub async fn run_manual_command(
     let ctx = match ToolContext::new(config, None, capture_limit) {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("Error resolving workspace root: {e}");
-            let len = msg.len();
-            return ToolExecutionOutput {
-                truncated_output: msg.clone(),
-                full_output: msg,
-                raw_bytes: len,
-                truncated: false,
-            };
+            return ToolExecutionOutput::error(format!("Error resolving workspace root: {e}"));
         }
     };
 
@@ -1253,16 +1182,7 @@ pub async fn run_manual_command(
         .await
     {
         Ok(out) => package_tool_output(out, max_size, full_cap),
-        Err(e) => {
-            let msg = format!("Error: {e}");
-            let len = msg.len();
-            ToolExecutionOutput {
-                truncated_output: msg.clone(),
-                full_output: msg,
-                raw_bytes: len,
-                truncated: false,
-            }
-        }
+        Err(e) => ToolExecutionOutput::error(format!("Error: {e}")),
     }
 }
 
@@ -1307,14 +1227,7 @@ async fn execute_with_filter(
         }
         Err(e) => {
             error!("Tool '{name}' failed: {e}");
-            let msg = format!("Error: {e}");
-            let len = msg.len();
-            ToolExecutionOutput {
-                truncated_output: msg.clone(),
-                full_output: msg,
-                raw_bytes: len,
-                truncated: false,
-            }
+            ToolExecutionOutput::error(format!("Error: {e}"))
         }
     }
 }

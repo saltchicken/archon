@@ -122,7 +122,7 @@ impl Provider {
             config,
         );
 
-        let sanitized_messages = sanitize_messages_for_turn(messages, config, active_skill);
+        let sanitized_messages = sanitize_messages_for_turn(messages);
 
         let payload = match self {
             Self::Ollama => ollama::build_payload(
@@ -138,6 +138,31 @@ impl Provider {
         };
 
         (effective_system_prompt, sanitized_messages, payload)
+    }
+
+    async fn stream_payload(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        payload: Value,
+        tx: UnboundedSender<EngineEvent>,
+    ) {
+        match self {
+            Self::Ollama => {
+                ollama::stream_chat(client, config.ollama.base_url, payload, tx).await;
+            }
+            Self::Gemini => {
+                let Some(api_key) = config.gemini.resolve_api_key() else {
+                    let _ = tx.send(EngineEvent::StreamError(
+                        "Missing Gemini API key. Set GEMINI_API_KEY in .env or config.toml".into(),
+                    ));
+                    return;
+                };
+                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
+                    .await;
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -175,20 +200,8 @@ impl Provider {
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        match self {
-            Self::Ollama => {
-                ollama::stream_chat(client, config.ollama.base_url, payload, tx).await;
-            }
-            Self::Gemini => {
-                let Some(api_key) = config.gemini.resolve_api_key() else {
-                    return Err(
-                        "Missing Gemini API key. Set GEMINI_API_KEY in .env or config.toml".into(),
-                    );
-                };
-                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
-                    .await;
-            }
-        }
+        self.stream_payload(client, model, config, payload, tx)
+            .await;
 
         let mut condensed = String::new();
         while let Some(ev) = rx.recv().await {
@@ -228,22 +241,8 @@ impl Provider {
             None,
         );
         let _ = tx.send(EngineEvent::PayloadCaptured(inspection));
-
-        match self {
-            Self::Ollama => {
-                ollama::stream_chat(client, config.ollama.base_url, payload, tx).await;
-            }
-            Self::Gemini => {
-                let Some(api_key) = config.gemini.resolve_api_key() else {
-                    let _ = tx.send(EngineEvent::StreamError(
-                        "Missing Gemini API key. Set GEMINI_API_KEY in .env or config.toml".into(),
-                    ));
-                    return;
-                };
-                gemini::stream_chat(client, config.gemini.base_url, api_key, model, payload, tx)
-                    .await;
-            }
-        }
+        self.stream_payload(client, model, config, payload, tx)
+            .await;
     }
 }
 
@@ -405,11 +404,7 @@ pub fn format_payload_inspection(
     out.trim_end().to_string()
 }
 
-pub fn sanitize_messages_for_turn(
-    messages: Vec<ChatMessage>,
-    _config: &Config,
-    _active_skill: Option<&str>,
-) -> Vec<ChatMessage> {
+pub fn sanitize_messages_for_turn(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len());
 
     for m in messages {
@@ -423,43 +418,33 @@ pub fn sanitize_messages_for_turn(
                     out.push(m);
                 }
             }
-            "local" => {
-                if m.include_in_context {
-                    if let Some(ref label) = m.tool_name {
-                        out.push(ChatMessage::new(
-                            "user",
-                            format!(
-                                "<tool_output tool=\"{label}\">\n{}\n</tool_output>",
-                                m.content
-                            ),
-                        ));
-                    } else {
-                        out.push(ChatMessage::new(
-                            "user",
-                            format!(
-                                "<shell_command_output>\n{}\n</shell_command_output>",
-                                m.content
-                            ),
-                        ));
-                    }
-                }
-            }
-            "hook" => {
-                if m.include_in_context {
-                    let label = m.tool_name.as_deref().unwrap_or("hook");
-                    out.push(ChatMessage::new(
-                        "user",
+            "local" if m.include_in_context => {
+                let body = match m.tool_name {
+                    Some(ref label) => {
                         format!(
-                            "<hook_output tool=\"{label}\">\n{}\n</hook_output>",
+                            "<tool_output tool=\"{label}\">\n{}\n</tool_output>",
                             m.content
-                        ),
-                    ));
-                }
+                        )
+                    }
+                    None => format!(
+                        "<shell_command_output>\n{}\n</shell_command_output>",
+                        m.content
+                    ),
+                };
+                out.push(ChatMessage::new("user", body));
             }
-            "error" => {}
-            _ => {
-                out.push(m);
+            "hook" if m.include_in_context => {
+                let label = m.tool_name.as_deref().unwrap_or("hook");
+                out.push(ChatMessage::new(
+                    "user",
+                    format!(
+                        "<hook_output tool=\"{label}\">\n{}\n</hook_output>",
+                        m.content
+                    ),
+                ));
             }
+            "local" | "hook" | "error" => {}
+            _ => out.push(m),
         }
     }
 

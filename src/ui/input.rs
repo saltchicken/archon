@@ -49,24 +49,19 @@ impl TuiApp {
         }
     }
 
-    fn message_text_for(&self, idx: usize, m: &ChatMessage) -> String {
+    fn message_text_for(m: &ChatMessage) -> String {
         if !m.content.trim().is_empty() {
             return m.content.clone();
         }
         if m.role == "assistant" {
-            let resolved_count = self.messages[idx + 1..]
-                .iter()
-                .filter(|n| n.role != "error")
-                .take_while(|n| n.role == "tool")
-                .count();
-            return format_assistant_display(m, resolved_count);
+            return format_assistant_display(m);
         }
         m.content.clone()
     }
 
     fn message_block_text(&self, idx: usize) -> Option<String> {
         if idx < self.messages.len() {
-            Some(self.message_text_for(idx, &self.messages[idx]))
+            Some(Self::message_text_for(&self.messages[idx]))
         } else if idx == self.messages.len() {
             if self.is_streaming {
                 if !self.streaming_text.is_empty() {
@@ -83,6 +78,19 @@ impl TuiApp {
             self.queued_messages
                 .get(idx.saturating_sub(self.messages.len() + 1))
                 .map(|m| m.content.clone())
+        }
+    }
+
+    fn chat_msg_idx_at(&self, pos: Position) -> Option<usize> {
+        let inner = self.chat_inner_area();
+        let inner_y = usize::from(pos.y.saturating_sub(inner.y));
+        let visual_y = inner_y + self.chat_scroll;
+
+        if inner.contains(pos) && inner_y == 0 {
+            self.find_sticky_header_msg()
+                .or_else(|| self.find_msg_at(visual_y).map(|(i, _, _)| i))
+        } else {
+            self.find_msg_at(visual_y).map(|(i, _, _)| i)
         }
     }
 
@@ -150,14 +158,7 @@ impl TuiApp {
                 return btn.code.clone();
             }
 
-            let target_idx = if inner.contains(pos) && inner_y == 0 {
-                self.find_sticky_header_msg()
-                    .or_else(|| self.find_msg_at(visual_y).map(|(i, _, _)| i))
-            } else {
-                self.find_msg_at(visual_y).map(|(i, _, _)| i)
-            };
-
-            if let Some(idx) = target_idx
+            if let Some(idx) = self.chat_msg_idx_at(pos)
                 && let Some(text) = self.message_block_text(idx)
             {
                 return text;
@@ -172,31 +173,18 @@ impl TuiApp {
                 return self.streaming_thought.clone();
             }
         }
-        if let Some((idx, last_msg)) = self.messages.iter().enumerate().next_back() {
-            return self.message_text_for(idx, last_msg);
+        if let Some(last_msg) = self.messages.last() {
+            return Self::message_text_for(last_msg);
         }
         self.text_area.lines().join("\n")
     }
 
     fn context_target_fork_idx(&self, x: u16, y: u16) -> Option<usize> {
-        if self.modal != ActiveModal::None {
-            return None;
-        }
         let pos = Position::new(x, y);
-        if !self.chat_area.contains(pos) {
+        if self.modal != ActiveModal::None || !self.chat_area.contains(pos) {
             return None;
         }
-        let inner = self.chat_inner_area();
-        let inner_y = usize::from(y.saturating_sub(inner.y));
-        let visual_y = inner_y + self.chat_scroll;
-
-        let target_idx = if inner.contains(pos) && inner_y == 0 {
-            self.find_sticky_header_msg()
-                .or_else(|| self.find_msg_at(visual_y).map(|(i, _, _)| i))
-        } else {
-            self.find_msg_at(visual_y).map(|(i, _, _)| i)
-        }?;
-
+        let target_idx = self.chat_msg_idx_at(pos)?;
         self.messages
             .get(target_idx)
             .is_some_and(ChatMessage::is_forkable)
@@ -300,68 +288,67 @@ impl TuiApp {
             return;
         }
 
-        if self.modal == ActiveModal::Sessions {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.session_idx = self.session_idx.saturating_sub(1);
-                }
-                MouseEventKind::ScrollDown => {
-                    let len = self.filtered_sessions().len();
-                    if self.session_idx + 1 < len {
+        match self.modal {
+            ActiveModal::Sessions => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.session_idx = self.session_idx.saturating_sub(1);
+                    }
+                    MouseEventKind::ScrollDown
+                        if self.session_idx + 1 < self.filtered_sessions().len() =>
+                    {
                         self.session_idx += 1;
                     }
+                    _ => {}
                 }
-                _ => {}
+                return;
             }
-            return;
-        }
-
-        if self.modal == ActiveModal::ToolApproval {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => self.tool_scroll = self.tool_scroll.saturating_sub(3),
-                MouseEventKind::ScrollDown => self.tool_scroll = self.tool_scroll.saturating_add(3),
-                _ => {}
+            ActiveModal::ToolApproval => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.tool_scroll = self.tool_scroll.saturating_sub(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.tool_scroll = self.tool_scroll.saturating_add(3);
+                    }
+                    _ => {}
+                }
+                return;
             }
-            return;
-        }
-
-        if self.modal == ActiveModal::TruncatedTool {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    if let Some(ref mut pending) = self.pending_truncated {
-                        pending.scroll = pending.scroll.saturating_sub(3);
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    if let Some(ref mut pending) = self.pending_truncated {
-                        pending.scroll = pending.scroll.saturating_add(3);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(ref mut pending) = self.pending_truncated {
-                        if pending.collapsed {
-                            pending.collapsed = false;
-                        } else {
-                            pending.unfolded = !pending.unfolded;
+            ActiveModal::TruncatedTool => {
+                if let Some(ref mut pending) = self.pending_truncated {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            pending.scroll = pending.scroll.saturating_sub(3);
                         }
+                        MouseEventKind::ScrollDown => {
+                            pending.scroll = pending.scroll.saturating_add(3);
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if pending.collapsed {
+                                pending.collapsed = false;
+                            } else {
+                                pending.unfolded = !pending.unfolded;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
+                return;
             }
-            return;
-        }
-
-        if self.modal == ActiveModal::PayloadInspector {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.payload_scroll = self.payload_scroll.saturating_sub(3);
+            ActiveModal::PayloadInspector => {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.payload_scroll = self.payload_scroll.saturating_sub(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.payload_scroll = self.payload_scroll.saturating_add(3);
+                    }
+                    _ => {}
                 }
-                MouseEventKind::ScrollDown => {
-                    self.payload_scroll = self.payload_scroll.saturating_add(3);
-                }
-                _ => {}
+                return;
             }
-            return;
+            _ => {}
         }
 
         let pos = Position::new(x, y);
@@ -528,6 +515,12 @@ impl TuiApp {
         }
     }
 
+    fn selected_session_id(&self) -> Option<String> {
+        self.filtered_sessions()
+            .get(self.session_idx)
+            .map(|s| s.id.clone())
+    }
+
     fn handle_sessions_key(&mut self, code: KeyCode, ctrl: bool) {
         match code {
             KeyCode::Esc => self.modal = ActiveModal::None,
@@ -541,37 +534,24 @@ impl TuiApp {
                 self.session_idx = self.session_idx.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let len = self.filtered_sessions().len();
-                if self.session_idx + 1 < len {
+                if self.session_idx + 1 < self.filtered_sessions().len() {
                     self.session_idx += 1;
                 }
             }
             KeyCode::Enter => {
-                if let Some(id) = self
-                    .filtered_sessions()
-                    .get(self.session_idx)
-                    .map(|s| s.id.clone())
-                {
+                if let Some(id) = self.selected_session_id() {
                     self.fork_flash = None;
                     let _ = self.cmd_tx.send(EngineCommand::LoadSession(id));
                     self.modal = ActiveModal::None;
                 }
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
-                if let Some(id) = self
-                    .filtered_sessions()
-                    .get(self.session_idx)
-                    .map(|s| s.id.clone())
-                {
+                if let Some(id) = self.selected_session_id() {
                     let _ = self.cmd_tx.send(EngineCommand::TogglePinSession(Some(id)));
                 }
             }
             KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
-                if let Some(id) = self
-                    .filtered_sessions()
-                    .get(self.session_idx)
-                    .map(|s| s.id.clone())
-                {
+                if let Some(id) = self.selected_session_id() {
                     let _ = self.cmd_tx.send(EngineCommand::DeleteSession(id));
                 }
             }

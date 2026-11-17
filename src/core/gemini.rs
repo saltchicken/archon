@@ -542,13 +542,19 @@ pub async fn stream_chat(
             }
 
             for part in cand.content.and_then(|c| c.parts).into_iter().flatten() {
-                if let Some(fc) = part.function_call {
-                    if part.thought {
-                        if let Some(t) = part.text.as_ref().filter(|t| !t.is_empty()) {
-                            let _ = tx.send(EngineEvent::StreamThoughtChunk(t.clone()));
-                        }
-                        push_thought_part(&mut collected_thoughts, part.text, None);
+                let text = part.text.filter(|t| !t.is_empty());
+                if part.thought {
+                    if let Some(ref t) = text {
+                        let _ = tx.send(EngineEvent::StreamThoughtChunk(t.clone()));
                     }
+                } else if let Some(ref t) = text {
+                    has_text = true;
+                    let _ = tx.send(EngineEvent::StreamChunk(t.clone()));
+                }
+
+                let thought_text = part.thought.then_some(text).flatten();
+                if let Some(fc) = part.function_call {
+                    push_thought_part(&mut collected_thoughts, thought_text, None);
                     collected_tools.push(ToolCall {
                         function: ToolFunction {
                             name: fc.name,
@@ -556,17 +562,12 @@ pub async fn stream_chat(
                         },
                         thought_signature: part.thought_signature,
                     });
-                } else if part.thought {
-                    if let Some(t) = part.text.as_ref().filter(|t| !t.is_empty()) {
-                        let _ = tx.send(EngineEvent::StreamThoughtChunk(t.clone()));
-                    }
-                    push_thought_part(&mut collected_thoughts, part.text, part.thought_signature);
                 } else {
-                    if let Some(text) = part.text.filter(|t| !t.is_empty()) {
-                        has_text = true;
-                        let _ = tx.send(EngineEvent::StreamChunk(text));
-                    }
-                    push_thought_part(&mut collected_thoughts, None, part.thought_signature);
+                    push_thought_part(
+                        &mut collected_thoughts,
+                        thought_text,
+                        part.thought_signature,
+                    );
                 }
             }
         }

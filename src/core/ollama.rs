@@ -198,6 +198,15 @@ pub async fn stream_chat(
     let mut eval_tokens = 0u64;
     let mut done_reason = None;
 
+    let mut emit = |is_thought: bool, piece: String| {
+        if is_thought {
+            collected_thinking.push_str(&piece);
+            let _ = tx.send(EngineEvent::StreamThoughtChunk(piece));
+        } else {
+            let _ = tx.send(EngineEvent::StreamChunk(piece));
+        }
+    };
+
     while let Some(line_res) = lines.next().await {
         let line = match line_res {
             Ok(l) => l,
@@ -224,17 +233,11 @@ pub async fn stream_chat(
 
         if let Some(msg) = chunk.message {
             if let Some(thinking) = msg.thinking.filter(|t| !t.is_empty()) {
-                collected_thinking.push_str(&thinking);
-                let _ = tx.send(EngineEvent::StreamThoughtChunk(thinking));
+                emit(true, thinking);
             }
             if let Some(content) = msg.content.filter(|c| !c.is_empty()) {
                 for (is_thought, piece) in splitter.feed(&content) {
-                    if is_thought {
-                        collected_thinking.push_str(&piece);
-                        let _ = tx.send(EngineEvent::StreamThoughtChunk(piece));
-                    } else {
-                        let _ = tx.send(EngineEvent::StreamChunk(piece));
-                    }
+                    emit(is_thought, piece);
                 }
             }
             if let Some(mut tc) = msg.tool_calls.filter(|t| !t.is_empty()) {
@@ -250,12 +253,7 @@ pub async fn stream_chat(
     }
 
     if let Some((is_thought, piece)) = splitter.flush() {
-        if is_thought {
-            collected_thinking.push_str(&piece);
-            let _ = tx.send(EngineEvent::StreamThoughtChunk(piece));
-        } else {
-            let _ = tx.send(EngineEvent::StreamChunk(piece));
-        }
+        emit(is_thought, piece);
     }
 
     let thoughts = if collected_thinking.trim().is_empty() {

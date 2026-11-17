@@ -11,7 +11,7 @@ pub mod skills;
 mod tool_runner;
 mod turns;
 
-pub use protocol::{EngineCommand, EngineEvent, TruncatedToolAction, TurnConfig};
+pub use protocol::{EngineCommand, EngineEvent, ToolExecSource, TruncatedToolAction, TurnConfig};
 
 use crate::tools::ToolCall;
 use attachments::ImageStaging;
@@ -62,9 +62,6 @@ impl ActiveSessionState {
 struct InFlightState {
     active_task: Option<JoinHandle<()>>,
     internal_rx: Option<UnboundedReceiver<EngineEvent>>,
-    executing_tool: bool,
-    active_tool_name: Option<String>,
-    active_tool_summary: Option<String>,
     pending_truncated: Option<PendingTruncatedTool>,
     pending_tools: VecDeque<ToolCall>,
     queued_interjections: Vec<QueuedInterjection>,
@@ -73,21 +70,17 @@ struct InFlightState {
 }
 
 impl InFlightState {
-    fn finish_active_task(&mut self) -> (bool, bool) {
+    fn finish_active_task(&mut self) -> bool {
         self.internal_rx = None;
-        let was_tool = std::mem::replace(&mut self.executing_tool, false);
-        let had_task = self.active_task.take().inspect(|h| h.abort()).is_some();
-        (had_task, was_tool)
+        self.active_task.take().inspect(|h| h.abort()).is_some()
     }
 
     fn is_turn_active(&self) -> bool {
-        self.active_task.is_some() || self.executing_tool
+        self.active_task.is_some()
     }
 
     fn abort_all(&mut self) {
         self.finish_active_task();
-        self.active_tool_name = None;
-        self.active_tool_summary = None;
         self.pending_truncated = None;
         self.queued_interjections.clear();
         self.pending_tools.clear();
@@ -149,12 +142,22 @@ impl CoreEngine {
         })
     }
 
-    fn finish_active_task(&mut self) -> (bool, bool) {
+    fn finish_active_task(&mut self) -> bool {
         self.inflight.finish_active_task()
     }
 
     fn is_turn_active(&self) -> bool {
         self.inflight.is_turn_active()
+    }
+
+    fn spawn_with_tx<F, Fut>(&mut self, f: F)
+    where
+        F: FnOnce(UnboundedSender<EngineEvent>) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.inflight.internal_rx = Some(rx);
+        self.inflight.active_task = Some(tokio::spawn(f(tx)));
     }
 
     fn abort_active_state(&mut self) {
@@ -366,55 +369,11 @@ impl CoreEngine {
                 let err_msg = err.clone();
                 self.on_stream_error(ev, err_msg).await;
             }
-            EngineEvent::ToolCompleted {
-                output,
-                full_output,
-                raw_bytes,
-                truncated,
-            } => {
-                self.on_tool_completed(output, full_output, raw_bytes, truncated)
-                    .await;
+            EngineEvent::ToolExecFinished(source, res) => {
+                self.on_tool_exec_finished(source, res).await;
             }
             EngineEvent::ToolCondensed(res) => {
                 self.on_tool_condensed(res).await;
-            }
-            EngineEvent::ShellCommandCompleted {
-                command,
-                output,
-                full_output,
-                raw_bytes,
-                truncated,
-                include_in_context,
-            } => {
-                self.on_shell_command_completed(
-                    command,
-                    output,
-                    full_output,
-                    raw_bytes,
-                    truncated,
-                    include_in_context,
-                )
-                .await;
-            }
-            EngineEvent::ManualToolCompleted {
-                tool_name,
-                summary,
-                output,
-                full_output,
-                raw_bytes,
-                truncated,
-                include_in_context,
-            } => {
-                self.on_manual_tool_completed(
-                    tool_name,
-                    summary,
-                    output,
-                    full_output,
-                    raw_bytes,
-                    truncated,
-                    include_in_context,
-                )
-                .await;
             }
             EngineEvent::HookCompleted {
                 tool_name,

@@ -188,7 +188,7 @@ fn locate_skill_in_dir(
     query: &str,
     scope_label: &'static str,
 ) -> Option<ResolvedSkill> {
-    for skill in scan_skills_dir(root, true) {
+    for skill in scan_skills_dir(root) {
         let dir_path = skill.dir_path.clone()?;
         let dir_name = dir_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let matches = skill.name.eq_ignore_ascii_case(query)
@@ -325,7 +325,7 @@ fn validate_and_parse_skill_doc(raw: &str, fallback_dir: &Path) -> Result<(toml:
         };
         let table: toml::Table =
             toml::from_str(fm_str).context("Invalid TOML in skill '+++' frontmatter")?;
-        if parse_skill_markdown(trimmed, fallback_dir, true).is_none() {
+        if parse_skill_markdown(trimmed, fallback_dir).is_none() {
             bail!("Invalid skill definition: skill 'name' could not be resolved");
         }
         Ok((table, body.to_string()))
@@ -642,12 +642,12 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let filter = clean_skill_query(&args.name);
 
     let ws_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Workspace) {
-        scan_skills_dir(&ws_dir, true)
+        scan_skills_dir(&ws_dir)
     } else {
         Vec::new()
     };
     let global_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Global) {
-        scan_skills_dir(&global_dir, true)
+        scan_skills_dir(&global_dir)
     } else {
         Vec::new()
     };
@@ -689,11 +689,7 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
 
     let _ = writeln!(out, "Declared skills ({}):", entries.len());
     for (scope, skill, shadowed) in entries {
-        let trigger = if skill.command.is_empty() {
-            &skill.name
-        } else {
-            &skill.command
-        };
+        let trigger = skill.trigger();
         let shadow_note = if shadowed {
             " (overridden by workspace skill)"
         } else {
@@ -763,11 +759,7 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         ctx.max_output_size,
     )?;
 
-    let trigger = if resolved.definition.command.is_empty() {
-        &resolved.definition.name
-    } else {
-        &resolved.definition.command
-    };
+    let trigger = resolved.definition.trigger();
     let refs = list_skill_reference_paths(&resolved.definition);
     let mut header = format!(
         "# Skill: {} (@{}) [{}]\n# Path: {}\n",

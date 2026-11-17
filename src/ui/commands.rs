@@ -126,14 +126,7 @@ impl TuiApp {
                     (!s.command.is_empty() && s.command.starts_with(rest))
                         || s.name.starts_with(rest)
                 })
-                .map(|s| {
-                    let trigger = if s.command.is_empty() {
-                        &s.name
-                    } else {
-                        &s.command
-                    };
-                    format!("@{trigger} ")
-                })
+                .map(|s| format!("@{} ", s.trigger()))
         } else if !line.starts_with("###")
             && let Some((prefix_mark, rest)) = line
                 .strip_prefix("##")

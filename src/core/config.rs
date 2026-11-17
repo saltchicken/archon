@@ -81,17 +81,9 @@ impl MemoryScope {
             Self::Workspace => Self::Global,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Global => "Global",
-            Self::Workspace => "Workspace",
-        }
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub enabled: bool,
     pub items: Vec<String>,
@@ -133,14 +125,13 @@ impl Memory {
     pub fn new(raw_items: Vec<String>, enabled: bool) -> Self {
         let mut items: Vec<String> = Vec::new();
         for raw in raw_items {
-            for line in raw.lines() {
-                let cleaned = clean_memory_item(line);
-                if !cleaned.is_empty()
+            for line in raw.lines().map(clean_memory_item) {
+                if !line.is_empty()
                     && !items
                         .iter()
-                        .any(|existing| existing.eq_ignore_ascii_case(cleaned))
+                        .any(|existing| existing.eq_ignore_ascii_case(line))
                 {
-                    items.push(cleaned.to_string());
+                    items.push(line.to_string());
                 }
             }
         }
@@ -148,19 +139,11 @@ impl Memory {
     }
 
     pub fn count(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|s| !clean_memory_item(s).is_empty())
-            .count()
+        self.items.len()
     }
 
     pub fn to_editor_text(&self) -> String {
-        self.items
-            .iter()
-            .map(|s| clean_memory_item(s))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.items.join("\n")
     }
 
     pub fn from_editor_text(raw: &str, enabled: bool) -> Self {
@@ -169,36 +152,20 @@ impl Memory {
 
     pub fn from_markdown(raw: &str) -> Self {
         let (fm_opt, body) = crate::core::skills::split_toml_frontmatter(raw);
-        let mut enabled = true;
-
-        if let Some(fm) = fm_opt {
-            #[derive(Deserialize)]
-            struct MemoryFrontmatter {
-                #[serde(default = "default_true")]
-                enabled: bool,
-            }
-            fn default_true() -> bool {
-                true
-            }
-            if let Ok(parsed) = toml::from_str::<MemoryFrontmatter>(fm) {
-                enabled = parsed.enabled;
-            }
-        }
-
+        let enabled = fm_opt
+            .and_then(|fm| toml::from_str::<toml::Table>(fm).ok())
+            .and_then(|t| t.get("enabled")?.as_bool())
+            .unwrap_or(true);
         Self::new(vec![body.to_string()], enabled)
     }
 
     pub fn to_markdown_file(&self) -> String {
-        let mut out = String::new();
-        if !self.enabled {
-            out.push_str("+++\nenabled = false\n+++\n\n");
-        }
-        for item in self
-            .items
-            .iter()
-            .map(|s| clean_memory_item(s))
-            .filter(|s| !s.is_empty())
-        {
+        let mut out = if self.enabled {
+            String::new()
+        } else {
+            String::from("+++\nenabled = false\n+++\n\n")
+        };
+        for item in &self.items {
             out.push_str("- ");
             out.push_str(item);
             out.push('\n');
@@ -212,13 +179,7 @@ impl Memory {
         }
         let today = chrono::Local::now().format("%A, %B %-d, %Y");
         let mut bullets = vec![format!("- Current date: {today}")];
-        bullets.extend(
-            self.items
-                .iter()
-                .map(|s| clean_memory_item(s))
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("- {s}")),
-        );
+        bullets.extend(self.items.iter().map(|s| format!("- {s}")));
         Some(format!(
             "<memory>\nPersistent user context and environment facts (always apply):\n{}\n</memory>",
             bullets.join("\n")
@@ -754,20 +715,13 @@ impl Config {
             })
             .map(|p| p.to_string_lossy().into_owned());
 
-        match base_figment
+        let (mut cfg, err) = match base_figment
             .merge(Toml::file(&local_config_path))
             .merge(Env::prefixed("ARCHON_"))
             .extract::<Self>()
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
-                cfg.global_memory = global_memory;
-                cfg.workspace_memory = workspace_memory;
-                cfg.skills = crate::core::skills::discover_skills(
-                    &cfg.app.skills_dir,
-                    Some(ws_skills_dir.as_path()),
-                );
-                cfg.workspace_skills_dir = Some(ws_skills_dir);
                 if cfg.workspace.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     cfg.workspace = bound_ws;
                 } else if let Some(ref ws) = cfg.workspace {
@@ -781,18 +735,22 @@ impl Config {
                 }
                 (cfg, None)
             }
-            Err(e) => {
-                let mut def = Self::default();
-                def.global_memory = global_memory;
-                def.workspace_memory = workspace_memory;
-                def.skills = crate::core::skills::discover_skills(
-                    &def.app.skills_dir,
-                    Some(ws_skills_dir.as_path()),
-                );
-                def.workspace_skills_dir = Some(ws_skills_dir);
-                def.workspace = bound_ws;
-                (def, Some(format!("Config error (using defaults): {e}")))
-            }
-        }
+            Err(e) => (
+                Self {
+                    workspace: bound_ws,
+                    ..Self::default()
+                },
+                Some(format!("Config error (using defaults): {e}")),
+            ),
+        };
+
+        cfg.global_memory = global_memory;
+        cfg.workspace_memory = workspace_memory;
+        cfg.skills = crate::core::skills::discover_skills(
+            &cfg.app.skills_dir,
+            Some(ws_skills_dir.as_path()),
+        );
+        cfg.workspace_skills_dir = Some(ws_skills_dir);
+        (cfg, err)
     }
 }
