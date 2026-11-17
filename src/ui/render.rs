@@ -96,7 +96,7 @@ fn find_associated_tool_call(messages: &[ChatMessage], tool_msg_idx: usize) -> O
 fn is_message_header_line(line: &Line<'_>) -> bool {
     line.spans
         .first()
-        .is_some_and(|s| s.content.starts_with("━━ "))
+        .is_some_and(|s| s.content.starts_with("❯ "))
 }
 
 fn image_badge(m: &ChatMessage) -> String {
@@ -398,7 +398,7 @@ impl TuiApp {
             if header_label.starts_with("⚙ ") || header_label.starts_with("⚡ HOOK") {
                 format!("  {header_label} ")
             } else {
-                format!("━━ {header_label} ")
+                format!("❯ {header_label} ")
             },
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )];
