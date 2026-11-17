@@ -389,7 +389,7 @@ async fn prompt_tool_approval_tty(
 
         let _ = write!(
             stderr,
-            "\x1b[33mApprove? [↵]/y]es / [a]lways / [n]o / [c]ancel (optional `: <feedback>`): \x1b[0m"
+            "\x1b[33mApprove? [Y]es / [a]lways / [n]o / [c]ancel (optional `: <feedback>`): \x1b[0m"
         );
         let _ = stderr.flush();
 
