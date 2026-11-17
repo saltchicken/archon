@@ -84,6 +84,7 @@ pub(super) struct PendingTruncatedUi {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
     Exit,
+    Fork,
     Inspect,
     Memory,
     Reset,
@@ -93,6 +94,7 @@ pub(super) enum SlashCommand {
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
         ("exit", Self::Exit),
+        ("fork", Self::Fork),
         ("inspect", Self::Inspect),
         ("memory", Self::Memory),
         ("reset", Self::Reset),
@@ -131,17 +133,23 @@ pub(super) struct CodeCopyButton {
     pub code: String,
 }
 
+pub(super) struct ForkButton {
+    pub msg_idx: usize,
+    pub visual_y: usize,
+    pub x_range: std::ops::Range<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ContextMenuAction {
     CopyToClipboard,
+    ForkConversation(usize),
 }
 
 impl ContextMenuAction {
-    pub const ALL: &[Self] = &[Self::CopyToClipboard];
-
     pub fn label(self) -> &'static str {
         match self {
             Self::CopyToClipboard => "Copy to clipboard",
+            Self::ForkConversation(_) => "Fork conversation from here",
         }
     }
 }
@@ -237,6 +245,8 @@ pub struct TuiApp {
     pub(super) msg_visual_ranges: Vec<(usize, usize, usize, bool)>,
     pub(super) code_copy_buttons: Vec<CodeCopyButton>,
     pub(super) copied_code_flash: Option<((usize, usize), std::time::Instant)>,
+    pub(super) fork_buttons: Vec<ForkButton>,
+    pub(super) fork_flash: Option<(usize, std::time::Instant)>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) term_focused: bool,
@@ -247,6 +257,8 @@ pub struct TuiApp {
     pub(super) file_path_input: String,
     pub(super) sessions: Vec<SessionSummary>,
     pub(super) session_idx: usize,
+    pub(super) session_id: String,
+    pub(super) session_is_fork: bool,
     pub(super) pending_tool: Option<(String, usize, usize)>,
     pub(super) pending_truncated: Option<PendingTruncatedUi>,
     pub(super) tool_feedback: String,
@@ -374,6 +386,8 @@ impl TuiApp {
             msg_visual_ranges: Vec::new(),
             code_copy_buttons: Vec::new(),
             copied_code_flash: None,
+            fork_buttons: Vec::new(),
+            fork_flash: None,
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
@@ -382,6 +396,8 @@ impl TuiApp {
             file_path_input: String::new(),
             sessions: Vec::new(),
             session_idx: 0,
+            session_id: String::new(),
+            session_is_fork: false,
             pending_tool: None,
             pending_truncated: None,
             tool_feedback: String::new(),
@@ -416,6 +432,21 @@ impl TuiApp {
     pub(super) fn scroll_to_bottom(&mut self) {
         self.follow_tail = true;
         self.chat_scroll = usize::MAX;
+    }
+
+    pub(super) fn fork_from_message(&mut self, msg_idx: usize) {
+        if !self
+            .messages
+            .get(msg_idx)
+            .is_some_and(ChatMessage::is_forkable)
+        {
+            return;
+        }
+        self.fork_flash = Some((
+            msg_idx,
+            std::time::Instant::now() + Duration::from_millis(1500),
+        ));
+        let _ = self.cmd_tx.send(EngineCommand::ForkSession(msg_idx));
     }
 
     fn handle_term_event(&mut self, event: Event) -> bool {
@@ -514,6 +545,13 @@ impl TuiApp {
                         self.copied_code_flash = None;
                         dirty = true;
                     }
+                    if self
+                        .fork_flash
+                        .is_some_and(|(_, exp)| std::time::Instant::now() >= exp)
+                    {
+                        self.fork_flash = None;
+                        dirty = true;
+                    }
                 }
                 maybe_term = term_events.next() => {
                     match maybe_term {
@@ -562,6 +600,8 @@ impl TuiApp {
         match ev {
             EngineEvent::AttachmentsUpdated(list) => self.attachments = list,
             EngineEvent::ChatUpdated {
+                session_id,
+                is_fork,
                 messages,
                 queued_messages,
                 num_ctx,
@@ -584,17 +624,27 @@ impl TuiApp {
                         }
                     }
                 }
-                let is_reset_or_reload = messages.len() < self.messages.len()
+                let session_changed = self.session_id != session_id;
+                self.session_id = session_id;
+                self.session_is_fork = is_fork;
+
+                let is_reset_or_reload = session_changed
+                    || messages.len() < self.messages.len()
                     || self
                         .messages
                         .iter()
                         .zip(messages.iter())
-                        .any(|(old, new)| old.role != new.role);
+                        .any(|(old, new)| old != new);
 
                 let prev_msg_count = if is_reset_or_reload {
                     self.msg_states.clear();
                     self.styled_messages.clear();
                     self.copied_code_flash = None;
+                    if self.fork_flash.is_some_and(|(idx, exp)| {
+                        idx >= messages.len() || std::time::Instant::now() >= exp
+                    }) {
+                        self.fork_flash = None;
+                    }
                     0
                 } else {
                     self.msg_states.truncate(self.messages.len());
@@ -627,6 +677,7 @@ impl TuiApp {
                     {
                         self.msg_states[last_idx].unfolded = true;
                     }
+                    self.scroll_to_bottom();
                 } else {
                     for (i, m) in self.messages.iter().enumerate().skip(prev_msg_count) {
                         if matches!(m.role.as_str(), "tool" | "hook") {
@@ -764,8 +815,11 @@ impl TuiApp {
             }
             EngineEvent::ToolCondensed(_) => {}
             EngineEvent::SessionsListed(list) => {
+                self.session_idx = list
+                    .iter()
+                    .position(|s| !self.session_id.is_empty() && s.id == self.session_id)
+                    .unwrap_or(0);
                 self.sessions = list;
-                self.session_idx = 0;
             }
             EngineEvent::SkillsUpdated(skills) => {
                 self.config.skills = skills;
@@ -1090,6 +1144,19 @@ impl TuiApp {
                 }
                 Some(_) if !args.is_empty() => return false,
                 Some(SlashCommand::Exit) => return true,
+                Some(SlashCommand::Fork) => {
+                    self.record_prompt_and_clear(&raw_prompt);
+                    if let Some(last_assistant_idx) =
+                        self.messages.iter().rposition(ChatMessage::is_forkable)
+                    {
+                        self.fork_from_message(last_assistant_idx);
+                    } else {
+                        self.push_error_message(
+                            "No assistant response available to fork from.".into(),
+                        );
+                    }
+                    return false;
+                }
                 Some(SlashCommand::Inspect) => {
                     self.record_prompt_and_clear(&raw_prompt);
                     self.request_payload_inspector();

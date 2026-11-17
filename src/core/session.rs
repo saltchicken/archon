@@ -15,7 +15,7 @@ pub fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThoughtPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -23,7 +23,7 @@ pub struct ThoughtPart {
     pub thought_signature: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -104,6 +104,13 @@ impl ChatMessage {
             images: (count > 0).then(|| vec![String::new(); count]),
             ..self.clone()
         }
+    }
+
+    pub fn is_forkable(&self) -> bool {
+        self.role == "assistant"
+            && (!self.content.trim().is_empty()
+                || (self.tool_calls.as_ref().is_none_or(Vec::is_empty)
+                    && self.thoughts.as_ref().is_some_and(|t| !t.is_empty())))
     }
 }
 
@@ -202,6 +209,7 @@ impl SessionManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn save(
         &self,
         id: &str,
@@ -210,6 +218,7 @@ impl SessionManager {
         num_ctx: u32,
         messages: &[ChatMessage],
         new_images: &[(String, Vec<u8>)],
+        is_fork: bool,
     ) -> Result<()> {
         if messages.is_empty() && new_images.is_empty() {
             return Ok(());
@@ -222,11 +231,16 @@ impl SessionManager {
                 ..m.clone()
             })
             .collect();
-        let title = clean_msgs
+        let base_title = clean_msgs
             .iter()
             .find(|m| m.role == "user" && !m.content.trim().is_empty())
             .and_then(|m| m.content.lines().next())
             .map_or_else(|| "Untitled Session".into(), |line| truncate_str(line, 50));
+        let title = if is_fork {
+            format!("󰘬 {base_title}")
+        } else {
+            base_title
+        };
 
         let updated_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let messages_json = serde_json::to_string(&clean_msgs)?;
@@ -278,7 +292,7 @@ impl SessionManager {
             "SELECT id, title, updated_at, message_count
              FROM sessions
              WHERE workspace = ?1
-             ORDER BY updated_at DESC",
+             ORDER BY updated_at DESC, id DESC",
         ) else {
             return Vec::new();
         };

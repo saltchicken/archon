@@ -65,6 +65,7 @@ pub enum EngineCommand {
         turn: TurnConfig,
     },
     LoadSession(String),
+    ForkSession(usize),
     DeleteSession(String),
     RefreshSessions,
     ResetChat,
@@ -92,6 +93,8 @@ pub enum EngineCommand {
 pub enum EngineEvent {
     AttachmentsUpdated(Vec<ImageAttachment>),
     ChatUpdated {
+        session_id: String,
+        is_fork: bool,
         messages: Vec<ChatMessage>,
         queued_messages: Vec<ChatMessage>,
         num_ctx: u32,
@@ -196,6 +199,7 @@ pub struct CoreEngine {
     attachments: Arc<ImageStaging>,
     sessions: Arc<SessionManager>,
     session_id: String,
+    session_is_fork: bool,
     turn: TurnConfig,
     active_max_tool_output_size: usize,
     session_auto_approve: HashSet<String>,
@@ -240,6 +244,7 @@ impl CoreEngine {
             attachments,
             sessions,
             session_id: SessionManager::new_id(),
+            session_is_fork: false,
             turn: TurnConfig {
                 system_prompt: String::new(),
                 num_ctx,
@@ -754,7 +759,8 @@ impl CoreEngine {
         ((!names.is_empty()).then_some(names), blobs)
     }
 
-    async fn emit_sessions(&self, delete_first: Option<String>) {
+    async fn emit_sessions(&mut self, delete_first: Option<String>) {
+        self.flush_save_task().await;
         let sessions = Arc::clone(&self.sessions);
         if let Ok(list) = tokio::task::spawn_blocking(move || {
             if let Some(id) = delete_first {
@@ -1068,6 +1074,7 @@ impl CoreEngine {
                         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
                         self.session_id = data.id;
+                        self.session_is_fork = data.title.starts_with("󰘬 ");
                         self.turn.system_prompt = data.system_prompt;
 
                         let mut model_switch_err = None;
@@ -1119,6 +1126,64 @@ impl CoreEngine {
                     }
                 }
             }
+            EngineCommand::ForkSession(msg_idx) => {
+                let Some(target_msg) = self.messages.get(msg_idx) else {
+                    self.emit_error("Cannot fork conversation: message index out of range.")
+                        .await;
+                    return;
+                };
+                if !target_msg.is_forkable() {
+                    self.emit_error(
+                        "Cannot fork conversation: forks can only be created from assistant responses.",
+                    )
+                    .await;
+                    return;
+                }
+
+                info!(
+                    "Forking session {} from message #{msg_idx}",
+                    self.session_id
+                );
+                self.flush_save_task().await;
+                self.abort_active_state();
+                self.executed_skill_hooks.clear();
+
+                self.messages.truncate(msg_idx + 1);
+                if let Some(last) = self.messages.last_mut() {
+                    last.tool_calls = None;
+                }
+
+                let old_session_id = self.session_id.clone();
+                let mut new_session_id = SessionManager::new_id();
+                if new_session_id == old_session_id {
+                    new_session_id.push_str("_fork");
+                }
+                self.session_id = new_session_id;
+                self.session_is_fork = true;
+
+                let mut all_image_names = Vec::new();
+                for msg in &self.messages {
+                    if let Some(names) = &msg.image_names {
+                        all_image_names.extend(names.iter().cloned());
+                    }
+                }
+
+                let sessions = Arc::clone(&self.sessions);
+                let staging = Arc::clone(&self.attachments);
+                let (image_blobs, restored_paths, attachments) =
+                    tokio::task::spawn_blocking(move || {
+                        let blobs = sessions.load_images(&old_session_id, &all_image_names);
+                        let paths = staging.restore_from_bytes(&blobs);
+                        let list = staging.list_attachments();
+                        (blobs, paths, list)
+                    })
+                    .await
+                    .unwrap_or_default();
+
+                self.sent_images.extend(restored_paths);
+                let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
+                self.save_and_emit_chat(image_blobs).await;
+            }
             EngineCommand::DeleteSession(session_id) => {
                 info!("Deleting session: {session_id}");
                 self.emit_sessions(Some(session_id)).await;
@@ -1130,6 +1195,7 @@ impl CoreEngine {
                 self.clear_attachments().await;
 
                 self.session_id = SessionManager::new_id();
+                self.session_is_fork = false;
                 self.session_auto_approve.clear();
                 self.executed_skill_hooks.clear();
                 self.reset_skill_and_sync_model_limits();
@@ -1590,13 +1656,14 @@ impl CoreEngine {
 
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
+        let is_fork = self.session_is_fork;
         let model = self.model.clone();
         let sys = self.turn.system_prompt.clone();
         let ctx = self.turn.num_ctx;
         let msgs = self.messages.clone();
 
         self.save_task = Some(tokio::task::spawn_blocking(move || {
-            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images) {
+            if let Err(e) = sessions.save(&id, &model, &sys, ctx, &msgs, &new_images, is_fork) {
                 error!("Failed to save session {id}: {e}");
             }
         }));
@@ -1776,6 +1843,8 @@ impl CoreEngine {
             .map(ChatMessage::with_ui_image_placeholders)
             .collect();
         let _ = self.tx.send(EngineEvent::ChatUpdated {
+            session_id: self.session_id.clone(),
+            is_fork: self.session_is_fork,
             messages,
             queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,

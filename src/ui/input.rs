@@ -178,12 +178,40 @@ impl TuiApp {
         self.text_area.lines().join("\n")
     }
 
+    fn context_target_fork_idx(&self, x: u16, y: u16) -> Option<usize> {
+        if self.modal != ActiveModal::None {
+            return None;
+        }
+        let pos = Position::new(x, y);
+        if !self.chat_area.contains(pos) {
+            return None;
+        }
+        let inner = self.chat_inner_area();
+        let inner_y = usize::from(y.saturating_sub(inner.y));
+        let visual_y = inner_y + self.chat_scroll;
+
+        let target_idx = if inner.contains(pos) && inner_y == 0 {
+            self.find_sticky_header_msg()
+                .or_else(|| self.find_msg_at(visual_y).map(|(i, _, _)| i))
+        } else {
+            self.find_msg_at(visual_y).map(|(i, _, _)| i)
+        }?;
+
+        self.messages
+            .get(target_idx)
+            .is_some_and(ChatMessage::is_forkable)
+            .then_some(target_idx)
+    }
+
     fn execute_context_menu_action(&mut self, action: ContextMenuAction, target_text: &str) {
         match action {
             ContextMenuAction::CopyToClipboard => {
                 if let Err(e) = copy_text_to_clipboard(target_text) {
                     self.push_error_message(format!("Failed to copy to clipboard: {e}"));
                 }
+            }
+            ContextMenuAction::ForkConversation(msg_idx) => {
+                self.fork_from_message(msg_idx);
             }
         }
     }
@@ -193,11 +221,15 @@ impl TuiApp {
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
             let target_text = self.context_target_text(x, y);
+            let mut actions = vec![ContextMenuAction::CopyToClipboard];
+            if let Some(fork_idx) = self.context_target_fork_idx(x, y) {
+                actions.push(ContextMenuAction::ForkConversation(fork_idx));
+            }
             self.context_menu = Some(ContextMenu {
                 x,
                 y,
                 selected: 0,
-                actions: ContextMenuAction::ALL.to_vec(),
+                actions,
                 target_text,
             });
             return;
@@ -328,9 +360,23 @@ impl TuiApp {
                 let inner_x = usize::from(x.saturating_sub(inner.x));
                 if inner_y == 0
                     && let Some(sticky_idx) = self.find_sticky_header_msg()
-                    && let Some(state) = self.msg_states.get_mut(sticky_idx)
                 {
-                    state.collapsed = !state.collapsed;
+                    if self
+                        .fork_buttons
+                        .iter()
+                        .any(|b| b.msg_idx == sticky_idx && b.x_range.contains(&inner_x))
+                    {
+                        self.fork_from_message(sticky_idx);
+                    } else if let Some(state) = self.msg_states.get_mut(sticky_idx) {
+                        state.collapsed = !state.collapsed;
+                    }
+                } else if let Some(btn) = self
+                    .fork_buttons
+                    .iter()
+                    .find(|b| b.visual_y == visual_y && b.x_range.contains(&inner_x))
+                {
+                    let target_idx = btn.msg_idx;
+                    self.fork_from_message(target_idx);
                 } else if let Some(btn) = self
                     .code_copy_buttons
                     .iter()
@@ -443,6 +489,7 @@ impl TuiApp {
             KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
             KeyCode::Enter => {
                 if let Some(s) = self.sessions.get(self.session_idx) {
+                    self.fork_flash = None;
                     let _ = self.cmd_tx.send(EngineCommand::LoadSession(s.id.clone()));
                     self.modal = ActiveModal::None;
                 }

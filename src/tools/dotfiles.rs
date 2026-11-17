@@ -224,7 +224,11 @@ fn check_allowed_dir(rel: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn resolve_existing_config_path(raw: &str, allow_root: bool, config: &Config) -> Result<(PathBuf, PathBuf, String)> {
+fn resolve_existing_config_path(
+    raw: &str,
+    allow_root: bool,
+    config: &Config,
+) -> Result<(PathBuf, PathBuf, String)> {
     let root = config_root()?;
     let rel = normalize_config_subpath(raw, &root)?;
     if rel.as_os_str().is_empty() && !allow_root {
@@ -357,7 +361,8 @@ fn run_validate(raw_path: &str, config: &Config) -> Result<String> {
                 continue;
             }
             if let Some(rel) = diff_paths(p, &root)
-                && (check_not_blocked(&rel, &blocked).is_err() || check_allowed_dir(&rel, config).is_err())
+                && (check_not_blocked(&rel, &blocked).is_err()
+                    || check_allowed_dir(&rel, config).is_err())
             {
                 continue;
             }
@@ -404,7 +409,10 @@ fn run_validate(raw_path: &str, config: &Config) -> Result<String> {
     }
 }
 
-pub fn preview_edit(args: &DotfilesArgs, config: &Config) -> Result<(PathBuf, String, String, String, usize)> {
+pub fn preview_edit(
+    args: &DotfilesArgs,
+    config: &Config,
+) -> Result<(PathBuf, String, String, String, usize)> {
     if args.edits.is_empty() {
         bail!("'edits' array cannot be empty for dotfiles edit");
     }
@@ -427,7 +435,8 @@ impl BlockingTool for Tool {
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {
             DotfilesAction::List => {
-                let (root, target, display) = resolve_existing_config_path(&args.path, true, &ctx.config)?;
+                let (root, target, display) =
+                    resolve_existing_config_path(&args.path, true, &ctx.config)?;
                 let blocked = blocked_globset(&[])?;
                 let max_depth = args.max_depth.unwrap_or(2).clamp(1, 5);
                 render_directory_listing(
@@ -437,16 +446,16 @@ impl BlockingTool for Tool {
                     max_depth,
                     ctx.max_output_size,
                     |path| {
-                        diff_paths(path, &root)
-                            .is_some_and(|rel| {
-                                check_not_blocked(&rel, &blocked).is_ok()
-                                    && check_allowed_dir(&rel, &ctx.config).is_ok()
-                            })
+                        diff_paths(path, &root).is_some_and(|rel| {
+                            check_not_blocked(&rel, &blocked).is_ok()
+                                && check_allowed_dir(&rel, &ctx.config).is_ok()
+                        })
                     },
                 )
             }
             DotfilesAction::Read => {
-                let (_, target_path, display) = resolve_existing_config_path(&args.path, false, &ctx.config)?;
+                let (_, target_path, display) =
+                    resolve_existing_config_path(&args.path, false, &ctx.config)?;
                 read_file_contents(
                     &target_path,
                     &display,
@@ -459,7 +468,8 @@ impl BlockingTool for Tool {
                 if args.pattern.is_empty() {
                     bail!("'pattern' is required when `action` is `search`");
                 }
-                let (root, scan_root, _) = resolve_existing_config_path(&args.path, true, &ctx.config)?;
+                let (root, scan_root, _) =
+                    resolve_existing_config_path(&args.path, true, &ctx.config)?;
                 let blocked = blocked_globset(&args.exclude)?;
                 let include_set = (!args.include.is_empty())
                     .then(|| build_globset(&args.include, true))
@@ -495,7 +505,9 @@ impl BlockingTool for Tool {
                         let Some(rel) = diff_paths(&canon, &root) else {
                             continue;
                         };
-                        if check_not_blocked(&rel, &blocked).is_err() || check_allowed_dir(&rel, &ctx.config).is_err() {
+                        if check_not_blocked(&rel, &blocked).is_err()
+                            || check_allowed_dir(&rel, &ctx.config).is_err()
+                        {
                             continue;
                         }
                         if include_set.as_ref().is_some_and(|inc| !inc.is_match(&rel)) {
@@ -522,7 +534,8 @@ impl BlockingTool for Tool {
                 )
             }
             DotfilesAction::Edit => {
-                let (target_path, display, _, updated, hunk_count) = preview_edit(&args, &ctx.config)?;
+                let (target_path, display, _, updated, hunk_count) =
+                    preview_edit(&args, &ctx.config)?;
                 atomic_write_file(&target_path, updated).context("Error writing config file")?;
                 let mut msg = if hunk_count == 1 {
                     format!("Successfully edited {display}")
@@ -535,7 +548,8 @@ impl BlockingTool for Tool {
                 Ok(msg)
             }
             DotfilesAction::Create => {
-                let (root, target_path, display) = resolve_new_config_path(&args.path, &ctx.config)?;
+                let (root, target_path, display) =
+                    resolve_new_config_path(&args.path, &ctx.config)?;
                 ensure_parent_dir(&target_path, &root, "created parent directory")?;
                 atomic_write_file(&target_path, &args.content)
                     .context("Error writing new config file")?;

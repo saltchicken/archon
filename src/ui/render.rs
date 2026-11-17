@@ -1,4 +1,6 @@
-use super::{ActiveModal, CodeCopyButton, MsgUiState, SlashCommand, TuiApp, titled_block};
+use super::{
+    ActiveModal, CodeCopyButton, ForkButton, MsgUiState, SlashCommand, TuiApp, titled_block,
+};
 use crate::{
     core::session::{ChatMessage, truncate_str},
     tools::{self, ToolCall},
@@ -1643,6 +1645,11 @@ impl TuiApp {
         compact: bool,
     ) {
         let start_visual = lines.len();
+        let can_fork = self.messages.get(idx).is_some_and(ChatMessage::is_forkable);
+        let is_fork_flashed = self
+            .fork_flash
+            .filter(|&(_, exp)| std::time::Instant::now() < exp)
+            .is_some_and(|(target_idx, _)| target_idx == idx);
         let state = &mut self.msg_states[idx];
         let total_content = styled_content.len();
         let max_lines = if state.unfolded {
@@ -1667,10 +1674,30 @@ impl TuiApp {
         }
         if state.collapsed {
             header_spans.push(Span::styled(
-                format!("+{total_content}"),
+                format!("+{total_content} "),
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
+            ));
+        }
+        if can_fork {
+            let prefix_w = spans_display_width(&header_spans);
+            let (badge_glyph, badge_color) = if is_fork_flashed {
+                ("󰄬", Color::Green)
+            } else {
+                ("󰘬", Color::Yellow)
+            };
+            let badge_w = display_width(badge_glyph).max(2);
+            self.fork_buttons.push(ForkButton {
+                msg_idx: idx,
+                visual_y: start_visual,
+                x_range: prefix_w.saturating_sub(1)..(prefix_w + badge_w + 1),
+            });
+            header_spans.push(Span::styled(
+                badge_glyph,
+                Style::default()
+                    .fg(badge_color)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         lines.push(Line::from(header_spans));
@@ -1883,6 +1910,7 @@ impl TuiApp {
         self.msg_states.resize(total_slots, MsgUiState::default());
         self.msg_visual_ranges.clear();
         self.code_copy_buttons.clear();
+        self.fork_buttons.clear();
 
         let options = textwrap::Options::new(available_width).break_words(true);
 
@@ -2083,9 +2111,13 @@ impl TuiApp {
             visible_lines[0] = sticky;
         }
 
+        let chat_title = if self.session_is_fork {
+            format!(" Conversation [{}] 󰘬 ", self.model)
+        } else {
+            format!(" Conversation [{}] ", self.model)
+        };
         f.render_widget(
-            Paragraph::new(visible_lines)
-                .block(self.chat_area_block(format!(" Conversation [{}] ", self.model))),
+            Paragraph::new(visible_lines).block(self.chat_area_block(chat_title)),
             chunks[0],
         );
 

@@ -141,13 +141,18 @@ impl TuiApp {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let prefix = if i == self.session_idx { ">> " } else { "   " };
-                ListItem::new(format!(
-                    "{prefix}[{}] {} ({} msgs)",
-                    s.updated_at,
-                    sanitize_line(&s.title),
-                    s.messages
-                ))
+                let is_active = !self.session_id.is_empty() && s.id == self.session_id;
+                let (prefix, style) = selection_style(i == self.session_idx, is_active);
+                let active = if is_active { " [active]" } else { "" };
+                ListItem::new(Line::from(Span::styled(
+                    format!(
+                        "{prefix}[{}] {} ({} msgs){active}",
+                        s.updated_at,
+                        sanitize_line(&s.title),
+                        s.messages
+                    ),
+                    style,
+                )))
             })
             .collect();
 
