@@ -444,4 +444,115 @@ impl CoreEngine {
         let turn = self.turn.clone();
         self.spawn_model_turn(&turn).await;
     }
+
+    pub(super) async fn handle_compact_chat(&mut self, instructions: Option<String>) {
+        if self.is_turn_active()
+            || self.inflight.pending_truncated.is_some()
+            || !self.inflight.pending_tools.is_empty()
+            || !self.inflight.queued_interjections.is_empty()
+        {
+            self.emit_error("Cannot compact conversation while a turn or tool approval is active.")
+                .await;
+            return;
+        }
+
+        let has_meaningful_msgs = self
+            .session
+            .messages
+            .iter()
+            .any(|m| m.role != "error" && !m.content.trim().is_empty());
+        if !has_meaningful_msgs {
+            self.emit_error("Conversation is empty; nothing to compact.")
+                .await;
+            return;
+        }
+
+        info!("Compacting conversation history ({} messages)", self.session.messages.len());
+        let _ = self.tx.send(EngineEvent::ToolStarted {
+            summary: "compacting conversation context".into(),
+            index: 1,
+            total: 1,
+        });
+
+        let provider = self.provider;
+        let client = self.client.clone();
+        let model = self.model.clone();
+        let config = self.config.clone();
+        let num_ctx = self.turn.num_ctx;
+        let messages = self.session.messages.clone();
+
+        self.spawn_with_tx(move |tx| async move {
+            let res = provider
+                .compact_conversation(
+                    client,
+                    model,
+                    config,
+                    num_ctx,
+                    &messages,
+                    instructions.as_deref(),
+                )
+                .await;
+            match res {
+                Ok((summary, prompt_tokens, eval_tokens)) => {
+                    let _ = tx.send(EngineEvent::ChatCompacted {
+                        res: Ok(summary),
+                        prompt_tokens,
+                        eval_tokens,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(EngineEvent::ChatCompacted {
+                        res: Err(err),
+                        prompt_tokens: 0,
+                        eval_tokens: 0,
+                    });
+                }
+            }
+        });
+    }
+
+    pub(super) async fn on_chat_compacted(
+        &mut self,
+        res: Result<String, String>,
+        _prompt_tokens: u64,
+        eval_tokens: u64,
+    ) {
+        self.finish_active_task();
+        let _ = self.tx.send(EngineEvent::ToolCompleted);
+
+        match res {
+            Ok(summary) => {
+                let prev_count = self.session.messages.len();
+                let checkpoint_user = ChatMessage::new(
+                    "user",
+                    format!(
+                        "[Conversation History Compacted — Prior {prev_count} messages summarized into checkpoint below]"
+                    ),
+                );
+                let checkpoint_assistant = ChatMessage::new(
+                    "assistant",
+                    format!("### Compacted Context Checkpoint\n\n{}", summary.trim()),
+                );
+
+                self.session.messages = vec![checkpoint_user, checkpoint_assistant];
+                let estimated_tokens = if eval_tokens > 0 {
+                    eval_tokens + 64
+                } else {
+                    (summary.len() as u64 / 4).max(1)
+                };
+                self.save_and_emit_chat(Vec::new()).await;
+                let _ = self
+                    .tx
+                    .send(EngineEvent::TokenUsageUpdated(estimated_tokens));
+                info!(
+                    "Conversation compacted from {prev_count} messages to 2 checkpoint messages (~{estimated_tokens} tokens)."
+                );
+            }
+            Err(err) => {
+                error!("Failed to compact conversation: {err}");
+                self.emit_error(format!("Failed to compact conversation: {err}"))
+                    .await;
+            }
+        }
+    }
 }

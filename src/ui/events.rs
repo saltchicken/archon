@@ -120,7 +120,10 @@ impl TuiApp {
                 self.tool_scroll = 0;
                 self.modal = ActiveModal::TruncatedTool;
             }
-            EngineEvent::ToolCondensed(_) => {}
+            EngineEvent::ToolCondensed(_) | EngineEvent::ChatCompacted { .. } => {}
+            EngineEvent::TokenUsageUpdated(tokens) => {
+                self.used_tokens = tokens;
+            }
             EngineEvent::SessionsListed(list) => {
                 self.on_sessions_listed(list);
             }
@@ -170,6 +173,9 @@ impl TuiApp {
     ) {
         if messages.is_empty() {
             self.used_tokens = 0;
+        } else if self.session_id != session_id || messages.len() < self.messages.len() {
+            let approx_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+            self.used_tokens = (approx_chars as u64 / 4).max(1);
         }
         if self.prompt_history.is_empty() {
             for m in &messages {

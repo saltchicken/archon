@@ -311,6 +311,9 @@ impl CoreEngine {
             EngineCommand::ResetChat => {
                 self.handle_reset_chat().await;
             }
+            EngineCommand::CompactChat { instructions } => {
+                self.handle_compact_chat(instructions).await;
+            }
             EngineCommand::SwitchModel {
                 model,
                 num_ctx,
@@ -374,6 +377,14 @@ impl CoreEngine {
             }
             EngineEvent::ToolCondensed(res) => {
                 self.on_tool_condensed(res).await;
+            }
+            EngineEvent::ChatCompacted {
+                res,
+                prompt_tokens,
+                eval_tokens,
+            } => {
+                self.on_chat_compacted(res, prompt_tokens, eval_tokens)
+                    .await;
             }
             EngineEvent::HookCompleted {
                 tool_name,

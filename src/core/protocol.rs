@@ -86,6 +86,9 @@ pub enum EngineCommand {
     DeleteSession(String),
     RefreshSessions,
     ResetChat,
+    CompactChat {
+        instructions: Option<String>,
+    },
     SwitchModel {
         model: String,
         num_ctx: u32,
@@ -164,6 +167,12 @@ pub enum EngineEvent {
         total: usize,
     },
     ToolCondensed(Result<String, String>),
+    ChatCompacted {
+        res: Result<String, String>,
+        prompt_tokens: u64,
+        eval_tokens: u64,
+    },
+    TokenUsageUpdated(u64),
     SessionsListed(Vec<SessionSummary>),
     SkillsUpdated(Vec<SkillDefinition>),
     MemoryUpdated {

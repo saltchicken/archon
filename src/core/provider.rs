@@ -219,6 +219,86 @@ impl Provider {
         Ok(condensed)
     }
 
+    pub async fn compact_conversation(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        num_ctx: u32,
+        messages: &[ChatMessage],
+        custom_instructions: Option<&str>,
+    ) -> std::result::Result<(String, u64, u64), String> {
+        let system_prompt = "You are a precise conversation context compactor for an AI coding assistant. Summarize the conversation history so far into a structured, comprehensive technical checkpoint that can replace the prior messages without losing critical context. Preserve:\n1. User goals, requirements, and preferences.\n2. Key architectural decisions, findings, and root causes.\n3. Exact file paths, function/type signatures, and modifications made or planned.\n4. Unresolved issues, current state, and immediate next steps.\nBe concise, factual, and well-structured.";
+
+        let mut transcript = String::new();
+        for (idx, m) in sanitize_messages_for_turn(messages.to_vec())
+            .iter()
+            .enumerate()
+        {
+            let _ = writeln!(transcript, "--- Message #{} ({}) ---", idx + 1, m.role);
+            if !m.content.trim().is_empty() {
+                let _ = writeln!(transcript, "{}", m.content);
+            }
+            if let Some(ref calls) = m.tool_calls {
+                for c in calls {
+                    let _ = writeln!(
+                        transcript,
+                        "Tool Call: {}({})",
+                        c.function.name, c.function.arguments
+                    );
+                }
+            }
+            let _ = writeln!(transcript);
+        }
+
+        let guide_ctx = match custom_instructions
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+        {
+            Some(g) => format!("Additional user instructions for this compaction:\n{g}\n\n"),
+            None => String::new(),
+        };
+
+        let prompt = format!(
+            "{guide_ctx}Please compact the following conversation transcript into a dense context checkpoint:\n\n<conversation_transcript>\n{transcript}</conversation_transcript>"
+        );
+
+        let req_msgs = vec![ChatMessage::new("user", prompt)];
+        let payload = match self {
+            Self::Ollama => ollama::build_payload(&model, &req_msgs, system_prompt, num_ctx, None),
+            Self::Gemini => gemini::build_payload(&req_msgs, system_prompt, None),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        self.stream_payload(client, model, config, payload, tx)
+            .await;
+
+        let mut summary = String::new();
+        let mut eval_tokens = 0u64;
+        let mut prompt_tokens = 0u64;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                EngineEvent::StreamChunk(c) => summary.push_str(&c),
+                EngineEvent::StreamError(e) => return Err(e),
+                EngineEvent::StreamDone {
+                    prompt_tokens: pt,
+                    eval_tokens: et,
+                    ..
+                } => {
+                    prompt_tokens = pt;
+                    eval_tokens = et;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if summary.trim().is_empty() {
+            return Err("Model returned an empty summary while compacting conversation.".into());
+        }
+        Ok((summary, prompt_tokens, eval_tokens))
+    }
+
     pub async fn stream_turn(
         &self,
         client: Client,

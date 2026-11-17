@@ -13,6 +13,7 @@ use crate::{
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
+    Compact,
     Exit,
     Fork,
     Inspect,
@@ -25,6 +26,7 @@ pub(super) enum SlashCommand {
 
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
+        ("compact", Self::Compact),
         ("exit", Self::Exit),
         ("fork", Self::Fork),
         ("inspect", Self::Inspect),
@@ -231,6 +233,15 @@ impl TuiApp {
             }
             Some(SlashCommand::Memory) => {
                 self.handle_memory_slash_command(raw_prompt, args);
+                false
+            }
+            Some(SlashCommand::Compact) => {
+                self.record_prompt_and_clear(raw_prompt);
+                self.scroll_to_bottom();
+                let instructions = (!args.is_empty()).then(|| args.to_string());
+                let _ = self
+                    .cmd_tx
+                    .send(EngineCommand::CompactChat { instructions });
                 false
             }
             Some(SlashCommand::Rename) => {
