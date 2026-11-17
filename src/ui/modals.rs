@@ -139,11 +139,11 @@ impl TuiApp {
         let area = centered_rect(72, 62, f.area());
         f.render_widget(Clear, area);
 
-        let stored_count = self.sessions.iter().filter(|s| !s.pinned).count();
+        let recent_count = self.sessions.iter().filter(|s| !s.pinned).count();
         let pinned_count = self.sessions.iter().filter(|s| s.pinned).count();
 
-        let (stored_style, pinned_style) = match self.session_view {
-            SessionView::AutoStored => (
+        let (recent_style, pinned_style) = match self.session_view {
+            SessionView::Recent => (
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -158,14 +158,14 @@ impl TuiApp {
         };
 
         let pin_action_label = match self.session_view {
-            SessionView::AutoStored => "[P] Pin",
+            SessionView::Recent => "[P] Pin",
             SessionView::Pinned => "[P] Unpin",
         };
 
         let header = Line::from(vec![
             Span::styled("Conversations ", Style::default().fg(Color::Cyan)),
             Span::raw("│ View: ["),
-            Span::styled(format!("Auto-Stored ({stored_count})"), stored_style),
+            Span::styled(format!("Recent ({recent_count})"), recent_style),
             Span::raw(" / "),
             Span::styled(format!("󰐃 Pinned ({pinned_count})"), pinned_style),
             Span::raw("]"),
@@ -194,7 +194,7 @@ impl TuiApp {
 
         let filtered = self.filtered_sessions();
         let list_title = match self.session_view {
-            SessionView::AutoStored => " Auto-Stored Sessions ",
+            SessionView::Recent => " Recent Sessions ",
             SessionView::Pinned => " 󰐃 Pinned Sessions ",
         };
         let list_block = chat_block(list_title).border_style(Style::default().fg(Color::Cyan));
@@ -202,9 +202,9 @@ impl TuiApp {
 
         let items: Vec<ListItem> = if filtered.is_empty() {
             let empty_msg = match self.session_view {
-                SessionView::AutoStored => "   No auto-stored sessions found.",
+                SessionView::Recent => "   No recent sessions found.",
                 SessionView::Pinned => {
-                    "   No pinned sessions yet — press [P] on an auto-stored session or run /pin."
+                    "   No pinned sessions yet — press [P] on a recent session or run /pin."
                 }
             };
             vec![ListItem::new(Line::from(Span::styled(
@@ -229,8 +229,7 @@ impl TuiApp {
                     let active = if is_active { " [active]" } else { "" };
                     ListItem::new(Line::from(Span::styled(
                         format!(
-                            "{prefix}[{}] {pin_badge}{} ({} msgs){active}",
-                            s.updated_at,
+                            "{prefix}{pin_badge}{} ({} msgs){active}",
                             sanitize_line(&s.title),
                             s.messages
                         ),

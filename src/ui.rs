@@ -85,15 +85,15 @@ pub(super) struct PendingTruncatedUi {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum SessionView {
     #[default]
-    AutoStored,
+    Recent,
     Pinned,
 }
 
 impl SessionView {
     pub fn toggle(self) -> Self {
         match self {
-            Self::AutoStored => Self::Pinned,
-            Self::Pinned => Self::AutoStored,
+            Self::Recent => Self::Pinned,
+            Self::Pinned => Self::Recent,
         }
     }
 }
@@ -878,7 +878,7 @@ impl TuiApp {
                         self.session_view = if active.pinned {
                             SessionView::Pinned
                         } else {
-                            SessionView::AutoStored
+                            SessionView::Recent
                         };
                     }
                     let filtered = self.filtered_sessions();

@@ -131,7 +131,6 @@ pub struct SessionData {
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
-    pub updated_at: String,
     pub messages: usize,
     pub pinned: bool,
 }
@@ -337,7 +336,7 @@ impl SessionManager {
     pub fn list(&self) -> Vec<SessionSummary> {
         let conn = self.lock_conn();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT id, title, updated_at, message_count, pinned
+            "SELECT id, title, message_count, pinned
              FROM sessions
              WHERE workspace = ?1
              ORDER BY updated_at DESC, id DESC",
@@ -349,9 +348,8 @@ impl SessionManager {
             Ok(SessionSummary {
                 id: row.get(0)?,
                 title: row.get(1)?,
-                updated_at: row.get(2)?,
-                messages: row.get::<_, i64>(3)?.max(0) as usize,
-                pinned: row.get::<_, i64>(4).unwrap_or(0) != 0,
+                messages: row.get::<_, i64>(2)?.max(0) as usize,
+                pinned: row.get::<_, i64>(3).unwrap_or(0) != 0,
             })
         })
         .into_iter()
