@@ -1,4 +1,5 @@
 mod input;
+mod markdown;
 mod modals;
 mod render;
 
