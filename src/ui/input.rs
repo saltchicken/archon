@@ -107,7 +107,7 @@ impl TuiApp {
             ActiveModal::AddFile => return self.file_path_input.clone(),
             ActiveModal::Sessions => {
                 return self
-                    .sessions
+                    .filtered_sessions()
                     .get(self.session_idx)
                     .map(|s| s.title.clone())
                     .unwrap_or_default();
@@ -300,6 +300,22 @@ impl TuiApp {
             return;
         }
 
+        if self.modal == ActiveModal::Sessions {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.session_idx = self.session_idx.saturating_sub(1);
+                }
+                MouseEventKind::ScrollDown => {
+                    let len = self.filtered_sessions().len();
+                    if self.session_idx + 1 < len {
+                        self.session_idx += 1;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.modal == ActiveModal::ToolApproval {
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.tool_scroll = self.tool_scroll.saturating_sub(3),
@@ -453,7 +469,7 @@ impl TuiApp {
 
         match self.modal {
             ActiveModal::AddFile => self.handle_add_file_key(key.code),
-            ActiveModal::Sessions => self.handle_sessions_key(key.code),
+            ActiveModal::Sessions => self.handle_sessions_key(key.code, ctrl),
             ActiveModal::ToolApproval => self.handle_tool_approval_key(key.code, ctrl, shift),
             ActiveModal::TruncatedTool => self.handle_truncated_tool_key(key.code, ctrl, shift),
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
@@ -512,21 +528,51 @@ impl TuiApp {
         }
     }
 
-    fn handle_sessions_key(&mut self, code: KeyCode) {
+    fn handle_sessions_key(&mut self, code: KeyCode, ctrl: bool) {
         match code {
             KeyCode::Esc => self.modal = ActiveModal::None,
-            KeyCode::Up => self.session_idx = self.session_idx.saturating_sub(1),
-            KeyCode::Down if self.session_idx + 1 < self.sessions.len() => self.session_idx += 1,
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                self.toggle_session_view();
+            }
+            KeyCode::Char('s') | KeyCode::Char('t') if ctrl => {
+                self.toggle_session_view();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.session_idx = self.session_idx.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = self.filtered_sessions().len();
+                if self.session_idx + 1 < len {
+                    self.session_idx += 1;
+                }
+            }
             KeyCode::Enter => {
-                if let Some(s) = self.sessions.get(self.session_idx) {
+                if let Some(id) = self
+                    .filtered_sessions()
+                    .get(self.session_idx)
+                    .map(|s| s.id.clone())
+                {
                     self.fork_flash = None;
-                    let _ = self.cmd_tx.send(EngineCommand::LoadSession(s.id.clone()));
+                    let _ = self.cmd_tx.send(EngineCommand::LoadSession(id));
                     self.modal = ActiveModal::None;
                 }
             }
-            KeyCode::Char('d') | KeyCode::Delete => {
-                if let Some(s) = self.sessions.get(self.session_idx) {
-                    let _ = self.cmd_tx.send(EngineCommand::DeleteSession(s.id.clone()));
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                if let Some(id) = self
+                    .filtered_sessions()
+                    .get(self.session_idx)
+                    .map(|s| s.id.clone())
+                {
+                    let _ = self.cmd_tx.send(EngineCommand::TogglePinSession(Some(id)));
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                if let Some(id) = self
+                    .filtered_sessions()
+                    .get(self.session_idx)
+                    .map(|s| s.id.clone())
+                {
+                    let _ = self.cmd_tx.send(EngineCommand::DeleteSession(id));
                 }
             }
             _ => {}
@@ -805,6 +851,7 @@ impl TuiApp {
                 let _ = self.cmd_tx.send(EngineCommand::ClearImages);
             }
             KeyCode::Char('s') if ctrl => {
+                self.sessions_modal_just_opened = true;
                 let _ = self.cmd_tx.send(EngineCommand::RefreshSessions);
                 self.modal = ActiveModal::Sessions;
             }

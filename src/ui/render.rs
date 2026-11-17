@@ -676,11 +676,14 @@ impl TuiApp {
             visible_lines[0] = sticky;
         }
 
-        let chat_title = if self.session_is_fork {
-            format!(" Conversation [{}] 󰘬 ", self.model)
-        } else {
-            format!(" Conversation [{}] ", self.model)
-        };
+        let mut badges = String::new();
+        if self.session_is_pinned {
+            badges.push_str(" 󰐃");
+        }
+        if self.session_is_fork {
+            badges.push_str(" 󰘬");
+        }
+        let chat_title = format!(" Conversation [{}]{badges} ", self.model);
         f.render_widget(
             Paragraph::new(visible_lines).block(self.chat_area_block(chat_title)),
             chunks[0],

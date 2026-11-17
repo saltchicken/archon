@@ -82,12 +82,29 @@ pub(super) struct PendingTruncatedUi {
     pub scroll: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum SessionView {
+    #[default]
+    AutoStored,
+    Pinned,
+}
+
+impl SessionView {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::AutoStored => Self::Pinned,
+            Self::Pinned => Self::AutoStored,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
     Exit,
     Fork,
     Inspect,
     Memory,
+    Pin,
     Rename,
     Reset,
     Run,
@@ -99,6 +116,7 @@ impl SlashCommand {
         ("fork", Self::Fork),
         ("inspect", Self::Inspect),
         ("memory", Self::Memory),
+        ("pin", Self::Pin),
         ("rename", Self::Rename),
         ("reset", Self::Reset),
         ("run", Self::Run),
@@ -261,9 +279,12 @@ pub struct TuiApp {
     pub(super) context_menu: Option<ContextMenu>,
     pub(super) file_path_input: String,
     pub(super) sessions: Vec<SessionSummary>,
+    pub(super) session_view: SessionView,
     pub(super) session_idx: usize,
+    pub(super) sessions_modal_just_opened: bool,
     pub(super) session_id: String,
     pub(super) session_is_fork: bool,
+    pub(super) session_is_pinned: bool,
     pub(super) pending_tool: Option<(String, usize, usize)>,
     pub(super) pending_truncated: Option<PendingTruncatedUi>,
     pub(super) tool_feedback: String,
@@ -402,9 +423,12 @@ impl TuiApp {
             context_menu: None,
             file_path_input: String::new(),
             sessions: Vec::new(),
+            session_view: SessionView::default(),
             session_idx: 0,
+            sessions_modal_just_opened: false,
             session_id: String::new(),
             session_is_fork: false,
+            session_is_pinned: false,
             pending_tool: None,
             pending_truncated: None,
             tool_feedback: String::new(),
@@ -439,6 +463,23 @@ impl TuiApp {
     pub(super) fn scroll_to_bottom(&mut self) {
         self.follow_tail = true;
         self.chat_scroll = usize::MAX;
+    }
+
+    pub(super) fn filtered_sessions(&self) -> Vec<&SessionSummary> {
+        let want_pinned = self.session_view == SessionView::Pinned;
+        self.sessions
+            .iter()
+            .filter(|s| s.pinned == want_pinned)
+            .collect()
+    }
+
+    pub(super) fn toggle_session_view(&mut self) {
+        self.session_view = self.session_view.toggle();
+        let filtered = self.filtered_sessions();
+        self.session_idx = filtered
+            .iter()
+            .position(|s| !self.session_id.is_empty() && s.id == self.session_id)
+            .unwrap_or(0);
     }
 
     pub(super) fn fork_from_message(&mut self, msg_idx: usize) {
@@ -611,6 +652,7 @@ impl TuiApp {
             EngineEvent::ChatUpdated {
                 session_id,
                 is_fork,
+                is_pinned,
                 messages,
                 queued_messages,
                 num_ctx,
@@ -636,6 +678,7 @@ impl TuiApp {
                 let session_changed = self.session_id != session_id;
                 self.session_id = session_id;
                 self.session_is_fork = is_fork;
+                self.session_is_pinned = is_pinned;
 
                 let is_reset_or_reload = session_changed
                     || messages.len() < self.messages.len()
@@ -824,11 +867,29 @@ impl TuiApp {
             }
             EngineEvent::ToolCondensed(_) => {}
             EngineEvent::SessionsListed(list) => {
-                self.session_idx = list
-                    .iter()
-                    .position(|s| !self.session_id.is_empty() && s.id == self.session_id)
-                    .unwrap_or(0);
                 self.sessions = list;
+                if self.sessions_modal_just_opened {
+                    self.sessions_modal_just_opened = false;
+                    if let Some(active) = self
+                        .sessions
+                        .iter()
+                        .find(|s| !self.session_id.is_empty() && s.id == self.session_id)
+                    {
+                        self.session_view = if active.pinned {
+                            SessionView::Pinned
+                        } else {
+                            SessionView::AutoStored
+                        };
+                    }
+                    let filtered = self.filtered_sessions();
+                    self.session_idx = filtered
+                        .iter()
+                        .position(|s| !self.session_id.is_empty() && s.id == self.session_id)
+                        .unwrap_or(0);
+                } else {
+                    let filtered_len = self.filtered_sessions().len();
+                    self.session_idx = self.session_idx.min(filtered_len.saturating_sub(1));
+                }
             }
             EngineEvent::SkillsUpdated(skills) => {
                 self.config.skills = skills;
@@ -1180,6 +1241,11 @@ impl TuiApp {
                 Some(SlashCommand::Inspect) => {
                     self.record_prompt_and_clear(&raw_prompt);
                     self.request_payload_inspector();
+                    return false;
+                }
+                Some(SlashCommand::Pin) => {
+                    self.record_prompt_and_clear(&raw_prompt);
+                    let _ = self.cmd_tx.send(EngineCommand::TogglePinSession(None));
                     return false;
                 }
                 Some(SlashCommand::Reset) => {

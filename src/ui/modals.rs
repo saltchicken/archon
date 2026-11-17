@@ -1,4 +1,4 @@
-use super::{TuiApp, chat_block, render::sanitize_line, titled_block};
+use super::{SessionView, TuiApp, chat_block, render::sanitize_line, titled_block};
 use crate::core::config::MemoryScope;
 use ratatui::{
     Frame,
@@ -136,29 +136,112 @@ impl TuiApp {
     }
 
     pub(super) fn draw_sessions_modal(&self, f: &mut Frame) {
-        let items: Vec<ListItem> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let is_active = !self.session_id.is_empty() && s.id == self.session_id;
-                let (prefix, style) = selection_style(i == self.session_idx, is_active);
-                let active = if is_active { " [active]" } else { "" };
-                ListItem::new(Line::from(Span::styled(
-                    format!(
-                        "{prefix}[{}] {} ({} msgs){active}",
-                        s.updated_at,
-                        sanitize_line(&s.title),
-                        s.messages
-                    ),
-                    style,
-                )))
-            })
-            .collect();
+        let area = centered_rect(72, 62, f.area());
+        f.render_widget(Clear, area);
 
-        let widget =
-            List::new(items).block(chat_block(" Saved Sessions (⏎=Load, D=Delete, Esc=Close) "));
-        render_modal(f, 70, 60, widget);
+        let stored_count = self.sessions.iter().filter(|s| !s.pinned).count();
+        let pinned_count = self.sessions.iter().filter(|s| s.pinned).count();
+
+        let (stored_style, pinned_style) = match self.session_view {
+            SessionView::AutoStored => (
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                Style::default().fg(Color::DarkGray),
+            ),
+            SessionView::Pinned => (
+                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            ),
+        };
+
+        let pin_action_label = match self.session_view {
+            SessionView::AutoStored => "[P] Pin",
+            SessionView::Pinned => "[P] Unpin",
+        };
+
+        let header = Line::from(vec![
+            Span::styled("Conversations ", Style::default().fg(Color::Cyan)),
+            Span::raw("│ View: ["),
+            Span::styled(format!("Auto-Stored ({stored_count})"), stored_style),
+            Span::raw(" / "),
+            Span::styled(format!("󰐃 Pinned ({pinned_count})"), pinned_style),
+            Span::raw("]"),
+        ]);
+
+        let footer_lines = vec![Line::from(Span::styled(
+            format!(
+                " [Tab/←/→] Switch View   {pin_action_label}   [⏎] Load   [D] Delete   [Esc] Close"
+            ),
+            Style::default().fg(Color::Yellow),
+        ))];
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Fill(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        f.render_widget(
+            Paragraph::new(header).block(titled_block(" Saved Sessions (^S) ")),
+            chunks[0],
+        );
+
+        let filtered = self.filtered_sessions();
+        let list_title = match self.session_view {
+            SessionView::AutoStored => " Auto-Stored Sessions ",
+            SessionView::Pinned => " 󰐃 Pinned Sessions ",
+        };
+        let list_block = chat_block(list_title).border_style(Style::default().fg(Color::Cyan));
+        let inner_height = usize::from(list_block.inner(chunks[1]).height).max(1);
+
+        let items: Vec<ListItem> = if filtered.is_empty() {
+            let empty_msg = match self.session_view {
+                SessionView::AutoStored => "   No auto-stored sessions found.",
+                SessionView::Pinned => {
+                    "   No pinned sessions yet — press [P] on an auto-stored session or run /pin."
+                }
+            };
+            vec![ListItem::new(Line::from(Span::styled(
+                empty_msg,
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            let scroll_offset = if self.session_idx >= inner_height {
+                self.session_idx + 1 - inner_height
+            } else {
+                0
+            };
+            filtered
+                .iter()
+                .enumerate()
+                .skip(scroll_offset)
+                .take(inner_height)
+                .map(|(i, s)| {
+                    let is_active = !self.session_id.is_empty() && s.id == self.session_id;
+                    let (prefix, style) = selection_style(i == self.session_idx, is_active);
+                    let pin_badge = if s.pinned { "󰐃 " } else { "" };
+                    let active = if is_active { " [active]" } else { "" };
+                    ListItem::new(Line::from(Span::styled(
+                        format!(
+                            "{prefix}[{}] {pin_badge}{} ({} msgs){active}",
+                            s.updated_at,
+                            sanitize_line(&s.title),
+                            s.messages
+                        ),
+                        style,
+                    )))
+                })
+                .collect()
+        };
+
+        f.render_widget(List::new(items).block(list_block), chunks[1]);
+        f.render_widget(Paragraph::new(footer_lines), chunks[2]);
     }
 
     pub(super) fn draw_model_modal(&self, f: &mut Frame) {

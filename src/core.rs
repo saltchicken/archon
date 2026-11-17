@@ -67,6 +67,7 @@ pub enum EngineCommand {
     LoadSession(String),
     ForkSession(usize),
     RenameSession(String),
+    TogglePinSession(Option<String>),
     DeleteSession(String),
     RefreshSessions,
     ResetChat,
@@ -96,6 +97,7 @@ pub enum EngineEvent {
     ChatUpdated {
         session_id: String,
         is_fork: bool,
+        is_pinned: bool,
         messages: Vec<ChatMessage>,
         queued_messages: Vec<ChatMessage>,
         num_ctx: u32,
@@ -201,6 +203,7 @@ pub struct CoreEngine {
     sessions: Arc<SessionManager>,
     session_id: String,
     session_is_fork: bool,
+    session_is_pinned: bool,
     session_custom_title: Option<String>,
     turn: TurnConfig,
     active_max_tool_output_size: usize,
@@ -247,6 +250,7 @@ impl CoreEngine {
             sessions,
             session_id: SessionManager::new_id(),
             session_is_fork: false,
+            session_is_pinned: false,
             session_custom_title: None,
             turn: TurnConfig {
                 system_prompt: String::new(),
@@ -1091,6 +1095,7 @@ impl CoreEngine {
                             .then(|| raw_title.to_string());
                         self.session_id = data.id;
                         self.session_is_fork = data.title.starts_with("󰘬 ");
+                        self.session_is_pinned = data.pinned;
                         self.turn.system_prompt = data.system_prompt;
 
                         let mut model_switch_err = None;
@@ -1176,6 +1181,7 @@ impl CoreEngine {
                 }
                 self.session_id = new_session_id;
                 self.session_is_fork = true;
+                self.session_is_pinned = false;
 
                 let mut all_image_names = Vec::new();
                 for msg in &self.messages {
@@ -1201,10 +1207,10 @@ impl CoreEngine {
                 self.save_and_emit_chat(image_blobs).await;
             }
             EngineCommand::RenameSession(new_title) => {
-                let trimmed = new_title.trim().strip_prefix("󰘬 ").map_or_else(
-                    || new_title.trim(),
-                    str::trim,
-                );
+                let trimmed = new_title
+                    .trim()
+                    .strip_prefix("󰘬 ")
+                    .map_or_else(|| new_title.trim(), str::trim);
                 if trimmed.is_empty() {
                     self.emit_error("Session title cannot be empty.").await;
                     return;
@@ -1214,8 +1220,49 @@ impl CoreEngine {
                 self.save_session_bg(Vec::new()).await;
                 self.emit_sessions(None).await;
             }
+            EngineCommand::TogglePinSession(maybe_id) => {
+                let target_id = maybe_id.unwrap_or_else(|| self.session_id.clone());
+                if target_id == self.session_id {
+                    self.session_is_pinned = !self.session_is_pinned;
+                    info!(
+                        "Toggled pin state for active session {}: {}",
+                        self.session_id, self.session_is_pinned
+                    );
+                    self.save_session_bg(Vec::new()).await;
+                    self.emit_chat();
+                    self.emit_sessions(None).await;
+                } else {
+                    self.flush_save_task().await;
+                    let sessions = Arc::clone(&self.sessions);
+                    let list_res = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                        let new_state = sessions.toggle_pinned(&target_id)?;
+                        info!("Toggled pin state for session {target_id}: {new_state}");
+                        Ok(sessions.list())
+                    })
+                    .await;
+                    match list_res {
+                        Ok(Ok(list)) => {
+                            let _ = self.tx.send(EngineEvent::SessionsListed(list));
+                        }
+                        Ok(Err(e)) => {
+                            let msg = format!("Failed to toggle session pin: {e}");
+                            error!("{msg}");
+                            self.emit_error(msg).await;
+                        }
+                        Err(e) => {
+                            let msg = format!("Session pin task panicked: {e}");
+                            error!("{msg}");
+                            self.emit_error(msg).await;
+                        }
+                    }
+                }
+            }
             EngineCommand::DeleteSession(session_id) => {
                 info!("Deleting session: {session_id}");
+                if session_id == self.session_id && self.session_is_pinned {
+                    self.session_is_pinned = false;
+                    self.emit_chat();
+                }
                 self.emit_sessions(Some(session_id)).await;
             }
             EngineCommand::ResetChat => {
@@ -1226,6 +1273,7 @@ impl CoreEngine {
 
                 self.session_id = SessionManager::new_id();
                 self.session_is_fork = false;
+                self.session_is_pinned = false;
                 self.session_custom_title = None;
                 self.session_auto_approve.clear();
                 self.executed_skill_hooks.clear();
@@ -1688,6 +1736,7 @@ impl CoreEngine {
         let sessions = Arc::clone(&self.sessions);
         let id = self.session_id.clone();
         let is_fork = self.session_is_fork;
+        let is_pinned = self.session_is_pinned;
         let custom_title = self.session_custom_title.clone();
         let model = self.model.clone();
         let sys = self.turn.system_prompt.clone();
@@ -1704,6 +1753,7 @@ impl CoreEngine {
                 &msgs,
                 &new_images,
                 is_fork,
+                is_pinned,
             ) {
                 error!("Failed to save session {id}: {e}");
             }
@@ -1886,6 +1936,7 @@ impl CoreEngine {
         let _ = self.tx.send(EngineEvent::ChatUpdated {
             session_id: self.session_id.clone(),
             is_fork: self.session_is_fork,
+            is_pinned: self.session_is_pinned,
             messages,
             queued_messages: self.queued_ui_messages(),
             num_ctx: self.turn.num_ctx,

@@ -122,6 +122,8 @@ pub struct SessionData {
     pub updated_at: String,
     pub system_prompt: String,
     pub num_ctx: u32,
+    #[serde(default)]
+    pub pinned: bool,
     pub messages: Vec<ChatMessage>,
 }
 
@@ -131,6 +133,7 @@ pub struct SessionSummary {
     pub title: String,
     pub updated_at: String,
     pub messages: usize,
+    pub pinned: bool,
 }
 
 pub struct SessionManager {
@@ -173,6 +176,7 @@ impl SessionManager {
                  updated_at TEXT NOT NULL,
                  system_prompt TEXT NOT NULL,
                  num_ctx INTEGER NOT NULL,
+                 pinned INTEGER NOT NULL DEFAULT 0,
                  message_count INTEGER NOT NULL DEFAULT 0,
                  messages_json TEXT NOT NULL
              );
@@ -192,6 +196,17 @@ impl SessionManager {
              );",
         )
         .context("Failed to initialize database schema")?;
+
+        // Migrate existing databases that predate the `pinned` column.
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_pinned_updated_at
+             ON sessions(workspace, pinned, updated_at DESC)",
+            [],
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -220,8 +235,14 @@ impl SessionManager {
         messages: &[ChatMessage],
         new_images: &[(String, Vec<u8>)],
         is_fork: bool,
+        is_pinned: bool,
     ) -> Result<()> {
-        if messages.is_empty() && new_images.is_empty() && custom_title.is_none() {
+        if messages.is_empty() && new_images.is_empty() && custom_title.is_none() && !is_pinned {
+            let conn = self.lock_conn();
+            let _ = conn.execute(
+                "DELETE FROM sessions WHERE id = ?1 AND message_count = 0",
+                params![id],
+            );
             return Ok(());
         }
 
@@ -252,13 +273,14 @@ impl SessionManager {
         let updated_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let messages_json = serde_json::to_string(&clean_msgs)?;
         let msg_count = clean_msgs.len() as i64;
+        let pinned_int = i64::from(is_pinned);
 
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO sessions (id, workspace, title, model, updated_at, system_prompt, num_ctx, message_count, messages_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO sessions (id, workspace, title, model, updated_at, system_prompt, num_ctx, pinned, message_count, messages_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                  workspace = excluded.workspace,
                  title = excluded.title,
@@ -266,6 +288,7 @@ impl SessionManager {
                  updated_at = excluded.updated_at,
                  system_prompt = excluded.system_prompt,
                  num_ctx = excluded.num_ctx,
+                 pinned = excluded.pinned,
                  message_count = excluded.message_count,
                  messages_json = excluded.messages_json",
             params![
@@ -276,6 +299,7 @@ impl SessionManager {
                 updated_at,
                 system_prompt,
                 num_ctx,
+                pinned_int,
                 msg_count,
                 messages_json
             ],
@@ -293,10 +317,27 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn toggle_pinned(&self, id: &str) -> Result<bool> {
+        let conn = self.lock_conn();
+        let current: i64 = conn
+            .query_row(
+                "SELECT pinned FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("Session '{id}' not found in database"))?;
+        let next = current == 0;
+        conn.execute(
+            "UPDATE sessions SET pinned = ?1 WHERE id = ?2",
+            params![i64::from(next), id],
+        )?;
+        Ok(next)
+    }
+
     pub fn list(&self) -> Vec<SessionSummary> {
         let conn = self.lock_conn();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT id, title, updated_at, message_count
+            "SELECT id, title, updated_at, message_count, pinned
              FROM sessions
              WHERE workspace = ?1
              ORDER BY updated_at DESC, id DESC",
@@ -310,6 +351,7 @@ impl SessionManager {
                 title: row.get(1)?,
                 updated_at: row.get(2)?,
                 messages: row.get::<_, i64>(3)?.max(0) as usize,
+                pinned: row.get::<_, i64>(4).unwrap_or(0) != 0,
             })
         })
         .into_iter()
@@ -322,7 +364,7 @@ impl SessionManager {
         let conn = self.lock_conn();
         let (mut session, messages_json) = conn
             .query_row(
-                "SELECT title, model, updated_at, system_prompt, num_ctx, messages_json
+                "SELECT title, model, updated_at, system_prompt, num_ctx, pinned, messages_json
                  FROM sessions
                  WHERE id = ?1",
                 params![id],
@@ -335,9 +377,10 @@ impl SessionManager {
                             updated_at: row.get(2)?,
                             system_prompt: row.get(3)?,
                             num_ctx: row.get(4)?,
+                            pinned: row.get::<_, i64>(5).unwrap_or(0) != 0,
                             messages: Vec::new(),
                         },
-                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
