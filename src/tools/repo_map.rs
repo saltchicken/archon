@@ -969,7 +969,7 @@ fn find_locked_crate_versions(workspace_root: &Path, crate_norm: &str) -> Vec<St
             }
         }
     }
-    versions.sort_by(|a, b| parse_version_sort_key(b).cmp(&parse_version_sort_key(a)));
+    versions.sort_by_key(|a| std::cmp::Reverse(parse_version_sort_key(a)));
     versions.dedup();
     versions
 }
@@ -1028,7 +1028,7 @@ fn resolve_installed_crate_dir(
         );
     }
 
-    candidates.sort_by(|a, b| parse_version_sort_key(&b.0).cmp(&parse_version_sort_key(&a.0)));
+    candidates.sort_by_key(|a| std::cmp::Reverse(parse_version_sort_key(&a.0)));
 
     if explicit_ver.is_none() {
         let locked_versions = find_locked_crate_versions(workspace_root, &crate_norm);

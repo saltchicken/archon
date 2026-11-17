@@ -544,8 +544,8 @@ pub async fn stream_chat(
             for part in cand.content.and_then(|c| c.parts).into_iter().flatten() {
                 if let Some(fc) = part.function_call {
                     if part.thought {
-                        if let Some(ref t) = part.text.as_ref().filter(|t| !t.is_empty()) {
-                            let _ = tx.send(EngineEvent::StreamThoughtChunk((*t).clone()));
+                        if let Some(t) = part.text.as_ref().filter(|t| !t.is_empty()) {
+                            let _ = tx.send(EngineEvent::StreamThoughtChunk(t.clone()));
                         }
                         push_thought_part(&mut collected_thoughts, part.text, None);
                     }
@@ -557,8 +557,8 @@ pub async fn stream_chat(
                         thought_signature: part.thought_signature,
                     });
                 } else if part.thought {
-                    if let Some(ref t) = part.text.as_ref().filter(|t| !t.is_empty()) {
-                        let _ = tx.send(EngineEvent::StreamThoughtChunk((*t).clone()));
+                    if let Some(t) = part.text.as_ref().filter(|t| !t.is_empty()) {
+                        let _ = tx.send(EngineEvent::StreamThoughtChunk(t.clone()));
                     }
                     push_thought_part(&mut collected_thoughts, part.text, part.thought_signature);
                 } else {
