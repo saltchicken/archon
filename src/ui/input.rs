@@ -203,6 +203,35 @@ impl TuiApp {
             .then_some(target_idx)
     }
 
+    pub(super) fn header_msg_at(&self, pos: Position) -> Option<usize> {
+        if self.modal != ActiveModal::None || self.context_menu.is_some() {
+            return None;
+        }
+        let inner = self.chat_inner_area();
+        if !inner.contains(pos) {
+            return None;
+        }
+        let inner_y = usize::from(pos.y.saturating_sub(inner.y));
+        let visual_y = inner_y + self.chat_scroll;
+
+        let target_idx = if inner_y == 0
+            && let Some(sticky_idx) = self.find_sticky_header_msg()
+        {
+            sticky_idx
+        } else if let Some((i, start_y, _)) = self.find_msg_at(visual_y)
+            && visual_y == start_y
+        {
+            i
+        } else {
+            return None;
+        };
+
+        self.messages
+            .get(target_idx)
+            .is_some_and(ChatMessage::is_forkable)
+            .then_some(target_idx)
+    }
+
     fn execute_context_menu_action(&mut self, action: ContextMenuAction, target_text: &str) {
         match action {
             ContextMenuAction::CopyToClipboard => {
@@ -218,6 +247,7 @@ impl TuiApp {
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
         let (x, y) = (mouse.column, mouse.row);
+        self.last_mouse_pos = Some(Position::new(x, y));
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
             let target_text = self.context_target_text(x, y);

@@ -1645,11 +1645,6 @@ impl TuiApp {
         compact: bool,
     ) {
         let start_visual = lines.len();
-        let can_fork = self.messages.get(idx).is_some_and(ChatMessage::is_forkable);
-        let is_fork_flashed = self
-            .fork_flash
-            .filter(|&(_, exp)| std::time::Instant::now() < exp)
-            .is_some_and(|(target_idx, _)| target_idx == idx);
         let state = &mut self.msg_states[idx];
         let total_content = styled_content.len();
         let max_lines = if state.unfolded {
@@ -1678,26 +1673,6 @@ impl TuiApp {
                 Style::default()
                     .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
-            ));
-        }
-        if can_fork {
-            let prefix_w = spans_display_width(&header_spans);
-            let (badge_glyph, badge_color) = if is_fork_flashed {
-                ("󰄬", Color::Green)
-            } else {
-                ("󰘬", Color::Yellow)
-            };
-            let badge_w = display_width(badge_glyph).max(2);
-            self.fork_buttons.push(ForkButton {
-                msg_idx: idx,
-                visual_y: start_visual,
-                x_range: prefix_w.saturating_sub(1)..(prefix_w + badge_w + 1),
-            });
-            header_spans.push(Span::styled(
-                badge_glyph,
-                Style::default()
-                    .fg(badge_color)
-                    .add_modifier(Modifier::BOLD),
             ));
         }
         lines.push(Line::from(header_spans));
@@ -2085,6 +2060,41 @@ impl TuiApp {
         } else {
             self.chat_scroll.min(max_scroll)
         };
+
+        self.hovered_header_msg = self.last_mouse_pos.and_then(|pos| self.header_msg_at(pos));
+        let fork_flash_idx = self
+            .fork_flash
+            .filter(|&(_, exp)| std::time::Instant::now() < exp)
+            .map(|(target_idx, _)| target_idx);
+        for &(idx, start_visual, _, _) in &self.msg_visual_ranges {
+            if !self.messages.get(idx).is_some_and(ChatMessage::is_forkable) {
+                continue;
+            }
+            let is_fork_flashed = fork_flash_idx == Some(idx);
+            let show_fork_badge = !self.config.ui.fork_icon_hover_only
+                || self.hovered_header_msg == Some(idx)
+                || is_fork_flashed;
+            if show_fork_badge {
+                let prefix_w = spans_display_width(&lines[start_visual].spans);
+                let (badge_glyph, badge_color) = if is_fork_flashed {
+                    ("󰄬", Color::Green)
+                } else {
+                    ("󰘬", Color::Yellow)
+                };
+                let badge_w = display_width(badge_glyph).max(2);
+                self.fork_buttons.push(ForkButton {
+                    msg_idx: idx,
+                    visual_y: start_visual,
+                    x_range: prefix_w.saturating_sub(1)..(prefix_w + badge_w + 1),
+                });
+                lines[start_visual].spans.push(Span::styled(
+                    badge_glyph,
+                    Style::default()
+                        .fg(badge_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
 
         let sticky_header_line = (self.chat_scroll > 0)
             .then(|| {

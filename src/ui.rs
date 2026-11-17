@@ -247,6 +247,8 @@ pub struct TuiApp {
     pub(super) copied_code_flash: Option<((usize, usize), std::time::Instant)>,
     pub(super) fork_buttons: Vec<ForkButton>,
     pub(super) fork_flash: Option<(usize, std::time::Instant)>,
+    pub(super) last_mouse_pos: Option<Position>,
+    pub(super) hovered_header_msg: Option<usize>,
 
     pub(super) sidebar_expanded: bool,
     pub(super) term_focused: bool,
@@ -388,6 +390,8 @@ impl TuiApp {
             copied_code_flash: None,
             fork_buttons: Vec::new(),
             fork_flash: None,
+            last_mouse_pos: None,
+            hovered_header_msg: None,
             sidebar_expanded: false,
             term_focused: true,
             cursor_blink_on: true,
@@ -487,6 +491,8 @@ impl TuiApp {
             Event::FocusLost => {
                 self.term_focused = false;
                 self.cursor_blink_on = false;
+                self.last_mouse_pos = None;
+                self.hovered_header_msg = None;
             }
             _ => {}
         }
