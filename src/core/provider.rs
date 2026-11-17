@@ -44,7 +44,7 @@ pub async fn open_line_stream(
     let byte_stream = resp.bytes_stream().map_err(io::Error::other);
     Some(FramedRead::new(
         StreamReader::new(byte_stream),
-        LinesCodec::new(),
+        LinesCodec::new_with_max_length(8 * 1024 * 1024),
     ))
 }
 
