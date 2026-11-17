@@ -327,6 +327,7 @@ impl CoreEngine {
         let effective_draft = if !trimmed_draft.is_empty()
             && !trimmed_draft.starts_with('/')
             && !trimmed_draft.starts_with('!')
+            && tools::parse_hash_tool_prefix(trimmed_draft).is_none()
         {
             let user_content =
                 if let Some((cmd_token, args_str)) = skills::parse_at_command(trimmed_draft) {

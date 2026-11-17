@@ -1,9 +1,14 @@
-use super::{TuiApp, create_text_area};
-use crate::core::{
-    EngineCommand,
-    config::{Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file},
-    session::ChatMessage,
-    skills,
+use super::{TuiApp, create_text_area, create_text_area_with};
+use crate::{
+    core::{
+        EngineCommand,
+        config::{
+            Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file,
+        },
+        session::ChatMessage,
+        skills,
+    },
+    tools,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -80,6 +85,76 @@ impl TuiApp {
             command: command.to_string(),
             include_in_context,
         });
+    }
+
+    fn dispatch_manual_tool(
+        &mut self,
+        raw_prompt: &str,
+        tool_input: &str,
+        include_in_context: bool,
+    ) {
+        if tool_input.is_empty() {
+            return;
+        }
+        self.record_prompt_and_clear(raw_prompt);
+        self.scroll_to_bottom();
+        let _ = self.cmd_tx.send(EngineCommand::RunManualTool {
+            raw_input: tool_input.to_string(),
+            include_in_context,
+        });
+    }
+
+    pub(super) fn try_tab_complete_prompt(&mut self) -> bool {
+        if self.text_area.lines().len() != 1 {
+            return false;
+        }
+        let line = self.text_area.lines()[0].trim_start();
+        if line.is_empty() || line.contains(char::is_whitespace) {
+            return false;
+        }
+
+        let completed = if let Some(cmd_prefix) = line.strip_prefix('/') {
+            SlashCommand::matching_triggers(cmd_prefix)
+                .into_iter()
+                .next()
+                .map(|m| format!("{m} "))
+        } else if let Some(rest) = line.strip_prefix('@') {
+            self.config
+                .skills
+                .iter()
+                .find(|s| {
+                    (!s.command.is_empty() && s.command.starts_with(rest))
+                        || s.name.starts_with(rest)
+                })
+                .map(|s| {
+                    let trigger = if s.command.is_empty() {
+                        &s.name
+                    } else {
+                        &s.command
+                    };
+                    format!("@{trigger} ")
+                })
+        } else if !line.starts_with("###")
+            && let Some((prefix_mark, rest)) = line
+                .strip_prefix("##")
+                .map(|r| ("##", r))
+                .or_else(|| line.strip_prefix('#').map(|r| ("#", r)))
+        {
+            tools::matching_tool_triggers(prefix_mark, rest)
+                .into_iter()
+                .next()
+                .map(|m| format!("{m} "))
+        } else {
+            None
+        };
+
+        if let Some(new_text) = completed {
+            self.prompt_history_idx = None;
+            self.text_area = create_text_area_with(&new_text);
+            true
+        } else {
+            false
+        }
     }
 
     fn handle_memory_slash_command(&mut self, raw_prompt: &str, args: &str) {
@@ -212,6 +287,11 @@ impl TuiApp {
     pub(super) fn submit_prompt(&mut self) -> bool {
         let raw_prompt = self.text_area.lines().join("\n").trim().to_string();
         if raw_prompt.is_empty() {
+            return false;
+        }
+
+        if let Some((include_in_context, tool_input)) = tools::parse_hash_tool_prefix(&raw_prompt) {
+            self.dispatch_manual_tool(&raw_prompt, tool_input, include_in_context);
             return false;
         }
 

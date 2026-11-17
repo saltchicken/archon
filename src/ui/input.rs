@@ -832,6 +832,12 @@ impl TuiApp {
             }
             KeyCode::Home if ctrl => self.scroll_chat(isize::MIN),
             KeyCode::End if ctrl => self.scroll_to_bottom(),
+            KeyCode::Tab if !ctrl && !shift && !alt => {
+                if !self.try_tab_complete_prompt() {
+                    self.prompt_history_idx = None;
+                    self.text_area.input(key);
+                }
+            }
             KeyCode::Enter if shift => {
                 self.prompt_history_idx = None;
                 self.text_area.insert_newline();

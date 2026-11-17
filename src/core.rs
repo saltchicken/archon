@@ -328,6 +328,13 @@ impl CoreEngine {
             } => {
                 self.handle_run_shell_command(command, include_in_context);
             }
+            EngineCommand::RunManualTool {
+                raw_input,
+                include_in_context,
+            } => {
+                self.handle_run_manual_tool(raw_input, include_in_context)
+                    .await;
+            }
             EngineCommand::InspectPayload { draft_prompt, turn } => {
                 self.handle_inspect_payload(draft_prompt, turn);
             }
@@ -381,6 +388,26 @@ impl CoreEngine {
             } => {
                 self.on_shell_command_completed(
                     command,
+                    output,
+                    full_output,
+                    raw_bytes,
+                    truncated,
+                    include_in_context,
+                )
+                .await;
+            }
+            EngineEvent::ManualToolCompleted {
+                tool_name,
+                summary,
+                output,
+                full_output,
+                raw_bytes,
+                truncated,
+                include_in_context,
+            } => {
+                self.on_manual_tool_completed(
+                    tool_name,
+                    summary,
                     output,
                     full_output,
                     raw_bytes,

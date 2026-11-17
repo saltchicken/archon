@@ -78,6 +78,7 @@ impl TuiApp {
             }
             EngineEvent::ToolCompleted { .. }
             | EngineEvent::ShellCommandCompleted { .. }
+            | EngineEvent::ManualToolCompleted { .. }
             | EngineEvent::HookCompleted { .. }
             | EngineEvent::HooksFinished => {
                 self.active_tool_status = None;

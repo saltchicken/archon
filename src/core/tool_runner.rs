@@ -7,6 +7,7 @@ use tracing::{error, info, warn};
 pub(super) enum PendingTruncatedSource {
     ModelTool { tool_name: String },
     ManualShell { command: String },
+    ManualTool { summary: String },
 }
 
 pub(super) struct PendingTruncatedTool {
@@ -158,6 +159,28 @@ impl CoreEngine {
         self.flush_queued_interjections().await;
     }
 
+    async fn complete_manual_tool_result(
+        &mut self,
+        summary: String,
+        output: String,
+        truncated: bool,
+        include_in_context: bool,
+    ) {
+        let mut msg = ChatMessage::new("local", output);
+        msg.truncated = truncated;
+        msg.include_in_context = include_in_context;
+        msg.tool_name = Some(summary);
+        self.session.messages.push(msg);
+        self.save_and_emit_chat(Vec::new()).await;
+        let _ = self.tx.send(EngineEvent::ToolCompleted {
+            output: String::new(),
+            full_output: String::new(),
+            raw_bytes: 0,
+            truncated,
+        });
+        self.flush_queued_interjections().await;
+    }
+
     async fn finalize_pending_truncated(
         &mut self,
         source: PendingTruncatedSource,
@@ -173,6 +196,10 @@ impl CoreEngine {
                 self.complete_shell_result(command, output, truncated, true)
                     .await;
             }
+            PendingTruncatedSource::ManualTool { summary } => {
+                self.complete_manual_tool_result(summary, output, truncated, true)
+                    .await;
+            }
         }
     }
 
@@ -186,6 +213,7 @@ impl CoreEngine {
         let tool_name = match &pending.source {
             PendingTruncatedSource::ModelTool { tool_name } => tool_name.clone(),
             PendingTruncatedSource::ManualShell { .. } => "shell_command".to_string(),
+            PendingTruncatedSource::ManualTool { summary } => summary.clone(),
         };
         self.inflight.active_tool_name = Some(tool_name.clone());
         self.inflight.active_tool_summary = Some(pending.summary.clone());
@@ -434,9 +462,10 @@ impl CoreEngine {
                     }
                     self.complete_tool_result(tool_name, msg, false).await;
                 }
-                PendingTruncatedSource::ManualShell { .. } => {
+                PendingTruncatedSource::ManualShell { .. }
+                | PendingTruncatedSource::ManualTool { .. } => {
                     info!(
-                        "Discarded truncated manual shell command output for '{}'",
+                        "Discarded truncated manual command/tool output for '{}'",
                         pending.summary
                     );
                     let _ = self.tx.send(EngineEvent::ToolCompleted {
@@ -497,6 +526,106 @@ impl CoreEngine {
                 include_in_context,
             });
         }));
+    }
+
+    pub(super) async fn handle_run_manual_tool(
+        &mut self,
+        raw_input: String,
+        include_in_context: bool,
+    ) {
+        if self.is_turn_active() {
+            return;
+        }
+
+        let (call, summary) = match tools::parse_manual_tool_call(&raw_input) {
+            Ok(res) => res,
+            Err(e) => {
+                self.emit_error(e.to_string()).await;
+                return;
+            }
+        };
+
+        let prefix = if include_in_context { "##" } else { "#" };
+        info!("Executing manual tool call ({prefix}): {summary}");
+        self.inflight.executing_tool = true;
+        self.inflight.active_tool_name = Some(call.function.name.clone());
+        self.inflight.active_tool_summary = Some(summary.clone());
+        let _ = self.tx.send(EngineEvent::ToolStarted {
+            summary: format!("{prefix}{summary}"),
+            index: 1,
+            total: 1,
+        });
+
+        let cfg = self.config.clone();
+        let active_skill = self.active_turn_skill().map(String::from);
+        let max_out = self.active_max_tool_output_size;
+        let full_cap = self.context_padded_capture_limit();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.inflight.internal_rx = Some(rx);
+
+        self.inflight.active_task = Some(tokio::spawn(async move {
+            let res =
+                tools::execute_manual(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
+                    .await;
+            let _ = tx.send(EngineEvent::ManualToolCompleted {
+                tool_name: call.function.name,
+                summary,
+                output: res.truncated_output,
+                full_output: res.full_output,
+                raw_bytes: res.raw_bytes,
+                truncated: res.truncated,
+                include_in_context,
+            });
+        }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn on_manual_tool_completed(
+        &mut self,
+        tool_name: String,
+        summary: String,
+        output: String,
+        full_output: String,
+        raw_bytes: usize,
+        truncated: bool,
+        include_in_context: bool,
+    ) {
+        self.finish_active_task();
+        self.inflight.active_tool_name = None;
+        self.inflight.active_tool_summary = None;
+        self.sync_tool_side_effects(&tool_name);
+
+        if truncated && include_in_context && self.inflight.queued_interjections.is_empty() {
+            let modal_summary = format!("##{summary}");
+            let preview = output.clone();
+            let full_cap_bytes = self.context_padded_capture_limit();
+            self.inflight.pending_truncated = Some(PendingTruncatedTool {
+                source: PendingTruncatedSource::ManualTool {
+                    summary: summary.clone(),
+                },
+                summary: modal_summary.clone(),
+                truncated_output: output,
+                full_output,
+                raw_bytes,
+                full_cap_bytes,
+                index: 1,
+                total: 1,
+            });
+            let _ = self.tx.send(EngineEvent::TruncatedToolResolutionRequested {
+                tool_name,
+                summary: modal_summary,
+                preview,
+                raw_bytes,
+                max_size: self.active_max_tool_output_size,
+                full_cap_bytes,
+                index: 1,
+                total: 1,
+            });
+            return;
+        }
+
+        self.complete_manual_tool_result(summary, output, truncated, include_in_context)
+            .await;
     }
 
     pub(super) async fn on_tool_completed(

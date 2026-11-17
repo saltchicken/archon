@@ -69,6 +69,10 @@ pub enum EngineCommand {
         command: String,
         include_in_context: bool,
     },
+    RunManualTool {
+        raw_input: String,
+        include_in_context: bool,
+    },
     InspectPayload {
         draft_prompt: String,
         turn: TurnConfig,
@@ -112,6 +116,15 @@ pub enum EngineEvent {
     },
     ShellCommandCompleted {
         command: String,
+        output: String,
+        full_output: String,
+        raw_bytes: usize,
+        truncated: bool,
+        include_in_context: bool,
+    },
+    ManualToolCompleted {
+        tool_name: String,
+        summary: String,
         output: String,
         full_output: String,
         raw_bytes: usize,

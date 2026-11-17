@@ -425,13 +425,23 @@ pub fn sanitize_messages_for_turn(
             }
             "local" => {
                 if m.include_in_context {
-                    out.push(ChatMessage::new(
-                        "user",
-                        format!(
-                            "<shell_command_output>\n{}\n</shell_command_output>",
-                            m.content
-                        ),
-                    ));
+                    if let Some(ref label) = m.tool_name {
+                        out.push(ChatMessage::new(
+                            "user",
+                            format!(
+                                "<tool_output tool=\"{label}\">\n{}\n</tool_output>",
+                                m.content
+                            ),
+                        ));
+                    } else {
+                        out.push(ChatMessage::new(
+                            "user",
+                            format!(
+                                "<shell_command_output>\n{}\n</shell_command_output>",
+                                m.content
+                            ),
+                        ));
+                    }
                 }
             }
             "hook" => {

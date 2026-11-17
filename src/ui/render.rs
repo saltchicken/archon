@@ -128,12 +128,15 @@ impl TuiApp {
             "assistant" => ("ARCHON".to_string(), Color::Green),
             "error" => ("⚠ ERROR".to_string(), Color::LightRed),
             "local" => {
-                let label = if m.include_in_context {
-                    "SHELL [+CTX]"
+                let ctx_suffix = if m.include_in_context { " [+CTX]" } else { "" };
+                if let Some(ref summary) = m.tool_name {
+                    (
+                        sanitize_line(&format!("TOOL [{summary}]{ctx_suffix}")),
+                        Color::Blue,
+                    )
                 } else {
-                    "SHELL"
-                };
-                (label.to_string(), Color::Blue)
+                    (format!("SHELL{ctx_suffix}"), Color::Blue)
+                }
             }
             "tool" => {
                 let summary = find_associated_tool_call(&self.messages, idx)
@@ -325,6 +328,50 @@ impl TuiApp {
                     .take(4)
                     .collect();
                 (!matches.is_empty()).then(|| format!(" Prompt — Skills: {} ", matches.join(" │ ")))
+            }
+        } else if !first_trimmed.starts_with("###")
+            && let Some((include_ctx, prefix_mark, rest)) = first_trimmed
+                .strip_prefix("##")
+                .map(|r| (true, "##", r))
+                .or_else(|| first_trimmed.strip_prefix('#').map(|r| (false, "#", r)))
+            && !rest.starts_with(char::is_whitespace)
+        {
+            let mode_label = if include_ctx { "+CTX" } else { "local" };
+            if let Some(ws_idx) = rest.find(char::is_whitespace) {
+                let tool_token = &rest[..ws_idx];
+                let base_name = tool_token.split_once(':').map_or(tool_token, |(n, _)| n);
+                tools::ALL_TOOL_NAMES
+                    .iter()
+                    .find(|&&name| name.eq_ignore_ascii_case(base_name))
+                    .map(|&canonical| {
+                        let hint = tools::tool_param_hint(canonical);
+                        let ctx_note = if include_ctx {
+                            "adds output to context"
+                        } else {
+                            "local only; use ## to add to context"
+                        };
+                        format!(
+                            " Prompt — Tool ({mode_label}): {prefix_mark}{tool_token} {hint} ({ctx_note}) "
+                        )
+                    })
+            } else {
+                let matches: Vec<String> = tools::matching_tool_triggers(prefix_mark, rest)
+                    .into_iter()
+                    .take(6)
+                    .collect();
+                if !matches.is_empty() {
+                    let suffix = if !include_ctx && rest.is_empty() {
+                        " (or ##<tool> for +CTX)"
+                    } else {
+                        ""
+                    };
+                    Some(format!(
+                        " Prompt — Tools ({mode_label}): {}{suffix} ",
+                        matches.join(" │ ")
+                    ))
+                } else {
+                    None
+                }
             }
         } else if first_trimmed.starts_with("!!") {
             Some(

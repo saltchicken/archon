@@ -532,6 +532,367 @@ pub fn call_signature(call: &ToolCall) -> String {
     }
 }
 
+pub fn format_call_summary(call: &ToolCall) -> String {
+    let sig = call_signature(call);
+    let Some(obj) = call
+        .function
+        .arguments
+        .as_object()
+        .filter(|o| !o.is_empty())
+    else {
+        return sig;
+    };
+    let has_sub = sig.contains(':');
+    let kvs: Vec<String> = obj
+        .iter()
+        .filter(|(k, _)| !(has_sub && k.as_str() == "action"))
+        .map(|(k, v)| match v.as_str() {
+            Some(s) => format!("{k}={s}"),
+            None => format!("{k}={v}"),
+        })
+        .collect();
+    if kvs.is_empty() {
+        sig
+    } else {
+        format!("{sig} ({})", kvs.join(", "))
+    }
+}
+
+pub fn parse_hash_tool_prefix(raw_prompt: &str) -> Option<(bool, &str)> {
+    let trimmed = raw_prompt.trim();
+    if trimmed.starts_with("###") {
+        return None;
+    }
+    let (include_in_context, rest) = if let Some(r) = trimmed.strip_prefix("##") {
+        (true, r)
+    } else {
+        (false, trimmed.strip_prefix('#')?)
+    };
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some((include_in_context, rest))
+}
+
+pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
+    match tool_name {
+        "cargo" => &[
+            "check",
+            "clippy",
+            "fmt_check",
+            "fmt",
+            "doc",
+            "metadata",
+            "info",
+            "tree",
+        ],
+        "git" => &[
+            "status",
+            "diff",
+            "log",
+            "show",
+            "blame",
+            "branch",
+            "add",
+            "unstage",
+            "commit",
+            "stash",
+            "stash_pop",
+            "switch",
+            "merge",
+            "branch_delete",
+        ],
+        "fs" => &["list", "rename", "copy", "remove"],
+        "repo_map" => &["map", "definition", "references"],
+        "memory" => &[
+            "list", "read", "add", "remove", "set", "clear", "enable", "disable",
+        ],
+        "skill" => &["list", "read", "create", "modify"],
+        "dotfiles" => &["list", "read", "search", "edit", "create", "validate"],
+        "system" => &[
+            "overview",
+            "journal",
+            "services",
+            "processes",
+            "fish",
+            "hyprland",
+            "btrfs",
+            "packages",
+        ],
+        _ => &[],
+    }
+}
+
+pub fn tool_param_hint(tool_name: &str) -> &'static str {
+    match tool_name {
+        "workspace_snapshot" => "[tree_only=true|false]",
+        "read_file" => "<file_path> [start_line=N] [end_line=N]",
+        "search" => "<pattern> [path=...] [files_with_matches=true]",
+        "repo_map" => "[map|definition|references] [symbol=...] [max_tokens=N]",
+        "cargo" => "[check|clippy|fmt_check|fmt|doc|metadata|info|tree] [package=...]",
+        "git" => "[status|diff|log|show|blame|branch|add|...] [target=...] [path=...]",
+        "fs" => "[list|rename|copy|remove] [path=...] [destination=...]",
+        "fetch_url" => "<url> [raw=true|false]",
+        "memory" => {
+            "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
+        }
+        "skill" => "[list|read|create|modify] [name=...]",
+        "dotfiles" => "[list|read|search|edit|create|validate] [path=...]",
+        "system" => {
+            "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
+        }
+        "create_file" => "file_path=... content=...",
+        "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
+        _ => "[key=value | JSON]",
+    }
+}
+
+pub fn matching_tool_triggers(prefix_mark: &str, query: &str) -> Vec<String> {
+    let lower = query.to_ascii_lowercase();
+    if let Some((tool_part, sub_part)) = lower.split_once(':') {
+        let Some(&canonical) = ALL_TOOL_NAMES.iter().find(|&&t| t == tool_part) else {
+            return Vec::new();
+        };
+        return tool_subactions(canonical)
+            .iter()
+            .filter(|&&act| act.starts_with(sub_part))
+            .map(|&act| format!("{prefix_mark}{canonical}:{act}"))
+            .collect();
+    }
+
+    ALL_TOOL_NAMES
+        .iter()
+        .filter(|&&name| name.starts_with(&lower))
+        .map(|&name| format!("{prefix_mark}{name}"))
+        .collect()
+}
+
+fn parse_manual_arg_value(raw: &str) -> Value {
+    match raw {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        "null" => Value::Null,
+        _ => {
+            if let Ok(n) = raw.parse::<i64>() {
+                Value::Number(n.into())
+            } else if let Ok(n) = raw.parse::<u64>() {
+                Value::Number(n.into())
+            } else if let Ok(f) = raw.parse::<f64>()
+                && let Some(num) = serde_json::Number::from_f64(f)
+            {
+                Value::Number(num)
+            } else if (raw.starts_with('[') && raw.ends_with(']'))
+                || (raw.starts_with('{') && raw.ends_with('}'))
+            {
+                serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+            } else {
+                Value::String(raw.to_string())
+            }
+        }
+    }
+}
+
+fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<String, Value>) {
+    match tool_name {
+        "repo_map" => {
+            if !map.contains_key("action") && matches!(token, "map" | "definition" | "references") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("symbol") {
+                map.insert("symbol".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("target_path") {
+                map.insert("target_path".into(), Value::String(token.to_string()));
+            }
+        }
+        "cargo" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("package") {
+                map.insert("package".into(), Value::String(token.to_string()));
+            }
+        }
+        "git" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else {
+                let act = map.get("action").and_then(Value::as_str).unwrap_or("");
+                if matches!(act, "blame" | "add" | "unstage") && !map.contains_key("path") {
+                    map.insert("path".into(), Value::String(token.to_string()));
+                } else if act == "commit" && !map.contains_key("message") {
+                    map.insert("message".into(), Value::String(token.to_string()));
+                } else if !map.contains_key("target") {
+                    map.insert("target".into(), Value::String(token.to_string()));
+                } else if !map.contains_key("path") {
+                    map.insert("path".into(), Value::String(token.to_string()));
+                }
+            }
+        }
+        "fs" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("path") {
+                map.insert("path".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("destination") {
+                map.insert("destination".into(), Value::String(token.to_string()));
+            }
+        }
+        "dotfiles" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("path") {
+                map.insert("path".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("pattern") {
+                map.insert("pattern".into(), Value::String(token.to_string()));
+            }
+        }
+        "skill" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("name") {
+                map.insert("name".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("file") {
+                map.insert("file".into(), Value::String(token.to_string()));
+            }
+        }
+        "memory" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("scope") && matches!(token, "global" | "workspace") {
+                map.insert("scope".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("item") {
+                map.insert("item".into(), Value::String(token.to_string()));
+            }
+        }
+        "system" => {
+            if !map.contains_key("action") {
+                map.insert("action".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("query") {
+                map.insert("query".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("target") {
+                map.insert("target".into(), Value::String(token.to_string()));
+            }
+        }
+        "read_file" => {
+            if !map.contains_key("file_path") {
+                map.insert("file_path".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("start_line")
+                && let Ok(n) = token.parse::<usize>()
+            {
+                map.insert("start_line".into(), Value::Number(n.into()));
+            } else if !map.contains_key("end_line")
+                && let Ok(n) = token.parse::<usize>()
+            {
+                map.insert("end_line".into(), Value::Number(n.into()));
+            }
+        }
+        "search" => {
+            if !map.contains_key("pattern") {
+                map.insert("pattern".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("path") {
+                map.insert("path".into(), Value::String(token.to_string()));
+            }
+        }
+        "fetch_url" => {
+            if !map.contains_key("url") {
+                map.insert("url".into(), Value::String(token.to_string()));
+            }
+        }
+        "workspace_snapshot" => {
+            if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
+                map.insert("tree_only".into(), Value::Bool(true));
+            }
+        }
+        "create_file" => {
+            if !map.contains_key("file_path") {
+                map.insert("file_path".into(), Value::String(token.to_string()));
+            } else if !map.contains_key("content") {
+                map.insert("content".into(), Value::String(token.to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)> {
+    let trimmed = raw_after_hash.trim();
+    if trimmed.is_empty() {
+        bail!("Manual tool invocation cannot be empty");
+    }
+
+    let (tool_token, args_str) = match trimmed.find(char::is_whitespace) {
+        Some(idx) => (&trimmed[..idx], trimmed[idx..].trim()),
+        None => (trimmed, ""),
+    };
+
+    let (raw_name, colon_action) = match tool_token.split_once(':') {
+        Some((n, a)) => (n.trim(), Some(a.trim()).filter(|s| !s.is_empty())),
+        None => (tool_token.trim(), None),
+    };
+
+    let Some(&tool_name) = ALL_TOOL_NAMES
+        .iter()
+        .find(|&&name| name.eq_ignore_ascii_case(raw_name))
+    else {
+        bail!(
+            "Unknown tool '{}'. Available tools: {}",
+            raw_name,
+            ALL_TOOL_NAMES.join(", ")
+        );
+    };
+
+    let mut map = if args_str.starts_with('{') {
+        serde_json::from_str::<Map<String, Value>>(args_str)
+            .with_context(|| format!("Invalid JSON arguments for #{tool_name}"))?
+    } else {
+        let mut m = Map::new();
+        if let Some(act) = colon_action {
+            m.insert("action".into(), Value::String(act.to_string()));
+        }
+        if !args_str.is_empty() {
+            let tokens = shlex::split(args_str)
+                .ok_or_else(|| anyhow::anyhow!("Unmatched quotes in arguments for #{tool_name}"))?;
+            for token in tokens {
+                if let Some((k, v)) = token.split_once('=')
+                    && !k.is_empty()
+                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    m.insert(k.to_string(), parse_manual_arg_value(v));
+                } else {
+                    apply_positional_manual_arg(tool_name, &token, &mut m);
+                }
+            }
+        }
+        m
+    };
+
+    if let Some(act) = colon_action {
+        map.entry("action".to_string())
+            .or_insert_with(|| Value::String(act.to_string()));
+    }
+
+    if !map.contains_key("action") {
+        let default_action = match tool_name {
+            "git" => Some("status"),
+            "cargo" => Some("check"),
+            "fs" | "memory" | "skill" | "dotfiles" => Some("list"),
+            "system" => Some("overview"),
+            _ => None,
+        };
+        if let Some(act) = default_action {
+            map.insert("action".into(), Value::String(act.into()));
+        }
+    }
+
+    let call = ToolCall {
+        function: ToolFunction {
+            name: tool_name.to_string(),
+            arguments: Value::Object(map),
+        },
+        thought_signature: None,
+    };
+    let summary = format_call_summary(&call);
+    Ok((call, summary))
+}
+
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
@@ -784,12 +1145,12 @@ macro_rules! register_tools {
             config: &Config,
             active_skill: Option<&str>,
             max_output_size: usize,
-            enforce_turn_filter: bool,
+            filter: ToolFilter,
         ) -> Result<String> {
-            let allowed = if enforce_turn_filter {
-                is_tool_enabled_for_turn(name, config, active_skill)
-            } else {
-                is_tool_enabled(name, config)
+            let allowed = match filter {
+                ToolFilter::Turn => is_tool_enabled_for_turn(name, config, active_skill),
+                ToolFilter::Enabled => is_tool_enabled(name, config),
+                ToolFilter::Manual => ALL_TOOL_NAMES.contains(&name),
             };
             if !allowed {
                 bail!("Unknown tool: '{name}'");
@@ -905,13 +1266,20 @@ pub async fn run_manual_command(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ToolFilter {
+    Turn,
+    Enabled,
+    Manual,
+}
+
 async fn execute_with_filter(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
     max_size: usize,
     full_cap: usize,
-    enforce_turn_filter: bool,
+    filter: ToolFilter,
 ) -> ToolExecutionOutput {
     let name = &call.function.name;
     let args = &call.function.arguments;
@@ -919,16 +1287,7 @@ async fn execute_with_filter(
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(
-        name,
-        args,
-        config,
-        active_skill,
-        capture_limit,
-        enforce_turn_filter,
-    )
-    .await
-    {
+    match dispatch_tool(name, args, config, active_skill, capture_limit, filter).await {
         Ok(out) => {
             let packaged = package_tool_output(out, max_size, full_cap);
             info!(
@@ -967,7 +1326,15 @@ pub async fn execute(
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
-    execute_with_filter(call, config, active_skill, max_size, full_cap, true).await
+    execute_with_filter(
+        call,
+        config,
+        active_skill,
+        max_size,
+        full_cap,
+        ToolFilter::Turn,
+    )
+    .await
 }
 
 pub async fn execute_hook(
@@ -977,5 +1344,31 @@ pub async fn execute_hook(
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
-    execute_with_filter(call, config, active_skill, max_size, full_cap, false).await
+    execute_with_filter(
+        call,
+        config,
+        active_skill,
+        max_size,
+        full_cap,
+        ToolFilter::Enabled,
+    )
+    .await
+}
+
+pub async fn execute_manual(
+    call: &ToolCall,
+    config: &Config,
+    active_skill: Option<&str>,
+    max_size: usize,
+    full_cap: usize,
+) -> ToolExecutionOutput {
+    execute_with_filter(
+        call,
+        config,
+        active_skill,
+        max_size,
+        full_cap,
+        ToolFilter::Manual,
+    )
+    .await
 }

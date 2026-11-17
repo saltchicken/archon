@@ -280,24 +280,7 @@ pub fn format_hook_summary(hook: &SkillHook) -> String {
         },
         thought_signature: None,
     };
-    let sig = crate::tools::call_signature(&call);
-    let Some(obj) = hook.args.as_object().filter(|o| !o.is_empty()) else {
-        return sig;
-    };
-    let has_sub = sig.contains(':');
-    let kvs: Vec<String> = obj
-        .iter()
-        .filter(|(k, _)| !(has_sub && k.as_str() == "action"))
-        .map(|(k, v)| match v.as_str() {
-            Some(s) => format!("{k}={s}"),
-            None => format!("{k}={v}"),
-        })
-        .collect();
-    if kvs.is_empty() {
-        sig
-    } else {
-        format!("{sig} ({})", kvs.join(", "))
-    }
+    crate::tools::format_call_summary(&call)
 }
 
 pub fn hook_execution_key(skill_name: &str, idx: usize, hook: &SkillHook) -> String {
@@ -316,9 +299,10 @@ pub fn is_hook_already_in_session(
     messages: &[ChatMessage],
 ) -> bool {
     executed_hooks.contains(key)
-        || messages
-            .iter()
-            .any(|m| m.role == "hook" && m.tool_name.as_deref() == Some(summary))
+        || messages.iter().any(|m| {
+            (m.role == "hook" || (m.role == "local" && m.include_in_context))
+                && m.tool_name.as_deref() == Some(summary)
+        })
 }
 
 pub fn preview_due_hooks(
