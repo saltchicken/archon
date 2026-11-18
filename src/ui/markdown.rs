@@ -926,13 +926,39 @@ fn header_text_style(level: usize) -> Style {
     }
 }
 
+fn parse_opening_fence(line: &str) -> Option<(char, usize, &str)> {
+    let trimmed = line.trim_start();
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let count = trimmed.bytes().take_while(|&b| b == first as u8).count();
+    if count < 3 {
+        return None;
+    }
+    let rest = &trimmed[count..];
+    if first == '`' && rest.contains('`') {
+        return None;
+    }
+    Some((first, count, rest.trim()))
+}
+
+fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
+    let trimmed = line.trim_start();
+    let count = trimmed
+        .bytes()
+        .take_while(|&b| b == fence_char as u8)
+        .count();
+    count >= min_len && trimmed[count..].trim().is_empty()
+}
+
 fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine> {
     let mut out = Vec::new();
     let mut table_buf: Vec<&str> = Vec::new();
     let mut list_levels: Vec<(usize, usize)> = Vec::new();
     let mut quote_list_levels: Vec<(usize, usize)> = Vec::new();
     let mut last_quote_depth: Option<usize> = None;
-    let mut in_code_block = false;
+    let mut code_fence: Option<(char, usize)> = None;
     let mut in_diff_hunk = false;
     let mut in_params_block = false;
     let quote_style = Style::default()
@@ -940,19 +966,24 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
         .add_modifier(Modifier::ITALIC);
 
     for line in content.lines() {
-        if line.trim_start().starts_with("```") {
+        if let Some((fence_char, fence_len)) = code_fence {
+            if is_closing_fence(line, fence_char, fence_len) {
+                code_fence = None;
+                out.push(WrappedLine::CodeFence(String::new()));
+            } else {
+                out.push(WrappedLine::CodeLine(line.to_string()));
+            }
+            continue;
+        }
+
+        if let Some((fence_char, fence_len, lang)) = parse_opening_fence(line) {
             flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
             quote_list_levels.clear();
             last_quote_depth = None;
             in_diff_hunk = false;
             in_params_block = false;
-            in_code_block = !in_code_block;
-            out.push(WrappedLine::CodeFence(line.trim().to_string()));
-            continue;
-        }
-
-        if in_code_block {
-            out.push(WrappedLine::CodeLine(line.to_string()));
+            code_fence = Some((fence_char, fence_len));
+            out.push(WrappedLine::CodeFence(lang.to_string()));
             continue;
         }
 
@@ -1326,9 +1357,9 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
 
     for item in content_lines {
         let formatted = match item {
-            WrappedLine::CodeFence(trimmed) => {
+            WrappedLine::CodeFence(lang) => {
                 let spans = if !in_code_block {
-                    let lang = trimmed.trim_start_matches('`').trim();
+                    let lang = lang.trim();
                     let copy_badge = Span::styled(
                         "󰆏",
                         Style::default()
@@ -1502,4 +1533,39 @@ pub(super) fn extract_code_block_from(
         }
     }
     code_lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn four_backtick_fence_preserves_inner_three_backtick_fence() {
+        let md = "````md\n```rs\nfn main() {}\n```\n````";
+        let opts = textwrap::Options::new(80);
+        let lines = render_markdown(md, &opts);
+
+        assert!(is_opening_code_fence(&lines[0]));
+        assert_eq!(
+            extract_code_block_from(&lines, 0),
+            "```rs\nfn main() {}\n```"
+        );
+    }
+
+    #[test]
+    fn closing_fence_requires_no_trailing_text() {
+        let md = "```rs\n```not-a-close\nlet x = 1;\n```";
+        let opts = textwrap::Options::new(80);
+        let lines = render_markdown(md, &opts);
+
+        assert_eq!(
+            extract_code_block_from(&lines, 0),
+            "```not-a-close\nlet x = 1;"
+        );
+    }
+
+    #[test]
+    fn inline_triple_backticks_do_not_open_code_block() {
+        assert!(parse_opening_fence("```inline```").is_none());
+    }
 }
