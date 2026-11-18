@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
         let ws_config_dir = workspace_config_dir_for(&cwd);
         let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
         if let Some(cfg_err) = config_err {
-            eprintln!("Warning: {cfg_err}");
+            eprintln!("{cfg_err}");
+            std::process::exit(1);
         }
         if let Err(e) = core::schedule::handle_command(sched_cmd, &config) {
             eprintln!("{e}");

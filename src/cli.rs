@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleCommand {
     Sync {
         global: bool,
@@ -146,9 +146,10 @@ impl CliArgs {
         Ok(cli)
     }
 
-    fn parse_schedule_args(
-        mut args: std::iter::Peekable<std::iter::Skip<std::env::Args>>,
-    ) -> Result<ScheduleCommand> {
+    fn parse_schedule_args<I>(mut args: I) -> Result<ScheduleCommand>
+    where
+        I: Iterator<Item = String>,
+    {
         let Some(sub) = args.next() else {
             Self::print_schedule_help();
             std::process::exit(0);
@@ -184,21 +185,31 @@ impl CliArgs {
         }
 
         match sub.as_str() {
-            "sync" => Ok(ScheduleCommand::Sync { global }),
-            "list" => Ok(ScheduleCommand::List { global }),
-            "clean" => Ok(ScheduleCommand::Clean { global }),
+            "sync" | "list" | "clean" => {
+                if let Some(extra) = positional.first() {
+                    bail!("Unexpected argument '{extra}' for `archon schedule {sub}`.");
+                }
+                match sub.as_str() {
+                    "sync" => Ok(ScheduleCommand::Sync { global }),
+                    "list" => Ok(ScheduleCommand::List { global }),
+                    _ => Ok(ScheduleCommand::Clean { global }),
+                }
+            }
             "run" => {
-                let name = positional.into_iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("Usage: archon schedule run <NAME> [--global]")
-                })?;
-                Ok(ScheduleCommand::Run { name, global })
+                if positional.len() != 1 {
+                    bail!("Usage: archon schedule run <NAME> [--global]");
+                }
+                Ok(ScheduleCommand::Run {
+                    name: positional.remove(0),
+                    global,
+                })
             }
             "logs" => {
-                let name = positional.into_iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("Usage: archon schedule logs <NAME> [-n LINES] [--global]")
-                })?;
+                if positional.len() != 1 {
+                    bail!("Usage: archon schedule logs <NAME> [-n LINES] [--global]");
+                }
                 Ok(ScheduleCommand::Logs {
-                    name,
+                    name: positional.remove(0),
                     lines,
                     global,
                 })
@@ -544,4 +555,51 @@ async fn prompt_tool_approval_tty(
         always_approve: false,
         feedback: String::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliArgs, ScheduleCommand};
+
+    fn parse_sched(args: &[&str]) -> anyhow::Result<ScheduleCommand> {
+        CliArgs::parse_schedule_args(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn parse_schedule_subcommands_and_flags() {
+        assert_eq!(
+            parse_sched(&["sync"]).unwrap(),
+            ScheduleCommand::Sync { global: false }
+        );
+        assert_eq!(
+            parse_sched(&["sync", "--global"]).unwrap(),
+            ScheduleCommand::Sync { global: true }
+        );
+        assert_eq!(
+            parse_sched(&["run", "daily", "-g"]).unwrap(),
+            ScheduleCommand::Run {
+                name: "daily".to_string(),
+                global: true,
+            }
+        );
+        assert_eq!(
+            parse_sched(&["logs", "daily", "-n", "100"]).unwrap(),
+            ScheduleCommand::Logs {
+                name: "daily".to_string(),
+                lines: 100,
+                global: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_schedule_rejects_extra_or_missing_positional_args() {
+        assert!(parse_sched(&["sync", "extra"]).is_err());
+        assert!(parse_sched(&["list", "extra"]).is_err());
+        assert!(parse_sched(&["clean", "extra"]).is_err());
+        assert!(parse_sched(&["run"]).is_err());
+        assert!(parse_sched(&["run", "one", "two"]).is_err());
+        assert!(parse_sched(&["logs"]).is_err());
+        assert!(parse_sched(&["logs", "one", "two"]).is_err());
+    }
 }

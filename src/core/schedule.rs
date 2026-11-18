@@ -54,7 +54,11 @@ fn sanitize_unit_component(raw: &str) -> String {
     }
 }
 
-fn resolve_scope(config: &Config, global: bool) -> Result<(String, PathBuf)> {
+fn resolve_scope(
+    config: &Config,
+    global: bool,
+    require_ws_config: bool,
+) -> Result<(String, PathBuf)> {
     if global {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         return Ok(("global".to_string(), home));
@@ -67,6 +71,14 @@ fn resolve_scope(config: &Config, global: bool) -> Result<(String, PathBuf)> {
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let canon = dunce::canonicalize(&ws_path).unwrap_or(ws_path);
     let ws_cfg_dir = workspace_config_dir_for(&canon);
+    let cfg_path = ws_cfg_dir.join("config.toml");
+    if require_ws_config && !cfg_path.exists() {
+        bail!(
+            "No Archon workspace configuration found for '{}' (expected {}). Run from the workspace root or pass `--global`.",
+            canon.display(),
+            cfg_path.display()
+        );
+    }
     let raw_name = ws_cfg_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -98,6 +110,7 @@ fn quote_systemd_arg(arg: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '%' => out.push_str("%%"),
+            '$' => out.push_str("$$"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -168,7 +181,7 @@ fn render_service(
     let exec_start = args.join(" ");
     let wd_raw = working_dir.to_string_lossy();
     let wd_header = wd_raw.replace(['\n', '\r'], " ");
-    let wd_quoted = quote_systemd_arg(&wd_raw);
+    let wd_unit = escape_systemd_specifiers(&wd_raw);
     let desc_name = escape_systemd_specifiers(sched.name.trim());
 
     format!(
@@ -178,7 +191,7 @@ fn render_service(
          \n\
          [Service]\n\
          Type=oneshot\n\
-         WorkingDirectory={wd_quoted}\n\
+         WorkingDirectory={wd_unit}\n\
          ExecStart={exec_start}\n",
     )
 }
@@ -246,7 +259,7 @@ fn schedules_for_scope(config: &Config, global: bool) -> &[ScheduleConfig] {
 }
 
 fn sync_schedules(config: &Config, global: bool) -> Result<()> {
-    let (scope, working_dir) = resolve_scope(config, global)?;
+    let (scope, working_dir) = resolve_scope(config, global, true)?;
     let schedules = schedules_for_scope(config, global);
     let unit_dir = systemd_user_dir()?;
     fs::create_dir_all(&unit_dir)
@@ -350,7 +363,7 @@ fn sync_schedules(config: &Config, global: bool) -> Result<()> {
 }
 
 fn list_schedules(config: &Config, global: bool) -> Result<()> {
-    let (scope, _) = resolve_scope(config, global)?;
+    let (scope, _) = resolve_scope(config, global, true)?;
     let schedules = schedules_for_scope(config, global);
 
     if schedules.is_empty() {
@@ -385,7 +398,7 @@ fn list_schedules(config: &Config, global: bool) -> Result<()> {
 }
 
 fn run_schedule(config: &Config, name: &str, global: bool) -> Result<()> {
-    let (scope, _) = resolve_scope(config, global)?;
+    let (scope, _) = resolve_scope(config, global, false)?;
     let service_name = format!("{}.service", unit_base_name(&scope, name));
     println!("Starting {service_name}...");
     run_systemctl(&["start", &service_name], false)?;
@@ -394,7 +407,7 @@ fn run_schedule(config: &Config, name: &str, global: bool) -> Result<()> {
 }
 
 fn logs_schedule(config: &Config, name: &str, lines: usize, global: bool) -> Result<()> {
-    let (scope, _) = resolve_scope(config, global)?;
+    let (scope, _) = resolve_scope(config, global, false)?;
     let service_name = format!("{}.service", unit_base_name(&scope, name));
     let lines_str = lines.to_string();
     let status = Command::new("journalctl")
@@ -415,7 +428,7 @@ fn logs_schedule(config: &Config, name: &str, lines: usize, global: bool) -> Res
 }
 
 fn clean_schedules(config: &Config, global: bool) -> Result<()> {
-    let (scope, _) = resolve_scope(config, global)?;
+    let (scope, _) = resolve_scope(config, global, false)?;
     let unit_dir = systemd_user_dir()?;
     if !unit_dir.exists() {
         println!("No systemd user unit directory found; nothing to clean.");
@@ -445,4 +458,67 @@ fn clean_schedules(config: &Config, global: bool) -> Result<()> {
     }
     println!("Cleaned {removed} managed unit file(s) for scope '{scope}'.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn sanitize_unit_component_normalizes_names() {
+        assert_eq!(sanitize_unit_component("Daily_Audit!"), "daily-audit");
+        assert_eq!(sanitize_unit_component("---"), "default");
+        assert_eq!(
+            unit_base_name("ws-archon", "daily_check"),
+            "archon-sched-ws-archon--daily-check"
+        );
+    }
+
+    #[test]
+    fn quote_systemd_arg_escapes_special_chars_and_dollars() {
+        assert_eq!(
+            quote_systemd_arg("Check $HOME and ${USER} 100% \"now\"\n"),
+            "\"Check $$HOME and $${USER} 100%% \\\"now\\\"\\n\""
+        );
+    }
+
+    #[test]
+    fn render_service_and_timer_produce_valid_systemd_units() {
+        let sched = ScheduleConfig {
+            name: "nightly-review".to_string(),
+            enabled: true,
+            on_calendar: "*-*-* 02:00:00".to_string(),
+            persistent: true,
+            skill: Some("review".to_string()),
+            prompt: "Review $BRANCH (100%)".to_string(),
+            model: Some("gemini-2.5-pro".to_string()),
+            system_prompt: None,
+            auto_approve: true,
+            no_tools: false,
+            save_session: false,
+        };
+
+        let service = render_service(
+            &sched,
+            "ws-archon",
+            Path::new("/home/user/project"),
+            Path::new("/usr/bin/archon"),
+        );
+        assert!(service.contains("WorkingDirectory=/home/user/project\n"));
+        assert!(!service.contains("WorkingDirectory=\""));
+        assert!(service.contains(
+            "ExecStart=\"/usr/bin/archon\" --skill \"review\" --model \"gemini-2.5-pro\" -y --no-save -p \"Review $$BRANCH (100%%)\""
+        ));
+
+        let timer = render_timer(
+            &sched,
+            "ws-archon",
+            Path::new("/home/user/project"),
+            "archon-sched-ws-archon--nightly-review.service",
+        );
+        assert!(timer.contains("OnCalendar=*-*-* 02:00:00\n"));
+        assert!(timer.contains("Persistent=true\n"));
+        assert!(timer.contains("Unit=archon-sched-ws-archon--nightly-review.service\n"));
+    }
 }

@@ -242,6 +242,7 @@ pub struct Config {
     pub gemini: EndpointSettings,
     pub models: Vec<ModelPreset>,
     pub system_presets: Vec<Preset>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schedules: Vec<ScheduleConfig>,
     #[serde(skip)]
     pub global_schedules: Vec<ScheduleConfig>,
