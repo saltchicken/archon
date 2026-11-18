@@ -608,7 +608,9 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "list", "read", "add", "remove", "set", "clear", "enable", "disable",
         ],
         "skill" => &["list", "read", "create", "modify"],
-        "dotfiles" => &["list", "read", "search", "edit", "create", "validate"],
+        "dotfiles" => &[
+            "list", "read", "search", "edit", "create", "validate", "status", "sync",
+        ],
         "system" => &[
             "overview",
             "journal",
@@ -637,7 +639,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
         "skill" => "[list|read|create|modify] [name=...]",
-        "dotfiles" => "[list|read|search|edit|create|validate] [path=...]",
+        "dotfiles" => "[list|read|search|edit|create|validate|status|sync] [path=...]",
         "system" => {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
         }
@@ -723,6 +725,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             _ => &["target", "path"],
         },
         "fs" => &["action", "path", "destination"],
+        "dotfiles" if map.get("action").and_then(Value::as_str) == Some("sync") => &["content"],
         "dotfiles" => &["action", "path", "pattern"],
         "skill" => &["action", "name", "file"],
         "memory" if !map.contains_key("action") => &["action"],

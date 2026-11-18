@@ -214,12 +214,14 @@ pub struct Config {
 #[serde(default)]
 pub struct DotfilesSettings {
     pub allowed_dirs: Vec<String>,
+    pub repo_url: String,
 }
 
 impl Default for DotfilesSettings {
     fn default() -> Self {
         Self {
             allowed_dirs: vec!["*".into()],
+            repo_url: "saltchicken/dotfiles.git".into(),
         }
     }
 }
@@ -325,6 +327,7 @@ impl Default for AppSettings {
                 "dotfiles:read",
                 "dotfiles:search",
                 "dotfiles:validate",
+                "dotfiles:status",
                 "memory:list",
                 "memory:read",
                 "skill:list",

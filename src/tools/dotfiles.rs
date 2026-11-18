@@ -23,6 +23,8 @@ use std::{
 
 pub struct Tool;
 
+const BARE_REPO_PATH: &str = "~/.local/share/archon/dotfiles.git";
+
 const DOTFILES_BLOCKED_PATTERNS: &[&str] = &[
     "**/.git/**",
     "**/.env*",
@@ -78,6 +80,10 @@ pub enum DotfilesAction {
     Create,
     /// Validate configuration syntax (`fish -n` for Fish scripts and `hyprctl configerrors` for Hyprland).
     Validate,
+    /// Show bare git status and diff summary for tracked `~/.config` files in `dotfiles.allowed_dirs`.
+    Status,
+    /// Initialize/clone the bare git repo (`~/.local/share/archon/dotfiles.git`), stage files in `dotfiles.allowed_dirs`, commit (using `content` as the optional commit message), and push to `dotfiles.repo_url`.
+    Sync,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -96,7 +102,7 @@ pub struct DotfilesArgs {
     /// Disjoint search/replace hunks when `action` is `edit`.
     #[serde(default)]
     pub edits: Vec<EditHunk>,
-    /// Full file contents when `action` is `create`.
+    /// Full file contents when `action` is `create`, or optional commit message when `action` is `sync`.
     #[serde(default)]
     pub content: String,
     /// Regex or literal search pattern when `action` is `search`.
@@ -409,6 +415,343 @@ fn run_validate(raw_path: &str, config: &Config) -> Result<String> {
     }
 }
 
+fn bare_repo_dir() -> PathBuf {
+    expand_tilde(BARE_REPO_PATH)
+}
+
+fn resolve_repo_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains("://")
+        || trimmed.contains('@')
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('~')
+    {
+        return Some(trimmed.to_string());
+    }
+    let slug = trimmed.trim_end_matches(".git").trim_matches('/');
+    if slug.contains('/') {
+        Some(format!("https://github.com/{slug}.git"))
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn bare_git_cmd(git_dir: &Path, work_tree: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(work_tree)
+        .arg("--no-pager")
+        .arg(format!("--git-dir={}", git_dir.display()))
+        .arg(format!("--work-tree={}", work_tree.display()))
+        .args(["-c", "status.showUntrackedFiles=no"]);
+    cmd
+}
+
+fn configured_allowed_paths(root: &Path, config: &Config) -> Result<Vec<PathBuf>> {
+    let allowed = &config.dotfiles.allowed_dirs;
+    if allowed.is_empty() || allowed.iter().any(|s| s == "*") {
+        bail!(
+            "Set explicit directories or files in `dotfiles.allowed_dirs` in config.toml \
+             (e.g. `allowed_dirs = [\"fish\", \"hypr\", \"archon\"]`) to specify which ~/.config files to track."
+        );
+    }
+    let blocked = blocked_globset(&[])?;
+    let mut paths = Vec::new();
+    for entry in allowed {
+        let rel = normalize_config_subpath(entry, root)?;
+        if rel.as_os_str().is_empty() {
+            bail!("`dotfiles.allowed_dirs` entries must be specific paths inside ~/.config");
+        }
+        check_not_blocked(&rel, &blocked)?;
+        paths.push(rel);
+    }
+    Ok(paths)
+}
+
+fn collect_stageable_files(root: &Path, allowed_paths: &[PathBuf]) -> Result<Vec<String>> {
+    let blocked = blocked_globset(&[])?;
+    let mut files = Vec::new();
+
+    for rel_target in allowed_paths {
+        let full = root.join(rel_target);
+        if !full.exists() {
+            continue;
+        }
+        if full.is_file() {
+            check_not_blocked(rel_target, &blocked)?;
+            files.push(rel_target.to_string_lossy().into_owned());
+            continue;
+        }
+        for entry in WalkBuilder::new(&full)
+            .hidden(false)
+            .git_ignore(false)
+            .build()
+            .flatten()
+        {
+            let p = entry.path();
+            if !p.is_file() || has_git_dir_component(p) {
+                continue;
+            }
+            let Ok(canon) = dunce::canonicalize(p) else {
+                continue;
+            };
+            if !canon.starts_with(root) {
+                continue;
+            }
+            let Some(rel) = diff_paths(&canon, root) else {
+                continue;
+            };
+            if check_not_blocked(&rel, &blocked).is_ok() {
+                files.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
+fn run_git_status(config: &Config) -> Result<String> {
+    let root = config_root()?;
+    let git_dir = bare_repo_dir();
+    if !git_dir.join("HEAD").is_file() {
+        return Ok(format!(
+            "Bare git repository is not initialized at {BARE_REPO_PATH}.\n\
+             Run `dotfiles` with `action: \"sync\"` to initialize or clone from `{}`.",
+            config.dotfiles.repo_url
+        ));
+    }
+
+    let allowed_paths = configured_allowed_paths(&root, config).ok();
+    let existing_targets: Vec<String> = allowed_paths
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|p| root.join(p).exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    let mut status_cmd = bare_git_cmd(&git_dir, &root);
+    status_cmd.args(["status", "--short", "--branch"]);
+    if let Some(ref allowed) = allowed_paths {
+        let stageable = collect_stageable_files(&root, allowed)?;
+        if !stageable.is_empty() {
+            status_cmd.arg("-uall").arg("--").args(&stageable);
+        } else if !existing_targets.is_empty() {
+            status_cmd.arg("--").args(&existing_targets);
+        }
+    }
+
+    let status_out = status_cmd
+        .output()
+        .context("Failed to execute `git status` on bare repo")?;
+    if !status_out.status.success() {
+        bail!(
+            "Bare git status failed: {}",
+            String::from_utf8_lossy(&status_out.stderr).trim()
+        );
+    }
+
+    let mut diff_cmd = bare_git_cmd(&git_dir, &root);
+    diff_cmd.args(["diff", "--stat"]);
+    if !existing_targets.is_empty() {
+        diff_cmd.arg("--").args(&existing_targets);
+    }
+    let diff_out = diff_cmd.output().ok();
+
+    let mut out = String::from_utf8_lossy(&status_out.stdout)
+        .trim_end()
+        .to_string();
+    if let Some(d) = diff_out.filter(|o| o.status.success()) {
+        let stat = String::from_utf8_lossy(&d.stdout).trim().to_string();
+        if !stat.is_empty() {
+            let _ = write!(out, "\n\n{stat}");
+        }
+    }
+
+    if out.trim().is_empty() {
+        Ok("Dotfiles working tree clean.".into())
+    } else {
+        Ok(out)
+    }
+}
+
+fn ensure_bare_repo(git_dir: &Path, work_tree: &Path, config: &Config) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    let repo_url = resolve_repo_url(&config.dotfiles.repo_url);
+
+    if !git_dir.join("HEAD").is_file() {
+        if let Some(parent) = git_dir.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+
+        let mut cloned = false;
+        if let Some(ref url) = repo_url
+            && Command::new("git")
+                .args(["clone", "--bare", url])
+                .arg(git_dir)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        {
+            notes.push(format!(
+                "Cloned bare repo from {url} into {BARE_REPO_PATH}."
+            ));
+            cloned = true;
+        }
+
+        if !cloned {
+            let init_out = Command::new("git")
+                .args(["init", "--bare"])
+                .arg(git_dir)
+                .output()
+                .context("Failed to run `git init --bare`")?;
+            if !init_out.status.success() {
+                bail!(
+                    "git init --bare failed: {}",
+                    String::from_utf8_lossy(&init_out.stderr).trim()
+                );
+            }
+            notes.push(format!(
+                "Initialized bare git repository at {BARE_REPO_PATH}."
+            ));
+        }
+
+        let _ = bare_git_cmd(git_dir, work_tree)
+            .args(["config", "status.showUntrackedFiles", "no"])
+            .output();
+
+        if cloned {
+            let has_head = bare_git_cmd(git_dir, work_tree)
+                .args(["rev-parse", "--verify", "HEAD"])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if has_head {
+                let co = bare_git_cmd(git_dir, work_tree)
+                    .args(["checkout", "-f"])
+                    .output()
+                    .context("Failed to checkout tracked dotfiles into ~/.config")?;
+                if co.status.success() {
+                    notes.push("Restored tracked dotfiles from remote into ~/.config.".into());
+                }
+            }
+        }
+    }
+
+    if let Some(ref url) = repo_url {
+        let has_origin = bare_git_cmd(git_dir, work_tree)
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !has_origin {
+            let _ = bare_git_cmd(git_dir, work_tree)
+                .args(["remote", "add", "origin", url])
+                .output();
+        }
+    }
+
+    Ok(notes)
+}
+
+fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
+    let root = config_root()?;
+    let allowed_paths = configured_allowed_paths(&root, config)?;
+    let git_dir = bare_repo_dir();
+
+    let mut report = ensure_bare_repo(&git_dir, &root, config)?;
+
+    // Update/stage deletions for already-tracked paths within allowed_dirs
+    let has_head = bare_git_cmd(&git_dir, &root)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if has_head {
+        let rel_strings: Vec<String> = allowed_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let _ = bare_git_cmd(&git_dir, &root)
+            .args(["add", "-u", "--"])
+            .args(&rel_strings)
+            .output();
+    }
+
+    // Stage all non-blocked files inside allowed_dirs
+    let stageable = collect_stageable_files(&root, &allowed_paths)?;
+    if !stageable.is_empty() {
+        let add_out = bare_git_cmd(&git_dir, &root)
+            .args(["add", "--"])
+            .args(&stageable)
+            .output()
+            .context("Failed to stage dotfiles")?;
+        if !add_out.status.success() {
+            bail!(
+                "Failed to stage dotfiles: {}",
+                String::from_utf8_lossy(&add_out.stderr).trim()
+            );
+        }
+    }
+
+    let has_staged = bare_git_cmd(&git_dir, &root)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+
+    if has_staged {
+        let msg = if commit_msg.trim().is_empty() {
+            "Sync dotfiles"
+        } else {
+            commit_msg.trim()
+        };
+        let commit_out = bare_git_cmd(&git_dir, &root)
+            .args(["commit", "-m", msg])
+            .output()
+            .context("Failed to commit dotfiles")?;
+        if !commit_out.status.success() {
+            bail!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&commit_out.stderr).trim()
+            );
+        }
+        report.push(
+            String::from_utf8_lossy(&commit_out.stdout)
+                .trim()
+                .to_string(),
+        );
+    } else {
+        report.push("No local changes to commit in tracked `dotfiles.allowed_dirs`.".into());
+    }
+
+    if resolve_repo_url(&config.dotfiles.repo_url).is_some()
+        && bare_git_cmd(&git_dir, &root)
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        let push_out = bare_git_cmd(&git_dir, &root)
+            .args(["push", "-u", "origin", "HEAD"])
+            .output()
+            .context("Failed to run `git push`")?;
+        if push_out.status.success() {
+            let stderr = String::from_utf8_lossy(&push_out.stderr).trim().to_string();
+            report.push(if stderr.is_empty() {
+                "Pushed to origin.".into()
+            } else {
+                format!("Pushed to origin ({stderr}).")
+            });
+        } else {
+            let err = String::from_utf8_lossy(&push_out.stderr).trim().to_string();
+            report.push(format!("Push to origin skipped/failed: {err}"));
+        }
+    }
+
+    Ok(report.join("\n"))
+}
+
 pub fn preview_edit(
     args: &DotfilesArgs,
     config: &Config,
@@ -429,7 +772,7 @@ pub fn preview_create(args: &DotfilesArgs, config: &Config) -> Result<(PathBuf, 
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "dotfiles";
-    const DESCRIPTION: &'static str = "Manage personal user configuration files in `~/.config` (list, read, search, edit, create, validate). Protects sensitive credentials/browser directories and validates Fish/Hyprland configs.";
+    const DESCRIPTION: &'static str = "Manage personal user configuration files in `~/.config` (list, read, search, edit, create, validate, status, sync). Tracks `dotfiles.allowed_dirs` in a bare git repo (`~/.local/share/archon/dotfiles.git`).";
     type Args = DotfilesArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -560,6 +903,8 @@ impl BlockingTool for Tool {
                 Ok(msg)
             }
             DotfilesAction::Validate => run_validate(&args.path, &ctx.config),
+            DotfilesAction::Status => run_git_status(&ctx.config),
+            DotfilesAction::Sync => run_git_sync(&args.content, &ctx.config),
         }
     }
 }
