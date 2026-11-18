@@ -375,6 +375,7 @@ impl Default for AppSettings {
                 "dotfiles:diff",
                 "memory:list",
                 "memory:read",
+                "notify",
                 "skill:list",
                 "skill:read",
             ]
@@ -627,7 +628,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# Overrides ~/.config/archon/config.toml for this directory.\n",
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
-            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
+            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",

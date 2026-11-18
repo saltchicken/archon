@@ -6,6 +6,7 @@ mod fetch_url;
 mod fs;
 mod git;
 mod memory;
+mod notify;
 mod read_file;
 mod repo_map;
 mod search;
@@ -648,6 +649,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "memory" => {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
+        "notify" => "<summary> [body=...] [urgency=low|normal|critical] [timeout_ms=N]",
         "skill" => "[list|read|create|modify] [name=...]",
         "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {
@@ -741,6 +743,10 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "memory" if !map.contains_key("action") => &["action"],
         "memory" if matches!(token, "global" | "workspace") => &["scope", "item"],
         "memory" => &["item"],
+        "notify" if matches!(token, "low" | "normal" | "critical") => {
+            &["urgency", "summary", "body"]
+        }
+        "notify" => &["summary", "body"],
         "system" => &["action", "query", "target"],
         "read_file" => &["file_path"],
         "search" => &["pattern", "path"],
@@ -1138,6 +1144,7 @@ register_tools! {
     blocking: fs,
     async: git,
     blocking: memory,
+    async: notify,
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
