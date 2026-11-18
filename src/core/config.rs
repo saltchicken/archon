@@ -328,6 +328,7 @@ impl Default for AppSettings {
                 "dotfiles:search",
                 "dotfiles:validate",
                 "dotfiles:status",
+                "dotfiles:diff",
                 "memory:list",
                 "memory:read",
                 "skill:list",

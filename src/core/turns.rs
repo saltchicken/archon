@@ -467,7 +467,10 @@ impl CoreEngine {
             return;
         }
 
-        info!("Compacting conversation history ({} messages)", self.session.messages.len());
+        info!(
+            "Compacting conversation history ({} messages)",
+            self.session.messages.len()
+        );
         let _ = self.tx.send(EngineEvent::ToolStarted {
             summary: "compacting conversation context".into(),
             index: 1,

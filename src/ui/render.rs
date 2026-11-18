@@ -405,7 +405,9 @@ impl TuiApp {
         if truncated {
             header_spans.push(Span::styled(
                 "⚠ TRUNCATED ",
-                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         if state.collapsed {

@@ -490,9 +490,7 @@ impl TuiApp {
                 format!(
                     "Output size (~{raw_kb} KB) exceeded the {max_kb} KB tool limit (context-padded cap: {full_cap_kb} KB).",
                 ),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
         ];
@@ -506,7 +504,9 @@ impl TuiApp {
             ),
             Span::styled(
                 "⚠ TRUNCATED ",
-                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         if pending.collapsed {

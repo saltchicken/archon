@@ -90,6 +90,11 @@ pub enum DotfilesAction {
     Validate,
     /// Show bare git status and diff summary for tracked `~/.config` files in `dotfiles.allowed_dirs`.
     Status,
+    /// Show unified git diff of uncommitted changes in tracked `~/.config` files (optionally scoped to `path`).
+    Diff,
+    /// Discard uncommitted changes and restore tracked `~/.config` files to the last committed `HEAD` state (scoped to `path`, or all tracked files in `dotfiles.allowed_dirs` when `path` is empty).
+    #[serde(alias = "revert", alias = "checkout")]
+    Restore,
     /// Initialize/clone the bare git repo (`~/.local/share/archon/dotfiles.git`), stage files in `dotfiles.allowed_dirs`, commit (using `content` as the optional commit message), and push to `dotfiles.repo_url`.
     Sync,
 }
@@ -98,7 +103,7 @@ pub enum DotfilesAction {
 pub struct DotfilesArgs {
     /// The operation to perform in `~/.config`.
     pub action: DotfilesAction,
-    /// Path relative to `~/.config` (e.g. `"hypr/hyprland.conf"`, `"fish/config.fish"`, or `"."` for `list`/`search`/`validate`).
+    /// Path relative to `~/.config` (e.g. `"hypr/hyprland.conf"`, `"fish/config.fish"`, or `"."` for `list`/`search`/`validate`/`diff`/`restore`).
     #[serde(default)]
     pub path: String,
     /// Optional 1-based starting line number (inclusive) when `action` is `read`.
@@ -587,6 +592,224 @@ fn run_git_status(config: &Config) -> Result<String> {
     }
 }
 
+fn has_bare_head(git_dir: &Path, work_tree: &Path) -> bool {
+    bare_git_cmd(git_dir, work_tree)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+fn resolve_git_targets(
+    raw_path: &str,
+    root: &Path,
+    config: &Config,
+) -> Result<(Option<String>, Vec<String>)> {
+    let rel = normalize_config_subpath(raw_path, root)?;
+    let blocked = blocked_globset(&[])?;
+
+    if !rel.as_os_str().is_empty() {
+        check_not_blocked(&rel, &blocked)?;
+        check_allowed_dir(&rel, config)?;
+
+        let candidate = root.join(&rel);
+        let effective_rel = if candidate.exists() {
+            let canon = dunce::canonicalize(&candidate)?;
+            if !canon.starts_with(root) {
+                bail!(
+                    "Security violation: '~/.config/{}' resolves outside ~/.config ({})",
+                    rel.display(),
+                    canon.display()
+                );
+            }
+            let eff = diff_paths(&canon, root).unwrap_or(rel);
+            check_not_blocked(&eff, &blocked)?;
+            check_allowed_dir(&eff, config)?;
+            eff
+        } else {
+            if let Some(existing) = candidate.ancestors().find(|p| p.exists()) {
+                let canon_anc = dunce::canonicalize(existing)?;
+                if !canon_anc.starts_with(root) {
+                    bail!(
+                        "Security violation: '~/.config/{}' escapes ~/.config",
+                        rel.display()
+                    );
+                }
+            }
+            rel
+        };
+
+        let rel_str = effective_rel.to_string_lossy().into_owned();
+        let display = format!("~/.config/{rel_str}");
+        return Ok((Some(display), vec![rel_str]));
+    }
+
+    let targets = configured_allowed_paths(root, config)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Ok((None, targets))
+}
+
+fn run_git_diff(raw_path: &str, config: &Config) -> Result<String> {
+    let root = config_root()?;
+    let git_dir = bare_repo_dir();
+    if !git_dir.join("HEAD").is_file() {
+        return Ok(format!(
+            "Bare git repository is not initialized at {BARE_REPO_PATH}.\n\
+             Run `dotfiles` with `action: \"sync\"` to initialize or clone from `{}`.",
+            config.dotfiles.repo_url
+        ));
+    }
+
+    let (scoped_display, targets) = resolve_git_targets(raw_path, &root, config)?;
+    let mut diff_cmd = bare_git_cmd(&git_dir, &root);
+    diff_cmd.arg("diff");
+    if has_bare_head(&git_dir, &root) {
+        diff_cmd.arg("HEAD");
+    }
+    diff_cmd.arg("--no-ext-diff");
+    if !targets.is_empty() {
+        diff_cmd.arg("--").args(&targets);
+    }
+
+    let diff_out = diff_cmd
+        .output()
+        .context("Failed to execute `git diff` on bare repo")?;
+    if !diff_out.status.success() {
+        bail!(
+            "Bare git diff failed: {}",
+            String::from_utf8_lossy(&diff_out.stderr).trim()
+        );
+    }
+
+    let out = String::from_utf8_lossy(&diff_out.stdout)
+        .trim_end()
+        .to_string();
+    if out.trim().is_empty() {
+        Ok(match scoped_display {
+            Some(display) => format!("No uncommitted changes for {display}."),
+            None => "No uncommitted changes in tracked dotfiles.".into(),
+        })
+    } else {
+        Ok(out)
+    }
+}
+
+fn collect_restorable_files(
+    raw_path: &str,
+    root: &Path,
+    git_dir: &Path,
+    config: &Config,
+) -> Result<(Option<String>, Vec<String>)> {
+    if !git_dir.join("HEAD").is_file() || !has_bare_head(git_dir, root) {
+        bail!(
+            "Bare git repository at {BARE_REPO_PATH} has no commits yet. \
+             Run `dotfiles` with `action: \"sync\"` to create a stable baseline first."
+        );
+    }
+
+    let (scoped_display, targets) = resolve_git_targets(raw_path, root, config)?;
+
+    if let Some(ref display) = scoped_display {
+        let mut ls_cmd = bare_git_cmd(git_dir, root);
+        ls_cmd.args(["ls-tree", "HEAD", "--"]).args(&targets);
+        let ls_out = ls_cmd
+            .output()
+            .context("Failed to query tracked files in bare repo")?;
+        if !ls_out.status.success() || String::from_utf8_lossy(&ls_out.stdout).trim().is_empty() {
+            bail!("No tracked files in HEAD match '{display}'");
+        }
+    }
+
+    let mut diff_cmd = bare_git_cmd(git_dir, root);
+    diff_cmd.args(["diff", "--name-only", "HEAD"]);
+    if !targets.is_empty() {
+        diff_cmd.arg("--").args(&targets);
+    }
+    let diff_out = diff_cmd
+        .output()
+        .context("Failed to list modified files in bare repo")?;
+    if !diff_out.status.success() {
+        bail!(
+            "Failed to inspect modified dotfiles: {}",
+            String::from_utf8_lossy(&diff_out.stderr).trim()
+        );
+    }
+
+    let blocked = blocked_globset(&[])?;
+    let mut files: Vec<String> = String::from_utf8_lossy(&diff_out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|rel_str| {
+            let rel = Path::new(rel_str);
+            check_not_blocked(rel, &blocked).is_ok() && check_allowed_dir(rel, config).is_ok()
+        })
+        .map(String::from)
+        .collect();
+    files.sort();
+    files.dedup();
+
+    Ok((scoped_display, files))
+}
+
+fn run_git_restore(raw_path: &str, config: &Config) -> Result<String> {
+    let root = config_root()?;
+    let git_dir = bare_repo_dir();
+    let (scoped_display, changed_files) =
+        collect_restorable_files(raw_path, &root, &git_dir, config)?;
+
+    if changed_files.is_empty() {
+        return Ok(match scoped_display {
+            Some(display) => {
+                format!("No uncommitted changes to restore for {display} (already matches HEAD).")
+            }
+            None => {
+                "No uncommitted changes to restore; tracked dotfiles already match HEAD.".into()
+            }
+        });
+    }
+
+    let co_out = bare_git_cmd(&git_dir, &root)
+        .args(["checkout", "HEAD", "--"])
+        .args(&changed_files)
+        .output()
+        .context("Failed to run `git checkout HEAD` on bare repo")?;
+    if !co_out.status.success() {
+        bail!(
+            "Failed to restore dotfiles from HEAD: {}",
+            String::from_utf8_lossy(&co_out.stderr).trim()
+        );
+    }
+
+    let mut msg = format!(
+        "Restored {} file(s) to HEAD:\n{}",
+        changed_files.len(),
+        changed_files
+            .iter()
+            .map(|f| format!("  ~/.config/{f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let mut checks = Vec::new();
+    for f in &changed_files {
+        let full_path = root.join(f);
+        if full_path.is_file()
+            && let Some(check) = validate_written_file(&full_path)
+            && !checks.contains(&check)
+        {
+            checks.push(check);
+        }
+    }
+    for check in checks {
+        let _ = write!(msg, "\n{check}");
+    }
+
+    Ok(msg)
+}
+
 fn ensure_bare_repo(git_dir: &Path, work_tree: &Path, config: &Config) -> Result<Vec<String>> {
     let mut notes = Vec::new();
     let repo_url = resolve_repo_url(&config.dotfiles.repo_url);
@@ -854,9 +1077,36 @@ pub fn preview_create(args: &DotfilesArgs, config: &Config) -> Result<(PathBuf, 
     Ok((target_path, display))
 }
 
+pub fn preview_restore(args: &DotfilesArgs, config: &Config) -> Result<(usize, String)> {
+    let root = config_root()?;
+    let git_dir = bare_repo_dir();
+    let (scoped_display, changed_files) =
+        collect_restorable_files(&args.path, &root, &git_dir, config)?;
+
+    if changed_files.is_empty() {
+        bail!(
+            "{}",
+            match scoped_display {
+                Some(display) => format!("No uncommitted changes to restore in {display}"),
+                None => "No uncommitted changes to restore in tracked dotfiles".into(),
+            }
+        );
+    }
+
+    let diff_out = bare_git_cmd(&git_dir, &root)
+        .args(["diff", "-R", "HEAD", "--no-ext-diff", "--"])
+        .args(&changed_files)
+        .output()
+        .context("Failed to preview restore diff")?;
+    let diff = String::from_utf8_lossy(&diff_out.stdout)
+        .trim_end()
+        .to_string();
+    Ok((changed_files.len(), diff))
+}
+
 impl BlockingTool for Tool {
     const NAME: &'static str = "dotfiles";
-    const DESCRIPTION: &'static str = "Manage personal user configuration files in `~/.config` (list, read, search, edit, create, validate, status, sync). Tracks `dotfiles.allowed_dirs` in a bare git repo (`~/.local/share/archon/dotfiles.git`).";
+    const DESCRIPTION: &'static str = "Manage personal user configuration files in `~/.config` (list, read, search, edit, create, validate, status, diff, restore, sync). Tracks `dotfiles.allowed_dirs` in a bare git repo (`~/.local/share/archon/dotfiles.git`).";
     type Args = DotfilesArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -988,6 +1238,8 @@ impl BlockingTool for Tool {
             }
             DotfilesAction::Validate => run_validate(&args.path, &ctx.config),
             DotfilesAction::Status => run_git_status(&ctx.config),
+            DotfilesAction::Diff => run_git_diff(&args.path, &ctx.config),
+            DotfilesAction::Restore => run_git_restore(&args.path, &ctx.config),
             DotfilesAction::Sync => run_git_sync(&args.content, &ctx.config),
         }
     }

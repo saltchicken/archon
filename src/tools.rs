@@ -143,13 +143,20 @@ impl ToolContext {
 
     fn from_cwd() -> Result<Self> {
         let root = workspace_root()?;
-        let mut config = Config::default();
-        let ws_skills_dir = crate::core::config::workspace_config_dir_for(&root).join("skills");
-        config.skills = crate::core::skills::discover_skills(
-            &config.app.skills_dir,
-            Some(ws_skills_dir.as_path()),
-        );
-        config.workspace_skills_dir = Some(ws_skills_dir);
+        let ws_dir = crate::core::config::workspace_config_dir_for(&root);
+        let base_path = crate::core::config::archon_config_root().join("config.toml");
+        let config = if base_path.exists() {
+            Config::load(&base_path, &ws_dir).0
+        } else {
+            let mut cfg = Config::default();
+            let ws_skills_dir = ws_dir.join("skills");
+            cfg.skills = crate::core::skills::discover_skills(
+                &cfg.app.skills_dir,
+                Some(ws_skills_dir.as_path()),
+            );
+            cfg.workspace_skills_dir = Some(ws_skills_dir);
+            cfg
+        };
         Ok(Self {
             root,
             max_output_size: 0,
@@ -518,6 +525,8 @@ pub fn call_signature(call: &ToolCall) -> String {
                 "read".to_string()
             } else if name == "memory" && matches!(raw, "delete" | "rm") {
                 "remove".to_string()
+            } else if name == "dotfiles" && matches!(raw, "revert" | "checkout") {
+                "restore".to_string()
             } else {
                 raw.to_string()
             }
@@ -609,7 +618,8 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "skill" => &["list", "read", "create", "modify"],
         "dotfiles" => &[
-            "list", "read", "search", "edit", "create", "validate", "status", "sync",
+            "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore",
+            "sync",
         ],
         "system" => &[
             "overview",
@@ -639,7 +649,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
         "skill" => "[list|read|create|modify] [name=...]",
-        "dotfiles" => "[list|read|search|edit|create|validate|status|sync] [path=...]",
+        "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
         }
@@ -945,6 +955,23 @@ fn format_dotfiles_approval(out: &mut String, args: &Value, obj: &Map<String, Va
                 dotfiles::preview_create(&parsed, &ctx.config)
                     .map(|(_, d)| (d, String::new(), parsed.content, None)),
             ),
+            dotfiles::DotfilesAction::Restore => {
+                match dotfiles::preview_restore(&parsed, &ctx.config) {
+                    Ok((file_count, diff)) => {
+                        let _ = writeln!(out, "  files: {file_count}");
+                        out.push_str("\n--- UNIFIED DIFF ---\n");
+                        out.push_str(if diff.trim().is_empty() {
+                            "(No differences)\n"
+                        } else {
+                            &diff
+                        });
+                        if !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    Err(e) => append_warning(out, &e),
+                }
+            }
             _ => {}
         }
     }

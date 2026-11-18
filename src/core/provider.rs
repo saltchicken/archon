@@ -251,10 +251,7 @@ impl Provider {
             let _ = writeln!(transcript);
         }
 
-        let guide_ctx = match custom_instructions
-            .map(str::trim)
-            .filter(|g| !g.is_empty())
-        {
+        let guide_ctx = match custom_instructions.map(str::trim).filter(|g| !g.is_empty()) {
             Some(g) => format!("Additional user instructions for this compaction:\n{g}\n\n"),
             None => String::new(),
         };
