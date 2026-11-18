@@ -7,11 +7,18 @@ use super::{
         search::{SearchExecutionParams, search_candidate_files},
     },
 };
-use crate::core::config::{Config, expand_tilde};
+use crate::core::{
+    EngineEvent,
+    config::{Config, expand_tilde},
+    gemini, ollama,
+    provider::Provider,
+    session::{ChatMessage, truncate_str},
+};
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;
+use reqwest::Client;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
@@ -19,6 +26,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 pub struct Tool;
@@ -656,6 +664,78 @@ fn ensure_bare_repo(git_dir: &Path, work_tree: &Path, config: &Config) -> Result
     Ok(notes)
 }
 
+fn generate_commit_message(git_dir: &Path, work_tree: &Path, config: &Config) -> Option<String> {
+    let stat_out = bare_git_cmd(git_dir, work_tree)
+        .args(["diff", "--cached", "--stat"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let stat = String::from_utf8_lossy(&stat_out.stdout).trim().to_string();
+    if stat.is_empty() {
+        return None;
+    }
+
+    let diff_out = bare_git_cmd(git_dir, work_tree)
+        .args(["diff", "--cached", "--no-ext-diff"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let diff = truncate_str(String::from_utf8_lossy(&diff_out.stdout).trim(), 8_000);
+
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    let model = config.startup_model();
+    let provider = Provider::from_model(&model);
+    let num_ctx = config.context_for_model(&model);
+    let cfg = config.clone();
+
+    let system_prompt = "You write concise, conventional git commit messages (e.g. 'feat(hypr): ...', 'chore(fish): ...') for ~/.config dotfiles. Output ONLY the raw commit message (a short summary line under 72 characters, optionally followed by brief bullet points if multiple configs changed). Do not wrap in quotes or markdown code blocks.";
+    let prompt = format!(
+        "Generate a commit message for these staged ~/.config changes:\n\n<stat>\n{stat}\n</stat>\n\n<diff>\n{diff}\n</diff>"
+    );
+    let messages = vec![ChatMessage::new("user", prompt)];
+
+    handle.block_on(async move {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .ok()?;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        match provider {
+            Provider::Ollama => {
+                let payload =
+                    ollama::build_payload(&model, &messages, system_prompt, num_ctx, None);
+                ollama::stream_chat(client, cfg.ollama.base_url, payload, tx).await;
+            }
+            Provider::Gemini => {
+                let api_key = cfg.gemini.resolve_api_key()?;
+                let payload = gemini::build_payload(&messages, system_prompt, None);
+                gemini::stream_chat(client, cfg.gemini.base_url, api_key, model, payload, tx).await;
+            }
+        }
+
+        let mut response = String::new();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                EngineEvent::StreamChunk(c) => response.push_str(&c),
+                EngineEvent::StreamError(_) => return None,
+                EngineEvent::StreamDone { .. } => break,
+                _ => {}
+            }
+        }
+
+        let cleaned = response
+            .trim()
+            .trim_start_matches("```text")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+            .trim_matches('"')
+            .trim();
+        (!cleaned.is_empty()).then(|| cleaned.to_string())
+    })
+}
+
 fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
     let root = config_root()?;
     let allowed_paths = configured_allowed_paths(&root, config)?;
@@ -702,10 +782,14 @@ fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
         .unwrap_or(false);
 
     if has_staged {
-        let msg = if commit_msg.trim().is_empty() {
-            "Sync dotfiles"
-        } else {
+        let generated_msg;
+        let msg = if !commit_msg.trim().is_empty() {
             commit_msg.trim()
+        } else if let Some(llm_msg) = generate_commit_message(&git_dir, &root, config) {
+            generated_msg = llm_msg;
+            &generated_msg
+        } else {
+            "Sync dotfiles"
         };
         let commit_out = bare_git_cmd(&git_dir, &root)
             .args(["commit", "-m", msg])

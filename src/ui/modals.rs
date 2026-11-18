@@ -122,7 +122,7 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
                 } else if line.starts_with('-') {
                     Style::default().fg(Color::Red)
                 } else {
-                    Style::default().fg(Color::BrightBlack)
+                    Style::default().fg(Color::Cyan)
                 };
                 Line::from(Span::styled(line, style))
             } else {
