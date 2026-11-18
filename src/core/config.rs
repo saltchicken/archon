@@ -755,6 +755,11 @@ impl Config {
             .extract::<Self>()
             .map(|c| (c.workspace_snapshot.file, c.schedules))
             .unwrap_or_default();
+        let local_schedules = Figment::from(Serialized::defaults(Self::default()))
+            .merge(Toml::file(&local_config_path))
+            .extract::<Self>()
+            .map(|c| c.schedules)
+            .unwrap_or_default();
 
         let bound_ws = read_bound_workspace(&local_config_path)
             .or_else(|| {
@@ -771,6 +776,7 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
+                cfg.schedules = local_schedules;
                 cfg.global_schedules = global_schedules;
                 if cfg.workspace.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     cfg.workspace = bound_ws;

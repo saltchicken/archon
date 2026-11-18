@@ -38,7 +38,7 @@ fn sanitize_unit_component(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
     for ch in raw.trim().chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
+        if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_lowercase());
             prev_dash = false;
         } else if !prev_dash && !out.is_empty() {
@@ -71,19 +71,23 @@ fn resolve_scope(config: &Config, global: bool) -> Result<(String, PathBuf)> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    Ok((sanitize_unit_component(raw_name), canon))
+    Ok((format!("ws-{}", sanitize_unit_component(raw_name)), canon))
 }
 
 fn unit_base_name(scope: &str, name: &str) -> String {
     format!(
-        "{UNIT_PREFIX}{}-{}",
+        "{UNIT_PREFIX}{}--{}",
         sanitize_unit_component(scope),
         sanitize_unit_component(name)
     )
 }
 
 fn scope_unit_prefix(scope: &str) -> String {
-    format!("{UNIT_PREFIX}{}-", sanitize_unit_component(scope))
+    format!("{UNIT_PREFIX}{}--", sanitize_unit_component(scope))
+}
+
+fn escape_systemd_specifiers(raw: &str) -> String {
+    raw.replace('%', "%%").replace(['\n', '\r'], " ")
 }
 
 fn quote_systemd_arg(arg: &str) -> String {
@@ -162,18 +166,20 @@ fn render_service(
     args.push(quote_systemd_arg(sched.prompt.trim()));
 
     let exec_start = args.join(" ");
-    let wd = working_dir.to_string_lossy();
+    let wd_raw = working_dir.to_string_lossy();
+    let wd_header = wd_raw.replace(['\n', '\r'], " ");
+    let wd_quoted = quote_systemd_arg(&wd_raw);
+    let desc_name = escape_systemd_specifiers(sched.name.trim());
 
     format!(
-        "{MANAGED_HEADER_PREFIX} (scope={scope}, workspace={wd})\n\
+        "{MANAGED_HEADER_PREFIX} (scope={scope}, workspace={wd_header})\n\
          [Unit]\n\
-         Description=Archon schedule: {scope}/{name}\n\
+         Description=Archon schedule: {scope}/{desc_name}\n\
          \n\
          [Service]\n\
          Type=oneshot\n\
-         WorkingDirectory={wd}\n\
+         WorkingDirectory={wd_quoted}\n\
          ExecStart={exec_start}\n",
-        name = sched.name.trim(),
     )
 }
 
@@ -183,12 +189,14 @@ fn render_timer(
     working_dir: &Path,
     service_unit: &str,
 ) -> String {
-    let wd = working_dir.to_string_lossy();
+    let wd_header = working_dir.to_string_lossy().replace(['\n', '\r'], " ");
     let persistent = if sched.persistent { "true" } else { "false" };
+    let desc_name = escape_systemd_specifiers(sched.name.trim());
+    let cal = escape_systemd_specifiers(sched.on_calendar.trim());
     format!(
-        "{MANAGED_HEADER_PREFIX} (scope={scope}, workspace={wd})\n\
+        "{MANAGED_HEADER_PREFIX} (scope={scope}, workspace={wd_header})\n\
          [Unit]\n\
-         Description=Timer for Archon schedule: {scope}/{name}\n\
+         Description=Timer for Archon schedule: {scope}/{desc_name}\n\
          \n\
          [Timer]\n\
          OnCalendar={cal}\n\
@@ -197,14 +205,13 @@ fn render_timer(
          \n\
          [Install]\n\
          WantedBy=timers.target\n",
-        name = sched.name.trim(),
-        cal = sched.on_calendar.trim(),
     )
 }
 
-fn is_managed_file(path: &Path) -> bool {
+fn is_managed_file_for_scope(path: &Path, scope: &str) -> bool {
+    let expected = format!("{MANAGED_HEADER_PREFIX} (scope={scope},");
     fs::read_to_string(path)
-        .map(|content| content.starts_with(MANAGED_HEADER_PREFIX))
+        .map(|content| content.starts_with(&expected))
         .unwrap_or(false)
 }
 
@@ -245,31 +252,34 @@ fn sync_schedules(config: &Config, global: bool) -> Result<()> {
     fs::create_dir_all(&unit_dir)
         .with_context(|| format!("Failed to create {}", unit_dir.display()))?;
 
-    let exe_path = env::current_exe().context("Failed to resolve current archon executable path")?;
+    let exe_path =
+        env::current_exe().context("Failed to resolve current archon executable path")?;
     let exe_path = dunce::canonicalize(&exe_path).unwrap_or(exe_path);
 
     let mut desired_bases = HashSet::new();
     for sched in schedules {
-        if sched.name.trim().is_empty() {
+        let name = sched.name.trim();
+        let cal = sched.on_calendar.trim();
+        if name.is_empty() {
             bail!("Found a [[schedules]] entry with an empty `name`.");
         }
-        if sched.on_calendar.trim().is_empty() {
-            bail!(
-                "Schedule '{}' is missing `on_calendar`.",
-                sched.name.trim()
-            );
+        if name.contains(['\n', '\r']) {
+            bail!("Schedule name '{name}' must not contain newlines.");
+        }
+        if cal.is_empty() {
+            bail!("Schedule '{name}' is missing `on_calendar`.");
+        }
+        if cal.contains(['\n', '\r']) {
+            bail!("Schedule '{name}' has newlines in `on_calendar`.");
         }
         if sched.prompt.trim().is_empty() {
-            bail!("Schedule '{}' is missing `prompt`.", sched.name.trim());
+            bail!("Schedule '{name}' is missing `prompt`.");
         }
-        validate_on_calendar(sched.on_calendar.trim())?;
+        validate_on_calendar(cal)?;
 
-        let base = unit_base_name(&scope, &sched.name);
+        let base = unit_base_name(&scope, name);
         if !desired_bases.insert(base.clone()) {
-            bail!(
-                "Duplicate schedule name '{}' (collides on unit '{base}').",
-                sched.name.trim()
-            );
+            bail!("Duplicate schedule name '{name}' (collides on unit '{base}').");
         }
     }
 
@@ -282,7 +292,7 @@ fn sync_schedules(config: &Config, global: bool) -> Result<()> {
             let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if !file_name.starts_with(&prefix) || !is_managed_file(&path) {
+            if !file_name.starts_with(&prefix) || !is_managed_file_for_scope(&path, &scope) {
                 continue;
             }
             let base = file_name
@@ -350,7 +360,11 @@ fn list_schedules(config: &Config, global: bool) -> Result<()> {
         for sched in schedules {
             let state = if sched.enabled { "enabled" } else { "disabled" };
             let skill = sched.skill.as_deref().unwrap_or("-");
-            let save = if sched.save_session { "save" } else { "no-save" };
+            let save = if sched.save_session {
+                "save"
+            } else {
+                "no-save"
+            };
             println!(
                 "  - {} [{}] | on_calendar: {} | skill: {} | {}",
                 sched.name, state, sched.on_calendar, skill, save
@@ -384,7 +398,14 @@ fn logs_schedule(config: &Config, name: &str, lines: usize, global: bool) -> Res
     let service_name = format!("{}.service", unit_base_name(&scope, name));
     let lines_str = lines.to_string();
     let status = Command::new("journalctl")
-        .args(["--user", "-u", &service_name, "-n", &lines_str, "--no-pager"])
+        .args([
+            "--user",
+            "-u",
+            &service_name,
+            "-n",
+            &lines_str,
+            "--no-pager",
+        ])
         .status()
         .context("Failed to execute `journalctl --user`")?;
     if !status.success() {
@@ -408,7 +429,7 @@ fn clean_schedules(config: &Config, global: bool) -> Result<()> {
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !file_name.starts_with(&prefix) || !is_managed_file(&path) {
+        if !file_name.starts_with(&prefix) || !is_managed_file_for_scope(&path, &scope) {
             continue;
         }
         if file_name.ends_with(".timer") {

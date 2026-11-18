@@ -12,15 +12,24 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug, Clone)]
 pub enum ScheduleCommand {
-    Sync { global: bool },
-    List { global: bool },
-    Run { name: String, global: bool },
+    Sync {
+        global: bool,
+    },
+    List {
+        global: bool,
+    },
+    Run {
+        name: String,
+        global: bool,
+    },
     Logs {
         name: String,
         lines: usize,
         global: bool,
     },
-    Clean { global: bool },
+    Clean {
+        global: bool,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -179,10 +188,9 @@ impl CliArgs {
             "list" => Ok(ScheduleCommand::List { global }),
             "clean" => Ok(ScheduleCommand::Clean { global }),
             "run" => {
-                let name = positional
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("Usage: archon schedule run <NAME> [--global]"))?;
+                let name = positional.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!("Usage: archon schedule run <NAME> [--global]")
+                })?;
                 Ok(ScheduleCommand::Run { name, global })
             }
             "logs" => {
