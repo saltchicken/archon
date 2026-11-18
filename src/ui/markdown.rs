@@ -1,5 +1,6 @@
+use super::theme;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use textwrap::core::display_width;
@@ -395,7 +396,9 @@ fn parse_inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
         let style = base_style.add_modifier(token.modifiers);
         match token.kind {
             InlineTokenKind::Text(s) => push_merged_span(&mut spans, &s, style),
-            InlineTokenKind::Code(s) => push_merged_span(&mut spans, &s, style.fg(Color::Yellow)),
+            InlineTokenKind::Code(s) => {
+                push_merged_span(&mut spans, &s, style.fg(theme::MD_INLINE_CODE))
+            }
             InlineTokenKind::Delim { ch, count, .. } if count > 0 => {
                 push_merged_span(&mut spans, &ch.to_string().repeat(count), style);
             }
@@ -590,7 +593,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
     let row_style = |r_idx: usize| {
         if r_idx == 0 {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme::MD_TABLE_HEADER)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -638,7 +641,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         }
     }
 
-    let border_style = Style::default().fg(Color::LightGreen);
+    let border_style = Style::default().fg(theme::MD_TABLE_BORDER);
     let mut out = vec![WrappedLine::TableBorder(draw_table_border(
         &col_widths,
         '┌',
@@ -909,16 +912,16 @@ fn wrap_list_item_lines(
 fn header_text_style(level: usize) -> Style {
     match level {
         1 => Style::default()
-            .fg(Color::LightCyan)
+            .fg(theme::MD_H1)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         2 => Style::default()
-            .fg(Color::Cyan)
+            .fg(theme::MD_H2)
             .add_modifier(Modifier::BOLD),
         3 => Style::default()
-            .fg(Color::LightMagenta)
+            .fg(theme::MD_H3)
             .add_modifier(Modifier::BOLD),
         _ => Style::default()
-            .fg(Color::LightGreen)
+            .fg(theme::MD_H4)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
     }
 }
@@ -933,7 +936,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
     let mut in_diff_hunk = false;
     let mut in_params_block = false;
     let quote_style = Style::default()
-        .fg(Color::LightGreen)
+        .fg(theme::MD_QUOTE_TEXT)
         .add_modifier(Modifier::ITALIC);
 
     for line in content.lines() {
@@ -1129,10 +1132,10 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 list_levels.clear();
                 let style = if trimmed == "Parameters:" {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme::MD_TOOL_PARAM)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(theme::MD_TOOL_PARAM)
                 };
                 for spans in wrap_raw_line(line, style, options) {
                     out.push(WrappedLine::Plain(spans));
@@ -1158,7 +1161,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 }
             } else if trimmed.starts_with("⚙ ") {
                 let style = Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::MD_TOOL_PARAM)
                     .add_modifier(Modifier::ITALIC);
                 for spans in wrap_raw_line(line, style, options) {
                     out.push(WrappedLine::Plain(spans));
@@ -1198,20 +1201,23 @@ fn style_markdown_header_inner(
     level: usize,
     content_spans: &[Span<'static>],
 ) -> Vec<Span<'static>> {
-    let blue_bold = Style::default()
-        .fg(Color::Blue)
+    let accent_bold = Style::default()
+        .fg(theme::MD_HEADER_ACCENT)
         .add_modifier(Modifier::BOLD);
     let (prefix, accent) = match level {
-        1 => ("▌ ", blue_bold),
-        2 => ("▎ ", blue_bold),
-        3 => ("▸ ", blue_bold),
-        _ => ("• ", Style::default().fg(Color::LightGreen)),
+        1 => ("▌ ", accent_bold),
+        2 => ("▎ ", accent_bold),
+        3 => ("▸ ", accent_bold),
+        _ => ("• ", Style::default().fg(theme::MD_HEADER_SUB_ACCENT)),
     };
     let mut spans = Vec::with_capacity(content_spans.len() + 2);
     spans.push(Span::styled(prefix, accent));
     spans.extend(content_spans.iter().cloned());
     if level == 2 {
-        spans.push(Span::styled(" ───", Style::default().fg(Color::Blue)));
+        spans.push(Span::styled(
+            " ───",
+            Style::default().fg(theme::MD_HEADER_ACCENT),
+        ));
     }
     spans
 }
@@ -1226,10 +1232,10 @@ fn style_blockquote_bars(depth: usize) -> Vec<Span<'static>> {
     (0..depth)
         .map(|level| {
             let color = match level {
-                0 => Color::Blue,
-                1 => Color::Cyan,
-                2 => Color::LightMagenta,
-                _ => Color::LightGreen,
+                0 => theme::MD_QUOTE_BAR_0,
+                1 => theme::MD_QUOTE_BAR_1,
+                2 => theme::MD_QUOTE_BAR_2,
+                _ => theme::MD_QUOTE_BAR_3,
             };
             Span::styled(
                 "▎ ",
@@ -1242,13 +1248,13 @@ fn style_blockquote_bars(depth: usize) -> Vec<Span<'static>> {
 fn ordered_marker_style(depth: usize) -> Style {
     match depth {
         0 => Style::default()
-            .fg(Color::Cyan)
+            .fg(theme::MD_LIST_DEPTH_0)
             .add_modifier(Modifier::BOLD),
         1 => Style::default()
-            .fg(Color::LightMagenta)
+            .fg(theme::MD_LIST_DEPTH_1)
             .add_modifier(Modifier::BOLD),
         _ => Style::default()
-            .fg(Color::LightGreen)
+            .fg(theme::MD_LIST_DEPTH_FALLBACK)
             .add_modifier(Modifier::BOLD),
     }
 }
@@ -1260,17 +1266,17 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
                 0 => (
                     "• ",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::MD_LIST_DEPTH_0)
                         .add_modifier(Modifier::BOLD),
                 ),
-                1 => ("◦ ", Style::default().fg(Color::LightMagenta)),
+                1 => ("◦ ", Style::default().fg(theme::MD_LIST_DEPTH_1)),
                 2 => (
                     "▪ ",
                     Style::default()
-                        .fg(Color::Blue)
+                        .fg(theme::MD_LIST_DEPTH_2)
                         .add_modifier(Modifier::BOLD),
                 ),
-                _ => ("▹ ", Style::default().fg(Color::LightGreen)),
+                _ => ("▹ ", Style::default().fg(theme::MD_LIST_DEPTH_FALLBACK)),
             };
             vec![Span::styled(glyph, style)]
         }
@@ -1300,11 +1306,11 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
                 (
                     "☑ ",
                     Style::default()
-                        .fg(Color::Green)
+                        .fg(theme::MD_TASK_CHECKED)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("☐ ", Style::default().fg(Color::LightGreen))
+                ("☐ ", Style::default().fg(theme::MD_TASK_UNCHECKED))
             };
             spans.push(Span::styled(box_glyph, box_style));
             spans
@@ -1316,7 +1322,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
     let mut in_code_block = false;
     let mut code_fence_width = 7usize;
     let mut out = Vec::with_capacity(content_lines.len());
-    let border_style = Style::default().fg(Color::Blue);
+    let border_style = Style::default().fg(theme::MD_CODE_BORDER);
 
     for item in content_lines {
         let formatted = match item {
@@ -1326,7 +1332,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
                     let copy_badge = Span::styled(
                         "󰆏",
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme::BADGE_CODE_COPY)
                             .add_modifier(Modifier::BOLD),
                     );
                     if lang.is_empty() {
@@ -1364,13 +1370,13 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
             WrappedLine::CodeLine(line) => {
                 vec![
                     Span::styled("  │ ", border_style),
-                    Span::styled(line.clone(), Style::default().fg(Color::Cyan)),
+                    Span::styled(line.clone(), Style::default().fg(theme::MD_CODE_TEXT)),
                 ]
             }
             WrappedLine::TableBorder(line) => {
                 vec![
                     Span::raw("  "),
-                    Span::styled(line.clone(), Style::default().fg(Color::LightGreen)),
+                    Span::styled(line.clone(), Style::default().fg(theme::MD_TABLE_BORDER)),
                 ]
             }
             WrappedLine::TableRow(spans) => spans.clone(),
@@ -1456,7 +1462,7 @@ pub(super) fn render_thought_markdown(
     options: &textwrap::Options<'_>,
 ) -> Vec<Line<'static>> {
     let thought_style = Style::default()
-        .fg(Color::LightGreen)
+        .fg(theme::MD_THOUGHT)
         .add_modifier(Modifier::ITALIC);
     render_markdown(content, options)
         .into_iter()

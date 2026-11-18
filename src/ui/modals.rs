@@ -1,5 +1,5 @@
 use super::{
-    ActiveModal, SessionView, TuiApp, chat_block, create_memory_area, render::sanitize_line,
+    ActiveModal, SessionView, TuiApp, chat_block, create_memory_area, render::sanitize_line, theme,
     titled_block,
 };
 use crate::core::{
@@ -10,7 +10,7 @@ use crate::core::{
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, List, ListItem, Paragraph, Widget, Wrap},
 };
@@ -71,10 +71,10 @@ fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
     let prefix = if selected { ">> " } else { "   " };
     let style = if selected {
         Style::default()
-            .fg(Color::Green)
+            .fg(theme::SELECTION_HIGHLIGHT)
             .add_modifier(Modifier::BOLD)
     } else if active {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme::SELECTION_ACTIVE)
     } else {
         Style::default()
     };
@@ -82,7 +82,7 @@ fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
 }
 
 fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
-    let mut section_color = Color::Blue;
+    let mut section_color = theme::PREVIEW_DEFAULT_SECTION;
     let mut in_diff = false;
 
     preview
@@ -92,17 +92,17 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
             if line.starts_with("--- ") && line.ends_with(" ---") {
                 in_diff = line == "--- UNIFIED DIFF ---";
                 let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
-                    section_color = Color::Red;
-                    Color::LightRed
+                    section_color = theme::PREVIEW_SECTION_WARN;
+                    theme::PREVIEW_HEADER_WARN
                 } else if line.contains("REPLACE")
                     || line.contains("CONTENT")
                     || line.contains("MESSAGE")
                 {
-                    section_color = Color::Cyan;
-                    Color::Green
+                    section_color = theme::PREVIEW_SECTION_CONTENT;
+                    theme::PREVIEW_HEADER_CONTENT
                 } else {
-                    section_color = Color::White;
-                    Color::Cyan
+                    section_color = theme::PREVIEW_SECTION_DEFAULT;
+                    theme::PREVIEW_HEADER_DEFAULT
                 };
                 Line::from(Span::styled(
                     line,
@@ -113,16 +113,16 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
             } else if in_diff {
                 let style = if line.starts_with("+++") || line.starts_with("---") {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme::DIFF_FILE_HEADER)
                         .add_modifier(Modifier::BOLD)
                 } else if line.starts_with("@@") {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(theme::DIFF_HUNK_HEADER)
                 } else if line.starts_with('+') {
-                    Style::default().fg(Color::Green)
+                    Style::default().fg(theme::DIFF_ADD)
                 } else if line.starts_with('-') {
-                    Style::default().fg(Color::Red)
+                    Style::default().fg(theme::DIFF_DELETE)
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(theme::DIFF_CONTEXT)
                 };
                 Line::from(Span::styled(line, style))
             } else {
@@ -266,14 +266,14 @@ impl TuiApp {
         let (recent_style, pinned_style) = match self.session_view {
             SessionView::Recent => (
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::TAB_RECENT_ACTIVE)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(Color::LightGreen),
+                Style::default().fg(theme::TAB_INACTIVE),
             ),
             SessionView::Pinned => (
-                Style::default().fg(Color::LightGreen),
+                Style::default().fg(theme::TAB_INACTIVE),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::TAB_PINNED_ACTIVE)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ),
         };
@@ -284,7 +284,10 @@ impl TuiApp {
         };
 
         let header = Line::from(vec![
-            Span::styled("Conversations ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Conversations ",
+                Style::default().fg(theme::MODAL_TITLE_ACCENT),
+            ),
             Span::raw("│ View: ["),
             Span::styled(format!("Recent ({recent_count})"), recent_style),
             Span::raw(" / "),
@@ -296,7 +299,7 @@ impl TuiApp {
             format!(
                 " [Tab/←/→] Switch View   {pin_action_label}   [⏎] Load   [D] Delete   [Esc] Close"
             ),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme::MODAL_HINT),
         ))];
 
         let chunks = Layout::default()
@@ -318,7 +321,8 @@ impl TuiApp {
             SessionView::Recent => " Recent Sessions ",
             SessionView::Pinned => " 󰐃 Pinned Sessions ",
         };
-        let list_block = chat_block(list_title).border_style(Style::default().fg(Color::Cyan));
+        let list_block =
+            chat_block(list_title).border_style(Style::default().fg(theme::BORDER_MODAL_ACCENT));
         let inner_height = usize::from(list_block.inner(chunks[1]).height).max(1);
 
         let items: Vec<ListItem> = if filtered.is_empty() {
@@ -330,7 +334,7 @@ impl TuiApp {
             };
             vec![ListItem::new(Line::from(Span::styled(
                 empty_msg,
-                Style::default().fg(Color::LightGreen),
+                Style::default().fg(theme::MODAL_MUTED),
             )))]
         } else {
             let scroll_offset = if self.session_idx >= inner_height {
@@ -402,30 +406,30 @@ impl TuiApp {
             Line::from(Span::styled(
                 "Optional Feedback / Note:",
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(theme::MODAL_SECTION_LABEL)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(format!("> {}", sanitize_line(&self.tool_feedback))),
             Line::from(""),
             Line::from(Span::styled(
                 "[⏎] Approve Once",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[^A] Always (Session)",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[Esc] Decline",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[⇧Esc] Cancel All",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[↑/↓/PgUp/PgDn] Scroll",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
         ]);
 
@@ -436,7 +440,7 @@ impl TuiApp {
                 chat_block(format!(
                     " ⚠ Tool Execution Approval Required ({idx}/{total}) "
                 ))
-                .border_style(Style::default().fg(Color::Yellow)),
+                .border_style(Style::default().fg(theme::BORDER_MODAL_WARN)),
             );
         let area = top_right_rect(55, 55, 72, 20, f.area());
         render_modal_at(f, area, widget);
@@ -474,23 +478,25 @@ impl TuiApp {
                 Span::styled(
                     "Tool: ",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme::MODAL_TITLE_ACCENT)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     sanitize_line(&pending.summary),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(theme::TRUNCATED_SUMMARY),
                 ),
                 Span::styled(
                     format!(" ({})", sanitize_line(&pending.tool_name)),
-                    Style::default().fg(Color::LightGreen),
+                    Style::default().fg(theme::TRUNCATED_TOOL_NAME),
                 ),
             ]),
             Line::from(Span::styled(
                 format!(
                     "Output size (~{raw_kb} KB) exceeded the {max_kb} KB tool limit (context-padded cap: {full_cap_kb} KB).",
                 ),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::TRUNCATED_WARNING)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
         ];
@@ -499,13 +505,13 @@ impl TuiApp {
             Span::styled(
                 format!("  ⚙ {} ", sanitize_line(&pending.summary)),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::HEADER_TOOL)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "⚠ TRUNCATED ",
                 Style::default()
-                    .fg(Color::LightRed)
+                    .fg(theme::BADGE_TRUNCATED)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
@@ -513,7 +519,7 @@ impl TuiApp {
             preview_header.push(Span::styled(
                 format!("+{total_content}"),
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(theme::BADGE_COLLAPSED)
                     .add_modifier(Modifier::ITALIC),
             ));
         }
@@ -534,7 +540,7 @@ impl TuiApp {
             if start > 0 {
                 lines.push(Line::from(Span::styled(
                     format!("    ... ({start}) ..."),
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(theme::SCROLL_ELLIPSIS),
                 )));
             } else {
                 lines.push(Line::from(""));
@@ -542,13 +548,13 @@ impl TuiApp {
             for l in &preview_lines[start..end] {
                 lines.push(Line::from(Span::styled(
                     format!("  {l}"),
-                    Style::default().fg(Color::LightGreen),
+                    Style::default().fg(theme::TRUNCATED_PREVIEW_TEXT),
                 )));
             }
             if end < total_content {
                 lines.push(Line::from(Span::styled(
                     format!("    ... ({}) ...", total_content - end),
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(theme::SCROLL_ELLIPSIS),
                 )));
             }
         }
@@ -558,42 +564,42 @@ impl TuiApp {
             Line::from(Span::styled(
                 "Optional Condensation Guidance / Note ([^X] Clear):",
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(theme::MODAL_SECTION_LABEL)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(format!("> {}", sanitize_line(&self.truncated_guide_prompt))),
             Line::from(""),
             Line::from(Span::styled(
                 format!("[⏎] Proceed Truncated ({max_kb}KB)"),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 format!("[^F] Proceed Full ({captured_full_kb}KB)"),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[^C] Condense Truncated",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[^G] Condense Full",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[Esc/^D] Discard Output",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[⇧Esc] Cancel All",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[Tab/Click] Fold/Unfold",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
             Line::from(Span::styled(
                 "[↑/↓/PgUp/PgDn] Scroll",
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             )),
         ]);
 
@@ -602,7 +608,7 @@ impl TuiApp {
                 " ⚠ Tool Output Truncated ({}/{}) ",
                 pending.index, pending.total
             ))
-            .border_style(Style::default().fg(Color::Red)),
+            .border_style(Style::default().fg(theme::BORDER_MODAL_DANGER)),
         );
         render_modal_at(f, area, widget);
     }
@@ -613,12 +619,15 @@ impl TuiApp {
         ));
         let preset_name = super::preset_label(&self.config.system_presets, self.sys_preset_idx);
         let header = Line::from(vec![
-            Span::styled("Base System Message ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Base System Message ",
+                Style::default().fg(theme::MODAL_TITLE_ACCENT),
+            ),
             Span::raw("(Invoked @skill context is appended per turn) │ "),
             Span::styled(
                 format!("Preset: {preset_name}"),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme::PRESET_ACTIVE)
                     .add_modifier(Modifier::BOLD),
             ),
         ]);
@@ -636,28 +645,28 @@ impl TuiApp {
             self.term_focused && self.cursor_blink_on,
         ));
         let (status_label, status_color) = if self.memory_enabled_draft {
-            ("ENABLED", Color::Green)
+            ("ENABLED", theme::STATUS_ENABLED)
         } else {
-            ("DISABLED", Color::LightRed)
+            ("DISABLED", theme::STATUS_DISABLED)
         };
         let (global_style, ws_style) = match self.memory_scope {
             MemoryScope::Global => (
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme::TAB_GLOBAL_ACTIVE)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(Color::LightGreen),
+                Style::default().fg(theme::TAB_INACTIVE),
             ),
             MemoryScope::Workspace => (
-                Style::default().fg(Color::LightGreen),
+                Style::default().fg(theme::TAB_INACTIVE),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(theme::TAB_WORKSPACE_ACTIVE)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ),
         };
         let header = Line::from(vec![
             Span::styled(
                 "Persistent Memory (MEMORY.md) ",
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme::MODAL_TITLE_ACCENT),
             ),
             Span::raw("│ Scope: ["),
             Span::styled("Global", global_style),
@@ -699,7 +708,7 @@ impl TuiApp {
             .scroll((self.payload_scroll, 0))
             .block(
                 chat_block(" Outgoing Payload & System Prompt Inspector (^G / /inspect) ")
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .border_style(Style::default().fg(theme::BORDER_MODAL_ACCENT)),
             );
         f.render_widget(widget, chunks[0]);
 
@@ -709,7 +718,7 @@ impl TuiApp {
             " [Esc/^G] Close",
         ]
         .iter()
-        .map(|s| Line::from(Span::styled(*s, Style::default().fg(Color::Yellow))))
+        .map(|s| Line::from(Span::styled(*s, Style::default().fg(theme::MODAL_HINT))))
         .collect();
         f.render_widget(Paragraph::new(payload_footer), chunks[1]);
     }
@@ -729,7 +738,7 @@ impl TuiApp {
             })
             .collect();
 
-        let block = titled_block("").border_style(Style::default().fg(Color::Cyan));
+        let block = titled_block("").border_style(Style::default().fg(theme::BORDER_MODAL_ACCENT));
         render_modal_at(f, area, List::new(items).block(block));
     }
 }
@@ -749,7 +758,7 @@ fn draw_editor_modal(
         .map(|s| {
             Line::from(Span::styled(
                 s.to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme::MODAL_HINT),
             ))
         })
         .collect();

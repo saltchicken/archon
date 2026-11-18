@@ -4,7 +4,7 @@ use super::{
         extract_code_block_from, is_opening_code_fence, render_markdown, render_thought_markdown,
         spans_display_width,
     },
-    titled_block,
+    theme, titled_block,
 };
 use crate::{
     core::session::{ChatMessage, truncate_str},
@@ -124,18 +124,18 @@ impl TuiApp {
     fn message_header(&self, idx: usize) -> (String, Color) {
         let m = &self.messages[idx];
         match m.role.as_str() {
-            "user" => (format!("USER{}", image_badge(m)), Color::LightGreen),
-            "assistant" => ("ARCHON".to_string(), Color::Green),
-            "error" => ("⚠ ERROR".to_string(), Color::LightRed),
+            "user" => (format!("USER{}", image_badge(m)), theme::HEADER_USER),
+            "assistant" => ("ARCHON".to_string(), theme::HEADER_ASSISTANT),
+            "error" => ("⚠ ERROR".to_string(), theme::HEADER_ERROR),
             "local" => {
                 let ctx_suffix = if m.include_in_context { " [+CTX]" } else { "" };
                 if let Some(ref summary) = m.tool_name {
                     (
                         sanitize_line(&format!("TOOL [{summary}]{ctx_suffix}")),
-                        Color::Blue,
+                        theme::HEADER_LOCAL,
                     )
                 } else {
-                    (format!("SHELL{ctx_suffix}"), Color::Blue)
+                    (format!("SHELL{ctx_suffix}"), theme::HEADER_LOCAL)
                 }
             }
             "tool" => {
@@ -143,16 +143,16 @@ impl TuiApp {
                     .map(tools::call_signature)
                     .or_else(|| m.tool_name.clone())
                     .unwrap_or_else(|| "tool".to_string());
-                (sanitize_line(&format!("⚙ {summary}")), Color::Yellow)
+                (sanitize_line(&format!("⚙ {summary}")), theme::HEADER_TOOL)
             }
             "hook" => {
                 let summary = m.tool_name.as_deref().unwrap_or("hook");
                 (
                     sanitize_line(&format!("⚡ HOOK [{summary}]")),
-                    Color::Yellow,
+                    theme::HEADER_HOOK,
                 )
             }
-            _ => ("SYS".to_string(), Color::LightGreen),
+            _ => ("SYS".to_string(), theme::HEADER_SYSTEM),
         }
     }
 
@@ -227,7 +227,7 @@ impl TuiApp {
             };
             self.render_message_block(
                 i,
-                ("ARCHON (...)", Color::Yellow),
+                ("ARCHON (...)", theme::HEADER_STREAMING),
                 false,
                 &styled_stream,
                 lines,
@@ -239,7 +239,7 @@ impl TuiApp {
             lines.push(Line::from(vec![Span::styled(
                 format!("  {} ", sanitize_line(tool_status)),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::HEADER_TOOL)
                     .add_modifier(Modifier::BOLD),
             )]));
             lines.push(Line::from(""));
@@ -266,9 +266,9 @@ impl TuiApp {
             if show_fork_badge {
                 let prefix_w = spans_display_width(&lines[start_visual].spans);
                 let (badge_glyph, badge_color) = if is_fork_flashed {
-                    ("󰄬", Color::Green)
+                    ("󰄬", theme::BADGE_FLASH_SUCCESS)
                 } else {
-                    ("󰘬", Color::Yellow)
+                    ("󰘬", theme::BADGE_FORK)
                 };
                 let badge_w = display_width(badge_glyph).max(2);
                 self.fork_buttons.push(ForkButton {
@@ -406,7 +406,7 @@ impl TuiApp {
             header_spans.push(Span::styled(
                 "⚠ TRUNCATED ",
                 Style::default()
-                    .fg(Color::LightRed)
+                    .fg(theme::BADGE_TRUNCATED)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -414,7 +414,7 @@ impl TuiApp {
             header_spans.push(Span::styled(
                 format!("+{total_content} "),
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(theme::BADGE_COLLAPSED)
                     .add_modifier(Modifier::ITALIC),
             ));
         }
@@ -431,7 +431,7 @@ impl TuiApp {
                 if start > 0 {
                     lines.push(Line::from(Span::styled(
                         format!("    ... ({start}) ..."),
-                        Style::default().fg(Color::Blue),
+                        Style::default().fg(theme::SCROLL_ELLIPSIS),
                     )));
                 } else {
                     lines.push(Line::from(""));
@@ -457,7 +457,7 @@ impl TuiApp {
                         *last_span = Span::styled(
                             "󰄬",
                             Style::default()
-                                .fg(Color::Green)
+                                .fg(theme::BADGE_FLASH_SUCCESS)
                                 .add_modifier(Modifier::BOLD),
                         );
                     }
@@ -484,7 +484,7 @@ impl TuiApp {
             if is_truncated && slice_end < total_content {
                 lines.push(Line::from(Span::styled(
                     format!("    ... ({}) ...", total_content - slice_end),
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(theme::SCROLL_ELLIPSIS),
                 )));
             }
         } else {
@@ -541,11 +541,11 @@ impl TuiApp {
 
         let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
         let ctx_color = if pct >= 90.0 {
-            Color::LightRed
+            theme::CTX_USAGE_CRIT
         } else if pct >= 75.0 {
-            Color::Yellow
+            theme::CTX_USAGE_WARN
         } else {
-            Color::Cyan
+            theme::CTX_USAGE_OK
         };
         let dir = self
             .config
@@ -560,11 +560,11 @@ impl TuiApp {
         let settings_text = vec![
             Line::from(vec![
                 Span::raw("Dir:     "),
-                Span::styled(dir, Style::default().fg(Color::Cyan)),
+                Span::styled(dir, Style::default().fg(theme::SIDEBAR_DIR)),
             ]),
             Line::from(vec![
                 Span::raw("Model:   "),
-                Span::styled(&self.model, Style::default().fg(Color::Green)),
+                Span::styled(&self.model, Style::default().fg(theme::SIDEBAR_MODEL)),
                 Span::raw(" (^M)"),
             ]),
             Line::from(vec![
@@ -591,7 +591,10 @@ impl TuiApp {
         );
 
         let items: Vec<ListItem> = if self.attachments.is_empty() {
-            vec![ListItem::new("No images attached").style(Style::default().fg(Color::LightGreen))]
+            vec![
+                ListItem::new("No images attached")
+                    .style(Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES)),
+            ]
         } else {
             self.attachments
                 .iter()
@@ -670,7 +673,7 @@ impl TuiApp {
             let styled_queued = render_markdown(&sanitize_line(&qm.content), &options);
             self.render_message_block(
                 block_idx,
-                (&header, Color::LightCyan),
+                (&header, theme::HEADER_QUEUED),
                 false,
                 &styled_queued,
                 &mut lines,
@@ -733,11 +736,13 @@ impl TuiApp {
         f.render_stateful_widget(scrollbar, chunks[0], &mut scrollbar_state);
 
         if let Some(title) = self.prompt_hint_title() {
-            self.text_area
-                .set_block(titled_block(title).border_style(Style::default().fg(Color::Yellow)));
+            self.text_area.set_block(
+                titled_block(title).border_style(Style::default().fg(theme::BORDER_PROMPT_HINT)),
+            );
         } else {
-            self.text_area
-                .set_block(titled_block(" Prompt ").border_style(Style::default().fg(Color::Cyan)));
+            self.text_area.set_block(
+                titled_block(" Prompt ").border_style(Style::default().fg(theme::BORDER_PROMPT)),
+            );
         }
 
         let prompt_cursor_visible =

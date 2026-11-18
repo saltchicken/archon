@@ -4,6 +4,7 @@ mod input;
 mod markdown;
 mod modals;
 mod render;
+pub mod theme;
 
 use commands::SlashCommand;
 
@@ -31,7 +32,7 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Padding},
 };
@@ -259,7 +260,7 @@ fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
     } else {
         TextArea::from(initial.lines().map(String::from).collect::<Vec<_>>())
     };
-    ta.set_block(titled_block(title).border_style(Style::default().fg(Color::Cyan)));
+    ta.set_block(titled_block(title).border_style(Style::default().fg(theme::BORDER_PROMPT)));
     ta.set_cursor_line_style(Style::default());
     ta.set_cursor_style(cursor_style(true));
     ta.set_wrap_mode(WrapMode::WordOrGlyph);
