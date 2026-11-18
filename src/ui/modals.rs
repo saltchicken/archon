@@ -92,8 +92,8 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
             if line.starts_with("--- ") && line.ends_with(" ---") {
                 in_diff = line == "--- UNIFIED DIFF ---";
                 let header_color = if line.contains("WARNING") || line.contains("SEARCH") {
-                    section_color = Color::LightRed;
-                    Color::Red
+                    section_color = Color::Red;
+                    Color::LightRed
                 } else if line.contains("REPLACE")
                     || line.contains("CONTENT")
                     || line.contains("MESSAGE")
@@ -120,9 +120,9 @@ fn format_tool_preview_lines(preview: &str) -> Vec<Line<'static>> {
                 } else if line.starts_with('+') {
                     Style::default().fg(Color::Green)
                 } else if line.starts_with('-') {
-                    Style::default().fg(Color::LightRed)
+                    Style::default().fg(Color::Red)
                 } else {
-                    Style::default().fg(Color::Gray)
+                    Style::default().fg(Color::LightGreen)
                 };
                 Line::from(Span::styled(line, style))
             } else {
@@ -268,10 +268,10 @@ impl TuiApp {
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::LightGreen),
             ),
             SessionView::Pinned => (
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::LightGreen),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -330,7 +330,7 @@ impl TuiApp {
             };
             vec![ListItem::new(Line::from(Span::styled(
                 empty_msg,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::LightGreen),
             )))]
         } else {
             let scroll_offset = if self.session_idx >= inner_height {
@@ -483,7 +483,7 @@ impl TuiApp {
                 ),
                 Span::styled(
                     format!(" ({})", sanitize_line(&pending.tool_name)),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::LightGreen),
                 ),
             ]),
             Line::from(Span::styled(
@@ -491,7 +491,7 @@ impl TuiApp {
                     "Output size (~{raw_kb} KB) exceeded the {max_kb} KB tool limit (context-padded cap: {full_cap_kb} KB).",
                 ),
                 Style::default()
-                    .fg(Color::LightRed)
+                    .fg(Color::Red)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -506,7 +506,7 @@ impl TuiApp {
             ),
             Span::styled(
                 "⚠ TRUNCATED ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
             ),
         ];
         if pending.collapsed {
@@ -542,7 +542,7 @@ impl TuiApp {
             for l in &preview_lines[start..end] {
                 lines.push(Line::from(Span::styled(
                     format!("  {l}"),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(Color::LightGreen),
                 )));
             }
             if end < total_content {
@@ -602,7 +602,7 @@ impl TuiApp {
                 " ⚠ Tool Output Truncated ({}/{}) ",
                 pending.index, pending.total
             ))
-            .border_style(Style::default().fg(Color::LightRed)),
+            .border_style(Style::default().fg(Color::Red)),
         );
         render_modal_at(f, area, widget);
     }
@@ -638,17 +638,17 @@ impl TuiApp {
         let (status_label, status_color) = if self.memory_enabled_draft {
             ("ENABLED", Color::Green)
         } else {
-            ("DISABLED", Color::Red)
+            ("DISABLED", Color::LightRed)
         };
         let (global_style, ws_style) = match self.memory_scope {
             MemoryScope::Global => (
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::LightGreen),
             ),
             MemoryScope::Workspace => (
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::LightGreen),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),

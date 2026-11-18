@@ -152,7 +152,7 @@ impl TuiApp {
                     Color::Yellow,
                 )
             }
-            _ => ("SYS".to_string(), Color::Gray),
+            _ => ("SYS".to_string(), Color::LightGreen),
         }
     }
 
@@ -405,7 +405,7 @@ impl TuiApp {
         if truncated {
             header_spans.push(Span::styled(
                 "⚠ TRUNCATED ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
             ));
         }
         if state.collapsed {
@@ -539,7 +539,7 @@ impl TuiApp {
 
         let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
         let ctx_color = if pct >= 90.0 {
-            Color::Red
+            Color::LightRed
         } else if pct >= 75.0 {
             Color::Yellow
         } else {
@@ -589,7 +589,7 @@ impl TuiApp {
         );
 
         let items: Vec<ListItem> = if self.attachments.is_empty() {
-            vec![ListItem::new("No images attached").style(Style::default().fg(Color::DarkGray))]
+            vec![ListItem::new("No images attached").style(Style::default().fg(Color::LightGreen))]
         } else {
             self.attachments
                 .iter()

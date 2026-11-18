@@ -638,7 +638,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
         }
     }
 
-    let border_style = Style::default().fg(Color::DarkGray);
+    let border_style = Style::default().fg(Color::LightGreen);
     let mut out = vec![WrappedLine::TableBorder(draw_table_border(
         &col_widths,
         '┌',
@@ -915,10 +915,10 @@ fn header_text_style(level: usize) -> Style {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
         3 => Style::default()
-            .fg(Color::LightBlue)
+            .fg(Color::LightMagenta)
             .add_modifier(Modifier::BOLD),
         _ => Style::default()
-            .fg(Color::Gray)
+            .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD | Modifier::ITALIC),
     }
 }
@@ -933,7 +933,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
     let mut in_diff_hunk = false;
     let mut in_params_block = false;
     let quote_style = Style::default()
-        .fg(Color::Gray)
+        .fg(Color::LightGreen)
         .add_modifier(Modifier::ITALIC);
 
     for line in content.lines() {
@@ -1205,7 +1205,7 @@ fn style_markdown_header_inner(
         1 => ("▌ ", blue_bold),
         2 => ("▎ ", blue_bold),
         3 => ("▸ ", blue_bold),
-        _ => ("• ", Style::default().fg(Color::DarkGray)),
+        _ => ("• ", Style::default().fg(Color::LightGreen)),
     };
     let mut spans = Vec::with_capacity(content_spans.len() + 2);
     spans.push(Span::styled(prefix, accent));
@@ -1228,8 +1228,8 @@ fn style_blockquote_bars(depth: usize) -> Vec<Span<'static>> {
             let color = match level {
                 0 => Color::Blue,
                 1 => Color::Cyan,
-                2 => Color::LightBlue,
-                _ => Color::DarkGray,
+                2 => Color::LightMagenta,
+                _ => Color::LightGreen,
             };
             Span::styled(
                 "▎ ",
@@ -1245,10 +1245,10 @@ fn ordered_marker_style(depth: usize) -> Style {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
         1 => Style::default()
-            .fg(Color::LightBlue)
+            .fg(Color::LightMagenta)
             .add_modifier(Modifier::BOLD),
         _ => Style::default()
-            .fg(Color::Gray)
+            .fg(Color::LightGreen)
             .add_modifier(Modifier::BOLD),
     }
 }
@@ -1263,14 +1263,14 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                1 => ("◦ ", Style::default().fg(Color::LightBlue)),
+                1 => ("◦ ", Style::default().fg(Color::LightMagenta)),
                 2 => (
                     "▪ ",
                     Style::default()
                         .fg(Color::Blue)
                         .add_modifier(Modifier::BOLD),
                 ),
-                _ => ("▹ ", Style::default().fg(Color::DarkGray)),
+                _ => ("▹ ", Style::default().fg(Color::LightGreen)),
             };
             vec![Span::styled(glyph, style)]
         }
@@ -1304,7 +1304,7 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                ("☐ ", Style::default().fg(Color::Gray))
+                ("☐ ", Style::default().fg(Color::LightGreen))
             };
             spans.push(Span::styled(box_glyph, box_style));
             spans
@@ -1370,7 +1370,7 @@ fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
             WrappedLine::TableBorder(line) => {
                 vec![
                     Span::raw("  "),
-                    Span::styled(line.clone(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(line.clone(), Style::default().fg(Color::LightGreen)),
                 ]
             }
             WrappedLine::TableRow(spans) => spans.clone(),
@@ -1456,7 +1456,7 @@ pub(super) fn render_thought_markdown(
     options: &textwrap::Options<'_>,
 ) -> Vec<Line<'static>> {
     let thought_style = Style::default()
-        .fg(Color::DarkGray)
+        .fg(Color::LightGreen)
         .add_modifier(Modifier::ITALIC);
     render_markdown(content, options)
         .into_iter()
