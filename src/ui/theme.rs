@@ -104,4 +104,4 @@ pub const MD_TASK_CHECKED: Color = Color::Green;
 pub const MD_TASK_UNCHECKED: Color = Color::LightGreen;
 
 pub const MD_TOOL_PARAM: Color = Color::Yellow;
-pub const MD_THOUGHT: Color = Color::LightGreen;
+pub const MD_THOUGHT: Color = Color::LightCyan;
