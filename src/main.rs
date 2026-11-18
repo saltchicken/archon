@@ -21,6 +21,22 @@ use ui::TuiApp;
 async fn main() -> Result<()> {
     let cli_args = CliArgs::parse()?;
 
+    let cwd = env::current_dir()?;
+    let base_config_path = archon_config_root().join("config.toml");
+
+    if let Some(sched_cmd) = cli_args.schedule_cmd {
+        let ws_config_dir = workspace_config_dir_for(&cwd);
+        let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+        if let Some(cfg_err) = config_err {
+            eprintln!("Warning: {cfg_err}");
+        }
+        if let Err(e) = core::schedule::handle_command(sched_cmd, &config) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     if !cli_args.headless {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
@@ -29,7 +45,6 @@ async fn main() -> Result<()> {
         }));
     }
 
-    let cwd = env::current_dir()?;
     let ws_config_dir = if cli_args.headless {
         workspace_config_dir_for(&cwd)
     } else {
@@ -43,8 +58,6 @@ async fn main() -> Result<()> {
     // Load .env from the workspace config directory or working directory before reading config
     load_dotenv(ws_config_dir.join(".env"));
     load_dotenv(".env");
-
-    let base_config_path = archon_config_root().join("config.toml");
 
     let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
     let guard = core::logger::init(&config.app.history_dir);
@@ -78,7 +91,10 @@ async fn main() -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
 
-    let engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
+    let mut engine = CoreEngine::new(target_model.clone(), config.clone(), ev_tx)?;
+    if cli_args.no_save {
+        engine.set_save_session(false);
+    }
     let engine_handle = tokio::spawn(engine.run(cmd_rx));
 
     let res = if cli_args.headless {

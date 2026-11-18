@@ -5,6 +5,7 @@ pub mod logger;
 pub mod ollama;
 pub mod protocol;
 pub mod provider;
+pub mod schedule;
 pub mod session;
 mod session_ops;
 pub mod skills;
@@ -99,6 +100,7 @@ pub struct CoreEngine {
     session: ActiveSessionState,
     turn: TurnConfig,
     active_max_tool_output_size: usize,
+    save_session: bool,
     inflight: InFlightState,
     save_task: Option<JoinHandle<()>>,
     tx: UnboundedSender<EngineEvent>,
@@ -136,10 +138,15 @@ impl CoreEngine {
                 skill_args: None,
             },
             active_max_tool_output_size,
+            save_session: true,
             inflight: InFlightState::default(),
             save_task: None,
             tx,
         })
+    }
+
+    pub fn set_save_session(&mut self, save: bool) {
+        self.save_session = save;
     }
 
     fn finish_active_task(&mut self) -> bool {

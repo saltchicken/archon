@@ -87,6 +87,9 @@ impl CoreEngine {
     }
 
     pub(super) async fn save_session_bg(&mut self, new_images: Vec<(String, Vec<u8>)>) {
+        if !self.save_session {
+            return;
+        }
         self.flush_save_task().await;
 
         let sessions = Arc::clone(&self.sessions);

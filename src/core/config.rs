@@ -187,6 +187,46 @@ impl Memory {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScheduleConfig {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub on_calendar: String,
+    #[serde(default = "default_true")]
+    pub persistent: bool,
+    pub skill: Option<String>,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub auto_approve: bool,
+    pub no_tools: bool,
+    pub save_session: bool,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            on_calendar: String::new(),
+            persistent: true,
+            skill: None,
+            prompt: String::new(),
+            model: None,
+            system_prompt: None,
+            auto_approve: false,
+            no_tools: false,
+            save_session: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -202,6 +242,9 @@ pub struct Config {
     pub gemini: EndpointSettings,
     pub models: Vec<ModelPreset>,
     pub system_presets: Vec<Preset>,
+    pub schedules: Vec<ScheduleConfig>,
+    #[serde(skip)]
+    pub global_schedules: Vec<ScheduleConfig>,
     #[serde(skip)]
     pub skills: Vec<SkillDefinition>,
     #[serde(skip)]
@@ -416,6 +459,8 @@ impl Default for Config {
                     "You are a data extractor. Only output valid JSON. Do not include markdown or explanations.",
                 ),
             ],
+            schedules: Vec::new(),
+            global_schedules: Vec::new(),
             skills: Vec::new(),
             workspace_skills_dir: None,
             workspace: None,
@@ -705,10 +750,10 @@ impl Config {
 
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
-        let global_files = base_figment
+        let (global_files, global_schedules) = base_figment
             .clone()
             .extract::<Self>()
-            .map(|c| c.workspace_snapshot.file)
+            .map(|c| (c.workspace_snapshot.file, c.schedules))
             .unwrap_or_default();
 
         let bound_ws = read_bound_workspace(&local_config_path)
@@ -726,6 +771,7 @@ impl Config {
         {
             Ok(mut cfg) => {
                 cfg.workspace_snapshot.global_files = global_files;
+                cfg.global_schedules = global_schedules;
                 if cfg.workspace.as_deref().is_none_or(|s| s.trim().is_empty()) {
                     cfg.workspace = bound_ws;
                 } else if let Some(ref ws) = cfg.workspace {

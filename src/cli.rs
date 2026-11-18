@@ -10,6 +10,19 @@ use std::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+#[derive(Debug, Clone)]
+pub enum ScheduleCommand {
+    Sync { global: bool },
+    List { global: bool },
+    Run { name: String, global: bool },
+    Logs {
+        name: String,
+        lines: usize,
+        global: bool,
+    },
+    Clean { global: bool },
+}
+
 #[derive(Debug, Default)]
 pub struct CliArgs {
     pub model: Option<String>,
@@ -19,15 +32,24 @@ pub struct CliArgs {
     pub session_id: Option<String>,
     pub images: Vec<PathBuf>,
     pub no_tools: bool,
+    pub no_save: bool,
     pub auto_approve_all: bool,
     pub show_thoughts: bool,
     pub headless: bool,
+    pub schedule_cmd: Option<ScheduleCommand>,
 }
 
 impl CliArgs {
     pub fn parse() -> Result<Self> {
         let mut cli = Self::default();
         let mut args = env::args().skip(1).peekable();
+
+        if args.peek().is_some_and(|a| a == "schedule") {
+            args.next();
+            cli.schedule_cmd = Some(Self::parse_schedule_args(args)?);
+            return Ok(cli);
+        }
+
         let mut positional = Vec::new();
 
         while let Some(arg) = args.next() {
@@ -74,6 +96,7 @@ impl CliArgs {
                     cli.images.push(PathBuf::from(p));
                 }
                 "--no-tools" => cli.no_tools = true,
+                "--no-save" | "--ephemeral" => cli.no_save = true,
                 "-y" | "--yes" | "--auto-approve" => cli.auto_approve_all = true,
                 "--thoughts" => cli.show_thoughts = true,
                 _ if arg.starts_with('-') => bail!("Unknown flag: {arg}"),
@@ -114,9 +137,87 @@ impl CliArgs {
         Ok(cli)
     }
 
+    fn parse_schedule_args(
+        mut args: std::iter::Peekable<std::iter::Skip<std::env::Args>>,
+    ) -> Result<ScheduleCommand> {
+        let Some(sub) = args.next() else {
+            Self::print_schedule_help();
+            std::process::exit(0);
+        };
+
+        if matches!(sub.as_str(), "-h" | "--help") {
+            Self::print_schedule_help();
+            std::process::exit(0);
+        }
+
+        let mut global = false;
+        let mut lines = 50usize;
+        let mut positional = Vec::new();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    Self::print_schedule_help();
+                    std::process::exit(0);
+                }
+                "-g" | "--global" => global = true,
+                "-n" | "--lines" => {
+                    let val = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    lines = val
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("Invalid line count for {arg}: {val}"))?;
+                }
+                _ if arg.starts_with('-') => bail!("Unknown schedule flag: {arg}"),
+                _ => positional.push(arg),
+            }
+        }
+
+        match sub.as_str() {
+            "sync" => Ok(ScheduleCommand::Sync { global }),
+            "list" => Ok(ScheduleCommand::List { global }),
+            "clean" => Ok(ScheduleCommand::Clean { global }),
+            "run" => {
+                let name = positional
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("Usage: archon schedule run <NAME> [--global]"))?;
+                Ok(ScheduleCommand::Run { name, global })
+            }
+            "logs" => {
+                let name = positional.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!("Usage: archon schedule logs <NAME> [-n LINES] [--global]")
+                })?;
+                Ok(ScheduleCommand::Logs {
+                    name,
+                    lines,
+                    global,
+                })
+            }
+            other => bail!("Unknown schedule subcommand: '{other}'. Run `archon schedule --help`."),
+        }
+    }
+
+    pub fn print_schedule_help() {
+        println!(
+            "Usage: archon schedule <COMMAND> [OPTIONS]\n\n\
+             Commands:\n  \
+               sync                    Generate and sync systemd user units from config.toml\n  \
+               list                    List configured schedules and active systemd timers\n  \
+               run <NAME>              Trigger a scheduled service immediately\n  \
+               logs <NAME>             Show journalctl logs for a scheduled service\n  \
+               clean                   Disable and remove all managed units for this scope\n\n\
+             Options:\n  \
+               -g, --global            Operate on global ~/.config/archon/config.toml schedules\n  \
+               -n, --lines <N>         Number of log lines for `logs` (default: 50)\n  \
+               -h, --help              Print help"
+        );
+    }
+
     pub fn print_help() {
         println!(
-            "Usage: archon [OPTIONS] [MODEL]\n\n\
+            "Usage: archon [OPTIONS] [MODEL]\n       archon schedule <sync|list|run|logs|clean> [OPTIONS]\n\n\
              Options:\n  \
                -p, --prompt <TEXT>     Run in headless CLI mode with the given prompt\n  \
                -m, --model <MODEL>     Model name to use\n  \
@@ -126,6 +227,7 @@ impl CliArgs {
                -i, --image <PATH>      Attach an image file (repeatable)\n  \
                -y, --yes               Auto-approve all tool executions in headless mode\n  \
                --no-tools              Disable tool calls\n  \
+               --no-save               Do not persist the session to archon.db\n  \
                --thoughts              Stream model thinking to stderr\n  \
                -h, --help              Print help"
         );
