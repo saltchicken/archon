@@ -1582,5 +1582,65 @@ mod tests {
             rel_neg,
             vec![".github/workflows/ci.yml", ".gitignore", "src/main.rs"]
         );
+
+        // 5. `workspace_snapshot` respects bare directory exclusions (`secret_dir`)
+        //    and blocks all descendant files inside it.
+        std::fs::create_dir_all(root.join("secret_dir/sub")).unwrap();
+        std::fs::write(root.join("secret_dir/sub/token.txt"), "top-secret\n").unwrap();
+        ctx.config
+            .workspace_snapshot
+            .exclude
+            .push("secret_dir".into());
+        let snap = workspace_snapshot::Tool::execute(
+            workspace_snapshot::WorkspaceSnapshotArgs { tree_only: None },
+            &ctx,
+        )
+        .unwrap();
+        assert!(!snap.contains("secret_dir"));
+        assert!(!snap.contains("token.txt"));
+        assert!(!snap.contains("top-secret"));
+
+        // 6. `fs` copy, rename, and remove reject directories containing hidden or
+        //    excluded children upfront without leaving partial copies behind.
+        std::fs::create_dir_all(root.join("pkg")).unwrap();
+        std::fs::write(root.join("pkg/lib.rs"), "pub fn f() {}\n").unwrap();
+        std::fs::write(root.join("pkg/.hidden_secret"), "nope\n").unwrap();
+
+        let copy_res = fs::Tool::execute(
+            serde_json::from_value(serde_json::json!({
+                "action": "copy",
+                "path": "pkg",
+                "destination": "pkg_copy"
+            }))
+            .unwrap(),
+            &ctx,
+        );
+        assert!(copy_res.is_err());
+        assert!(!root.join("pkg_copy").exists());
+
+        let rename_res = fs::Tool::execute(
+            serde_json::from_value(serde_json::json!({
+                "action": "rename",
+                "path": "pkg",
+                "destination": "pkg_moved"
+            }))
+            .unwrap(),
+            &ctx,
+        );
+        assert!(rename_res.is_err());
+        assert!(root.join("pkg").exists());
+        assert!(!root.join("pkg_moved").exists());
+
+        let remove_res = fs::Tool::execute(
+            serde_json::from_value(serde_json::json!({
+                "action": "remove",
+                "path": "pkg",
+                "recursive": true
+            }))
+            .unwrap(),
+            &ctx,
+        );
+        assert!(remove_res.is_err());
+        assert!(root.join("pkg").exists());
     }
 }

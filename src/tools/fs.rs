@@ -55,6 +55,72 @@ fn ensure_not_git_metadata(path: &Path, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_dir_children_allowed(
+    src_dir: &Path,
+    dst_dir: Option<&Path>,
+    check_symlinks: bool,
+    ctx: &ToolContext,
+) -> Result<()> {
+    let (exclude_set, neg_exclude_set) = ctx.build_exclude_globsets(&[], true)?;
+
+    fn walk(
+        src: &Path,
+        dst: Option<&Path>,
+        check_symlinks: bool,
+        ctx: &ToolContext,
+        exclude_set: &globset::GlobSet,
+        neg_exclude_set: &globset::GlobSet,
+    ) -> Result<()> {
+        for entry in fs::read_dir(src)
+            .with_context(|| format!("Failed to read directory {}", src.display()))?
+        {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let src_path = entry.path();
+            if ft.is_symlink() && check_symlinks {
+                bail!(
+                    "Security violation: copying symlinks is not supported ({})",
+                    src_path.display()
+                );
+            }
+            let src_rel = diff_paths(&src_path, &ctx.root).unwrap_or_else(|| src_path.clone());
+            ctx.check_rel_path_allowed(&src_rel, exclude_set, neg_exclude_set)?;
+
+            let dst_child = dst.map(|d| d.join(entry.file_name()));
+            if let Some(ref dp) = dst_child {
+                let dst_rel = diff_paths(dp, &ctx.root).unwrap_or_else(|| dp.clone());
+                ctx.check_rel_path_allowed(&dst_rel, exclude_set, neg_exclude_set)?;
+            }
+
+            if ft.is_dir() {
+                let canon_src = dunce::canonicalize(&src_path).unwrap_or_else(|_| src_path.clone());
+                ctx.ensure_within_workspace(&canon_src, "directory entry")?;
+                let canon_rel =
+                    diff_paths(&canon_src, &ctx.root).unwrap_or_else(|| canon_src.clone());
+                ctx.check_rel_path_allowed(&canon_rel, exclude_set, neg_exclude_set)?;
+                walk(
+                    &src_path,
+                    dst_child.as_deref(),
+                    check_symlinks,
+                    ctx,
+                    exclude_set,
+                    neg_exclude_set,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(
+        src_dir,
+        dst_dir,
+        check_symlinks,
+        ctx,
+        &exclude_set,
+        &neg_exclude_set,
+    )
+}
+
 fn validate_transfer_paths(
     args: &FsArgs,
     ctx: &ToolContext,
@@ -70,6 +136,10 @@ fn validate_transfer_paths(
     ensure_not_git_metadata(&dst, &ctx.root)?;
     if dst.starts_with(&src) {
         bail!("Cannot {verb} a directory into a subdirectory of itself");
+    }
+    if src.is_dir() {
+        let is_copy = matches!(args.action, FsAction::Copy);
+        ensure_dir_children_allowed(&src, Some(&dst), is_copy, ctx)?;
     }
     Ok((src, dst))
 }
@@ -127,6 +197,9 @@ fn resolve_remove_target(raw: &str, ctx: &ToolContext) -> Result<PathBuf> {
         bail!("Cannot remove workspace root");
     }
     ensure_not_git_metadata(&target, &ctx.root)?;
+    if target.is_dir() {
+        ensure_dir_children_allowed(&target, None, false, ctx)?;
+    }
     Ok(target)
 }
 

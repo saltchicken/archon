@@ -2,9 +2,7 @@ use super::{
     BlockingTool, ToolContext,
     utils::{
         fs::{FileOutcome, read_text_file_inspected},
-        path::{
-            build_globset, has_git_dir_component, has_hidden_component, partition_negated_patterns,
-        },
+        path::{build_globset, has_git_dir_component, partition_negated_patterns},
     },
 };
 use crate::core::config::{archon_config_root, expand_tilde, format_tilde_path};
@@ -251,10 +249,10 @@ impl BlockingTool for Tool {
                 tree_only_set.is_match(&relative) && !neg_tree_only_set.is_match(&relative);
             let is_neg_excluded = neg_exclude_set.is_match(&relative)
                 || (is_dir && neg_exclude_ancestors.is_match(&relative));
-            let is_hidden_blocked =
-                !ctx.config.app.allow_hidden && has_hidden_component(&relative) && !is_neg_excluded;
-            let is_excluded =
-                is_hidden_blocked || (exclude_set.is_match(&relative) && !is_neg_excluded);
+            let is_excluded = !is_neg_excluded
+                && ctx
+                    .check_rel_path_allowed(&relative, &exclude_set, &neg_exclude_set)
+                    .is_err();
             if is_excluded && !matches_tree {
                 continue;
             }
