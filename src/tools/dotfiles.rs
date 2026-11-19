@@ -295,13 +295,16 @@ fn resolve_new_config_path(raw: &str, config: &Config) -> Result<(PathBuf, PathB
     check_allowed_dir(&rel, config)?;
 
     let target = root.join(&rel);
-    if target.exists() {
+    if target.exists() || target.symlink_metadata().is_ok() {
         bail!(
             "File already exists: ~/.config/{}. Use action: \"edit\" instead.",
             rel.display()
         );
     }
-    if let Some(existing) = target.ancestors().find(|p| p.exists()) {
+    if let Some(existing) = target
+        .ancestors()
+        .find(|p| p.exists() || p.symlink_metadata().is_ok())
+    {
         let canon_anc = dunce::canonicalize(existing)?;
         if !canon_anc.starts_with(&root) {
             bail!(
@@ -861,13 +864,9 @@ fn ensure_bare_repo(git_dir: &Path, work_tree: &Path, config: &Config) -> Result
                 .output()
                 .is_ok_and(|o| o.status.success());
             if has_head {
-                let co = bare_git_cmd(git_dir, work_tree)
-                    .args(["checkout", "-f"])
-                    .output()
-                    .context("Failed to checkout tracked dotfiles into ~/.config")?;
-                if co.status.success() {
-                    notes.push("Restored tracked dotfiles from remote into ~/.config.".into());
-                }
+                let _ = bare_git_cmd(git_dir, work_tree)
+                    .args(["read-tree", "HEAD"])
+                    .output();
             }
         }
     }

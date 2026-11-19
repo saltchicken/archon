@@ -90,7 +90,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path, ctx: &ToolContext) -> Result<usize
             );
         }
         let src_path = entry.path();
+        ctx.ensure_not_excluded(&src_path)?;
         let dst_path = dst.join(entry.file_name());
+        ctx.ensure_not_excluded(&dst_path)?;
         if file_type.is_dir() {
             copied_files += copy_dir_recursive(&src_path, &dst_path, ctx)?;
         } else {

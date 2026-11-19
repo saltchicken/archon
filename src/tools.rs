@@ -174,16 +174,25 @@ impl ToolContext {
         &self,
         target: &Path,
         label: &str,
-    ) -> Result<()> {
-        if let Some(existing) = target.ancestors().find(|p| p.exists()) {
-            self.ensure_within_workspace(existing, label)?;
+    ) -> Result<PathBuf> {
+        if let Some(existing) = target
+            .ancestors()
+            .find(|p| p.exists() || p.symlink_metadata().is_ok())
+        {
+            let canon_anc = self.ensure_within_workspace(existing, label)?;
+            if let Ok(rem) = target.strip_prefix(existing) {
+                return Ok(canon_anc.join(rem));
+            }
+            return Ok(canon_anc);
         }
-        Ok(())
+        Ok(target.to_path_buf())
     }
 
     pub fn validate_scoped_relative_path<'a>(&self, raw: &'a str) -> Result<&'a Path> {
         let rel = validate_relative_path(raw)?;
-        self.ensure_path_or_ancestor_within_workspace(&self.root.join(rel), raw.trim())?;
+        let resolved =
+            self.ensure_path_or_ancestor_within_workspace(&self.root.join(rel), raw.trim())?;
+        self.ensure_not_excluded(&resolved)?;
         Ok(rel)
     }
 
@@ -194,7 +203,7 @@ impl ToolContext {
     pub fn ensure_not_excluded(&self, canon_path: &Path) -> Result<()> {
         let rel = diff_paths(canon_path, &self.root).unwrap_or_else(|| canon_path.to_path_buf());
         let exclude_set = self.build_exclude_globset(&[], true)?;
-        if exclude_set.is_match(&rel) {
+        if has_git_dir_component(&rel) || exclude_set.is_match(&rel) {
             bail!(
                 "Security violation: '{}' matches an excluded pattern",
                 rel.display()
@@ -275,11 +284,13 @@ impl ToolContext {
     pub fn resolve_new_path(&self, raw: &str) -> Result<PathBuf> {
         let trimmed = raw.trim();
         let target = self.root.join(validate_relative_path(trimmed)?);
-        if target.exists() {
+        if target.exists() || target.symlink_metadata().is_ok() {
             bail!("File already exists: {trimmed}. Use edit_file instead.");
         }
-        self.ensure_path_or_ancestor_within_workspace(&target, trimmed)?;
-        Ok(target)
+        let resolved = self.ensure_path_or_ancestor_within_workspace(&target, trimmed)?;
+        self.ensure_not_excluded(&target)?;
+        self.ensure_not_excluded(&resolved)?;
+        Ok(resolved)
     }
 
     pub fn resolve_scan_roots(
