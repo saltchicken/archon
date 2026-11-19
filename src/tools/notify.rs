@@ -26,11 +26,12 @@ impl NotifyUrgency {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NotifyArgs {
-    /// Short notification title / summary text.
-    pub summary: String,
-    /// Optional detailed notification body text.
+    /// Short notification title / summary text. If omitted, the body text is used as the summary.
     #[serde(default)]
-    pub body: String,
+    pub summary: Option<String>,
+    /// Notification body text. Used as the summary if `summary` is not provided.
+    #[serde(default)]
+    pub body: Option<String>,
     /// Notification urgency level: "low", "normal" (default), or "critical".
     #[serde(default)]
     pub urgency: NotifyUrgency,
@@ -47,10 +48,23 @@ impl AsyncTool for Tool {
     type Args = NotifyArgs;
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {
-        let summary = args.summary.trim();
-        if summary.is_empty() {
-            bail!("Notification `summary` cannot be empty.");
-        }
+        let summary = args
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let body = args
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        // `notify-send` requires a summary; fall back to body if no summary given.
+        let effective_summary = match (summary, body) {
+            (Some(s), _) => s.to_string(),
+            (None, Some(b)) => b.to_string(),
+            (None, None) => bail!("Notification requires either a `summary` or a `body`."),
+        };
 
         let mut cmd = Command::new("notify-send");
         cmd.arg("-a")
@@ -62,11 +76,13 @@ impl AsyncTool for Tool {
             cmd.arg("-t").arg(timeout_ms.to_string());
         }
 
-        cmd.arg("--").arg(summary);
+        cmd.arg("--").arg(&effective_summary);
 
-        let body = args.body.trim();
-        if !body.is_empty() {
-            cmd.arg(body);
+        // Pass body as a second argument only if it was distinct from the summary.
+        if summary.is_none() && body.is_some() {
+            // body was used as the summary — nothing extra to pass
+        } else if let Some(b) = body {
+            cmd.arg(b);
         }
 
         cmd.stdin(Stdio::null())
@@ -90,7 +106,7 @@ impl AsyncTool for Tool {
         }
 
         Ok(format!(
-            "Notification sent ({}): {summary}",
+            "Notification sent ({}): {effective_summary}",
             args.urgency.as_str()
         ))
     }
