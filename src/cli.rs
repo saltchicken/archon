@@ -23,7 +23,7 @@ pub enum ScheduleCommand {
         global: bool,
     },
     Logs {
-        name: String,
+        name: Option<String>,
         lines: usize,
         global: bool,
     },
@@ -205,11 +205,11 @@ impl CliArgs {
                 })
             }
             "logs" => {
-                if positional.len() != 1 {
-                    bail!("Usage: archon schedule logs <NAME> [-n LINES] [--global]");
+                if positional.len() > 1 {
+                    bail!("Usage: archon schedule logs [NAME] [-n LINES] [--global]");
                 }
                 Ok(ScheduleCommand::Logs {
-                    name: positional.remove(0),
+                    name: positional.pop(),
                     lines,
                     global,
                 })
@@ -225,7 +225,7 @@ impl CliArgs {
                sync                    Generate and sync systemd user units from config.toml\n  \
                list                    List configured schedules and active systemd timers\n  \
                run <NAME>              Trigger a scheduled service immediately\n  \
-               logs <NAME>             Show journalctl logs for a scheduled service\n  \
+               logs [NAME]             Show journalctl logs for a schedule (or all in scope)\n  \
                clean                   Disable and remove all managed units for this scope\n\n\
              Options:\n  \
                -g, --global            Operate on global ~/.config/archon/config.toml schedules\n  \
@@ -585,9 +585,17 @@ mod tests {
         assert_eq!(
             parse_sched(&["logs", "daily", "-n", "100"]).unwrap(),
             ScheduleCommand::Logs {
-                name: "daily".to_string(),
+                name: Some("daily".to_string()),
                 lines: 100,
                 global: false,
+            }
+        );
+        assert_eq!(
+            parse_sched(&["logs", "-n", "25", "-g"]).unwrap(),
+            ScheduleCommand::Logs {
+                name: None,
+                lines: 25,
+                global: true,
             }
         );
     }
@@ -599,7 +607,6 @@ mod tests {
         assert!(parse_sched(&["clean", "extra"]).is_err());
         assert!(parse_sched(&["run"]).is_err());
         assert!(parse_sched(&["run", "one", "two"]).is_err());
-        assert!(parse_sched(&["logs"]).is_err());
         assert!(parse_sched(&["logs", "one", "two"]).is_err());
     }
 }

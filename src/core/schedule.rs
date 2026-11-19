@@ -22,7 +22,7 @@ pub fn handle_command(cmd: ScheduleCommand, config: &Config) -> Result<()> {
             name,
             lines,
             global,
-        } => logs_schedule(config, &name, lines, global),
+        } => logs_schedule(config, name.as_deref(), lines, global),
         ScheduleCommand::Clean { global } => clean_schedules(config, global),
     }
 }
@@ -406,19 +406,15 @@ fn run_schedule(config: &Config, name: &str, global: bool) -> Result<()> {
     Ok(())
 }
 
-fn logs_schedule(config: &Config, name: &str, lines: usize, global: bool) -> Result<()> {
+fn logs_schedule(config: &Config, name: Option<&str>, lines: usize, global: bool) -> Result<()> {
     let (scope, _) = resolve_scope(config, global, false)?;
-    let service_name = format!("{}.service", unit_base_name(&scope, name));
+    let unit_filter = match name {
+        Some(n) => format!("{}.service", unit_base_name(&scope, n)),
+        None => format!("{}*.service", scope_unit_prefix(&scope)),
+    };
     let lines_str = lines.to_string();
     let status = Command::new("journalctl")
-        .args([
-            "--user",
-            "-u",
-            &service_name,
-            "-n",
-            &lines_str,
-            "--no-pager",
-        ])
+        .args(["--user", "-u", &unit_filter, "-n", &lines_str, "--no-pager"])
         .status()
         .context("Failed to execute `journalctl --user`")?;
     if !status.success() {
