@@ -2,7 +2,9 @@ use super::{
     BlockingTool, ToolContext,
     utils::{
         fs::{FileOutcome, read_text_file_inspected},
-        path::{build_globset, has_git_dir_component},
+        path::{
+            build_globset, has_git_dir_component, has_hidden_component, partition_negated_patterns,
+        },
     },
 };
 use crate::core::config::{archon_config_root, expand_tilde, format_tilde_path};
@@ -68,29 +70,6 @@ fn archon_config_dir() -> Option<PathBuf> {
     let dir = archon_config_root();
     dunce::canonicalize(&dir).ok().or(Some(dir))
 }
-
-trait PartitionPatterns<'a>: Iterator<Item = &'a str> + Sized {
-    fn partition_map_pat(self, normalize: &impl Fn(&str) -> String) -> (Vec<String>, Vec<String>) {
-        let mut neg = Vec::new();
-        let mut pos = Vec::new();
-        for pat in self {
-            if let Some(stripped) = pat.strip_prefix('!') {
-                let s = normalize(stripped.trim());
-                if !s.is_empty() {
-                    neg.push(s);
-                }
-            } else {
-                let s = normalize(pat);
-                if !s.is_empty() {
-                    pos.push(s);
-                }
-            }
-        }
-        (neg, pos)
-    }
-}
-
-impl<'a, I: Iterator<Item = &'a str>> PartitionPatterns<'a> for I {}
 
 fn has_glob_meta(s: &str) -> bool {
     s.contains(['*', '?', '[', '{'])
@@ -187,7 +166,7 @@ fn validate_extra_file(
     raw_file: &str,
     candidate: &Path,
     base_root: &Path,
-    exclude_set: &GlobSet,
+    ctx: &ToolContext,
     trusted_global_files: &HashSet<PathBuf>,
     trusted_global_globs: &GlobSet,
     config_dir: Option<&Path>,
@@ -204,10 +183,8 @@ fn validate_extra_file(
     }
 
     if canon.starts_with(base_root) {
-        if diff_paths(&canon, base_root).is_some_and(|rel| exclude_set.is_match(&rel)) {
-            return Err(format!(
-                "Security violation: '{raw_file}' matches an excluded pattern."
-            ));
+        if let Err(e) = ctx.ensure_not_excluded_under(&canon, base_root) {
+            return Err(format!("{e}."));
         }
         return Ok(canon);
     }
@@ -239,32 +216,15 @@ impl BlockingTool for Tool {
             vec!["**/*".into()]
         };
 
-        let normalize_pat = |p: &str| p.trim_start_matches('/').to_string();
-
-        let (neg_include, pos_include): (Vec<String>, Vec<String>) = include_patterns
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .partition_map_pat(&normalize_pat);
-
-        let (neg_exclude, pos_exclude): (Vec<String>, Vec<String>) = settings
-            .exclude
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .partition_map_pat(&normalize_pat);
-
-        let (neg_tree, pos_tree): (Vec<String>, Vec<String>) = settings
-            .include_in_tree
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .partition_map_pat(&normalize_pat);
+        let (neg_include, pos_include) =
+            partition_negated_patterns(include_patterns.iter().map(String::as_str));
+        let (neg_tree, pos_tree) =
+            partition_negated_patterns(settings.include_in_tree.iter().map(String::as_str));
 
         let include_set = build_globset(&pos_include, false)?;
         let neg_include_set = build_globset(&neg_include, false)?;
-        let exclude_set = ctx.build_exclude_globset(&pos_exclude, false)?;
-        let neg_exclude_set = build_globset(&neg_exclude, false)?;
+        let (exclude_set, neg_exclude_set) = ctx.build_exclude_globsets(&[], true)?;
+        let neg_exclude_ancestors = ctx.build_neg_exclude_ancestor_globset()?;
         let tree_only_set = build_globset(&pos_tree, false)?;
         let neg_tree_only_set = build_globset(&neg_tree, false)?;
 
@@ -282,18 +242,23 @@ impl BlockingTool for Tool {
                 continue;
             };
 
-            let matches_tree =
-                tree_only_set.is_match(&relative) && !neg_tree_only_set.is_match(&relative);
-            let is_excluded =
-                exclude_set.is_match(&relative) && !neg_exclude_set.is_match(&relative);
-            if is_excluded && !matches_tree {
-                continue;
-            }
-
             let Ok(metadata) = path.metadata() else {
                 continue;
             };
             let is_dir = metadata.is_dir();
+
+            let matches_tree =
+                tree_only_set.is_match(&relative) && !neg_tree_only_set.is_match(&relative);
+            let is_neg_excluded = neg_exclude_set.is_match(&relative)
+                || (is_dir && neg_exclude_ancestors.is_match(&relative));
+            let is_hidden_blocked =
+                !ctx.config.app.allow_hidden && has_hidden_component(&relative) && !is_neg_excluded;
+            let is_excluded =
+                is_hidden_blocked || (exclude_set.is_match(&relative) && !is_neg_excluded);
+            if is_excluded && !matches_tree {
+                continue;
+            }
+
             let matches_include =
                 include_set.is_match(&relative) && !neg_include_set.is_match(&relative);
             if !is_dir && !matches_include && !matches_tree {
@@ -414,7 +379,7 @@ impl BlockingTool for Tool {
                     raw_file,
                     &candidate,
                     &base_root,
-                    &exclude_set,
+                    ctx,
                     &trusted_global_files,
                     &trusted_global_globs,
                     cfg_dir.as_deref(),

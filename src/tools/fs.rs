@@ -206,13 +206,22 @@ impl BlockingTool for Tool {
                     .filter(|p| !p.as_os_str().is_empty())
                     .map_or_else(|| ".".into(), |p| p.to_string_lossy().into_owned());
                 let max_depth = args.max_depth.unwrap_or(1).clamp(1, 5);
+                let (exclude_set, neg_exclude_set) = ctx.build_exclude_globsets(&[], true)?;
+                let neg_exclude_ancestors = ctx.build_neg_exclude_ancestor_globset()?;
                 render_directory_listing(
                     &target,
                     &ctx.root,
                     &rel_display,
                     max_depth,
                     ctx.max_output_size,
-                    |_| true,
+                    |path| {
+                        let rel = diff_paths(path, &ctx.root).unwrap_or_else(|| path.to_path_buf());
+                        if path.is_dir() && neg_exclude_ancestors.is_match(&rel) {
+                            return true;
+                        }
+                        ctx.check_rel_path_allowed(&rel, &exclude_set, &neg_exclude_set)
+                            .is_ok()
+                    },
                 )
             }
             FsAction::Rename => {

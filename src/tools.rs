@@ -36,7 +36,8 @@ use tracing::{debug, error, info};
 use utils::{
     fs::read_capped,
     path::{
-        build_globset, ensure_within_root, has_git_dir_component, resolve_existing_under,
+        build_ancestor_dir_globset, build_globset, ensure_within_root, has_git_dir_component,
+        has_hidden_component, partition_negated_patterns, resolve_existing_under,
         validate_relative_path, workspace_root,
     },
 };
@@ -190,26 +191,80 @@ impl ToolContext {
 
     pub fn validate_scoped_relative_path<'a>(&self, raw: &'a str) -> Result<&'a Path> {
         let rel = validate_relative_path(raw)?;
-        let resolved =
-            self.ensure_path_or_ancestor_within_workspace(&self.root.join(rel), raw.trim())?;
+        let target = self.root.join(rel);
+        let resolved = self.ensure_path_or_ancestor_within_workspace(&target, raw.trim())?;
+        self.ensure_not_excluded(&target)?;
         self.ensure_not_excluded(&resolved)?;
         Ok(rel)
     }
 
     pub fn resolve_existing_under_root(&self, raw: &str, escape_label: &str) -> Result<PathBuf> {
-        resolve_existing_under(&self.root, raw, escape_label)
+        let trimmed = raw.trim();
+        let neg_ancestors = self.build_neg_exclude_ancestor_globset()?;
+        if !trimmed.is_empty() && trimmed != "." {
+            let rel = validate_relative_path(trimmed)?;
+            let target = self.root.join(rel);
+            if !(target.is_dir() && neg_ancestors.is_match(rel)) {
+                self.ensure_not_excluded(&target)?;
+            }
+        }
+        let canon = resolve_existing_under(&self.root, raw, escape_label)?;
+        let canon_rel = diff_paths(&canon, &self.root).unwrap_or_else(|| canon.clone());
+        if !(canon.is_dir() && neg_ancestors.is_match(&canon_rel)) {
+            self.ensure_not_excluded(&canon)?;
+        }
+        Ok(canon)
     }
 
-    pub fn ensure_not_excluded(&self, canon_path: &Path) -> Result<()> {
-        let rel = diff_paths(canon_path, &self.root).unwrap_or_else(|| canon_path.to_path_buf());
-        let exclude_set = self.build_exclude_globset(&[], true)?;
-        if has_git_dir_component(&rel) || exclude_set.is_match(&rel) {
+    pub fn check_rel_path_allowed(
+        &self,
+        rel: &Path,
+        exclude_set: &GlobSet,
+        neg_exclude_set: &GlobSet,
+    ) -> Result<()> {
+        if rel.as_os_str().is_empty() || rel == Path::new(".") {
+            return Ok(());
+        }
+        if has_git_dir_component(rel) {
             bail!(
                 "Security violation: '{}' matches an excluded pattern",
                 rel.display()
             );
         }
+        let is_negated = neg_exclude_set.is_match(rel);
+        if !self.config.app.allow_hidden && has_hidden_component(rel) && !is_negated {
+            bail!(
+                "Security violation: '{}' is a hidden file or directory (set `app.allow_hidden = true` in config.toml to allow access)",
+                rel.display()
+            );
+        }
+        if exclude_set.is_match(rel) && !is_negated {
+            bail!(
+                "Security violation: '{}' matches an excluded pattern",
+                rel.display()
+            );
+        }
+        let mut prefix = PathBuf::new();
+        for comp in rel.components() {
+            prefix.push(comp);
+            if exclude_set.is_match(&prefix) && !is_negated {
+                bail!(
+                    "Security violation: '{}' matches an excluded pattern",
+                    rel.display()
+                );
+            }
+        }
         Ok(())
+    }
+
+    pub fn ensure_not_excluded_under(&self, path: &Path, base_root: &Path) -> Result<()> {
+        let rel = diff_paths(path, base_root).unwrap_or_else(|| path.to_path_buf());
+        let (exclude_set, neg_exclude_set) = self.build_exclude_globsets(&[], true)?;
+        self.check_rel_path_allowed(&rel, &exclude_set, &neg_exclude_set)
+    }
+
+    pub fn ensure_not_excluded(&self, canon_path: &Path) -> Result<()> {
+        self.ensure_not_excluded_under(canon_path, &self.root)
     }
 
     pub fn resolve_existing_path(&self, raw: &str) -> Result<PathBuf> {
@@ -218,6 +273,7 @@ impl ToolContext {
         if !target.exists() {
             bail!("Target path does not exist: '{trimmed}'");
         }
+        self.ensure_not_excluded(&target)?;
         let canon = self.ensure_within_workspace(&target, trimmed)?;
         self.ensure_not_excluded(&canon)?;
         Ok(canon)
@@ -276,6 +332,13 @@ impl ToolContext {
             return Ok(canon);
         }
 
+        if !candidate.starts_with(&canon_global)
+            && !canon_ws
+                .as_ref()
+                .is_some_and(|ws| candidate.starts_with(ws))
+        {
+            self.ensure_not_excluded(&candidate)?;
+        }
         let canon = self.ensure_within_workspace(&canon, trimmed)?;
         self.ensure_not_excluded(&canon)?;
         Ok(canon)
@@ -308,33 +371,103 @@ impl ToolContext {
             self.root.clone()
         };
         let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
+        let trimmed = target_path.trim();
+        let neg_ancestors = self.build_neg_exclude_ancestor_globset()?;
+        if !trimmed.is_empty() && trimmed != "." {
+            let rel = validate_relative_path(trimmed)?;
+            let target = base_root.join(rel);
+            if !(target.is_dir() && neg_ancestors.is_match(rel)) {
+                self.ensure_not_excluded_under(&target, &base_root)?;
+            }
+        }
         let scan_root = resolve_existing_under(&base_root, target_path, escape_label)?;
+        let scan_rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
+        if !(scan_root.is_dir() && neg_ancestors.is_match(&scan_rel)) {
+            self.ensure_not_excluded_under(&scan_root, &base_root)?;
+        }
         Ok((base_root, scan_root))
     }
 
     pub fn build_walker(&self, scan_root: &Path) -> impl Iterator<Item = DirEntry> {
         let use_git_ignore = self.config.workspace_snapshot.git_root;
+        let allow_hidden = self.config.app.allow_hidden;
+        let has_neg_exclude = self
+            .config
+            .workspace_snapshot
+            .exclude
+            .iter()
+            .any(|p| p.trim().starts_with('!'));
+        let has_hidden_tree = self
+            .config
+            .workspace_snapshot
+            .include_in_tree
+            .iter()
+            .any(|p| {
+                let s = p
+                    .trim()
+                    .trim_start_matches('!')
+                    .trim()
+                    .trim_start_matches('/');
+                s.starts_with('.') || s.contains("/.")
+            });
+        let prune_hidden = !allow_hidden && !has_neg_exclude && !has_hidden_tree;
+
         WalkBuilder::new(scan_root)
             .hidden(false)
             .git_ignore(use_git_ignore)
             .git_global(use_git_ignore)
             .git_exclude(use_git_ignore)
+            .filter_entry(move |entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
+                let name = entry.file_name();
+                if name == ".git" {
+                    return false;
+                }
+                if prune_hidden && name.as_encoded_bytes().first() == Some(&b'.') {
+                    return false;
+                }
+                true
+            })
             .build()
             .flatten()
     }
 
-    pub fn build_exclude_globset(
+    pub fn build_exclude_globsets(
         &self,
         call_exclude: &[String],
         allow_recursive_shorthand: bool,
-    ) -> Result<GlobSet> {
-        let patterns: Vec<String> = DEFAULT_EXCLUDE_PATTERNS
+    ) -> Result<(GlobSet, GlobSet)> {
+        let (neg_cfg, pos_cfg) = partition_negated_patterns(
+            self.config
+                .workspace_snapshot
+                .exclude
+                .iter()
+                .map(String::as_str),
+        );
+        let (_, pos_call) = partition_negated_patterns(call_exclude.iter().map(String::as_str));
+        let pos_patterns: Vec<String> = DEFAULT_EXCLUDE_PATTERNS
             .iter()
             .map(|&s| String::from(s))
-            .chain(self.config.workspace_snapshot.exclude.iter().cloned())
-            .chain(call_exclude.iter().cloned())
+            .chain(pos_cfg)
+            .chain(pos_call)
             .collect();
-        build_globset(&patterns, allow_recursive_shorthand)
+        Ok((
+            build_globset(&pos_patterns, allow_recursive_shorthand)?,
+            build_globset(&neg_cfg, allow_recursive_shorthand)?,
+        ))
+    }
+
+    pub fn build_neg_exclude_ancestor_globset(&self) -> Result<GlobSet> {
+        let (neg_cfg, _) = partition_negated_patterns(
+            self.config
+                .workspace_snapshot
+                .exclude
+                .iter()
+                .map(String::as_str),
+        );
+        build_ancestor_dir_globset(&neg_cfg)
     }
 
     pub fn walk_workspace_files(
@@ -347,16 +480,17 @@ impl ToolContext {
         let include_set = (!include_patterns.is_empty())
             .then(|| build_globset(include_patterns, true))
             .transpose()?;
-        let exclude_set = self.build_exclude_globset(call_exclude, true)?;
+        let (exclude_set, neg_exclude_set) = self.build_exclude_globsets(call_exclude, true)?;
+        let neg_ancestors = self.build_neg_exclude_ancestor_globset()?;
 
+        if scan_root != base_root {
+            let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
+            if !(scan_root.is_dir() && neg_ancestors.is_match(&rel)) {
+                self.check_rel_path_allowed(&rel, &exclude_set, &neg_exclude_set)?;
+            }
+        }
         if scan_root.is_file() {
             let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
-            if exclude_set.is_match(&rel) {
-                bail!(
-                    "Security violation: '{}' matches an excluded pattern",
-                    rel.display()
-                );
-            }
             return Ok(vec![(
                 scan_root.to_path_buf(),
                 rel.to_string_lossy().into_owned(),
@@ -375,7 +509,9 @@ impl ToolContext {
             let Some(relative) = diff_paths(path, base_root) else {
                 continue;
             };
-            if exclude_set.is_match(&relative)
+            if self
+                .check_rel_path_allowed(&relative, &exclude_set, &neg_exclude_set)
+                .is_err()
                 || include_set
                     .as_ref()
                     .is_some_and(|inc| !inc.is_match(&relative))
@@ -1332,4 +1468,119 @@ pub async fn execute_manual(
         ToolFilter::Manual,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_files_and_folders_blocked_by_default_and_configurable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        std::fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        std::fs::write(root.join(".github/workflows/ci.yml"), "name: CI\n").unwrap();
+
+        let mut ctx = ToolContext {
+            root: root.clone(),
+            max_output_size: 65536,
+            active_skill: None,
+            config: Config::default(),
+        };
+
+        // 1. Default (`allow_hidden = false`): all hidden files and folders are blocked
+        assert!(ctx.ensure_not_excluded(&root.join("src/main.rs")).is_ok());
+        assert!(ctx.ensure_not_excluded(&root.join(".gitignore")).is_err());
+        assert!(ctx.ensure_not_excluded(&root.join(".github")).is_err());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".github/workflows/ci.yml"))
+                .is_err()
+        );
+        assert!(ctx.ensure_not_excluded(&root.join(".venv")).is_err());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".venv/pyvenv.cfg"))
+                .is_err()
+        );
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".git/hooks/pre-commit"))
+                .is_err()
+        );
+
+        let walked = ctx.walk_workspace_files(&root, &root, &[], &[]).unwrap();
+        let rel_paths: Vec<&str> = walked.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(rel_paths, vec!["src/main.rs"]);
+
+        // 2. Opt-in via `allow_hidden = true`: non-excluded dotfiles are allowed,
+        //    while `.git`, `.venv`, and `.env*` remain protected by DEFAULT_EXCLUDE_PATTERNS.
+        ctx.config.app.allow_hidden = true;
+        assert!(ctx.ensure_not_excluded(&root.join(".gitignore")).is_ok());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".github/workflows/ci.yml"))
+                .is_ok()
+        );
+        assert!(ctx.ensure_not_excluded(&root.join(".env")).is_err());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".venv/pyvenv.cfg"))
+                .is_err()
+        );
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".git/hooks/pre-commit"))
+                .is_err()
+        );
+
+        let walked_hidden = ctx.walk_workspace_files(&root, &root, &[], &[]).unwrap();
+        let rel_hidden: Vec<&str> = walked_hidden.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(
+            rel_hidden,
+            vec![".github/workflows/ci.yml", ".gitignore", "src/main.rs"]
+        );
+
+        // 3. Selective whitelist via `!` negation in `workspace_snapshot.exclude`
+        //    while keeping `allow_hidden = false`.
+        ctx.config.app.allow_hidden = false;
+        ctx.config
+            .workspace_snapshot
+            .exclude
+            .push("!.gitignore".into());
+        assert!(ctx.ensure_not_excluded(&root.join(".gitignore")).is_ok());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".github/workflows/ci.yml"))
+                .is_err()
+        );
+
+        // 4. Nested hidden file negation allows ancestor directory traversal in
+        //    resolve_existing_under_root, resolve_scan_roots, and workspace_snapshot.
+        ctx.config
+            .workspace_snapshot
+            .exclude
+            .push("!.github/workflows/ci.yml".into());
+        assert!(
+            ctx.ensure_not_excluded(&root.join(".github/workflows/ci.yml"))
+                .is_ok()
+        );
+        assert!(
+            ctx.resolve_existing_under_root(".github", "escapes")
+                .is_ok()
+        );
+        assert!(
+            ctx.resolve_existing_under_root(".github/workflows", "escapes")
+                .is_ok()
+        );
+        assert!(ctx.resolve_scan_roots(".github", "escapes").is_ok());
+
+        let walked_neg = ctx.walk_workspace_files(&root, &root, &[], &[]).unwrap();
+        let rel_neg: Vec<&str> = walked_neg.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(
+            rel_neg,
+            vec![".github/workflows/ci.yml", ".gitignore", "src/main.rs"]
+        );
+    }
 }

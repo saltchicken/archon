@@ -751,6 +751,23 @@ impl TuiApp {
         } else {
             ("OFF", theme::TAB_GLOBAL_ACTIVE)
         };
+        let hidden_neg_count = snap
+            .exclude
+            .iter()
+            .filter_map(|p| p.trim().strip_prefix('!'))
+            .map(|p| p.trim().trim_start_matches('/'))
+            .filter(|p| p.starts_with('.') || p.contains("/."))
+            .count();
+        let (hidden_str, hidden_color) = if self.config.app.allow_hidden {
+            ("ON (allowed)".to_string(), theme::STATUS_ENABLED)
+        } else if hidden_neg_count > 0 {
+            (
+                format!("OFF (+{hidden_neg_count} allow)"),
+                theme::CTX_USAGE_WARN,
+            )
+        } else {
+            ("OFF (blocked)".to_string(), theme::STATUS_DISABLED)
+        };
 
         let df_tool_enabled = self.enable_tools && tools::is_tool_enabled("dotfiles", &self.config);
         let df_dirs = &self.config.dotfiles.allowed_dirs;
@@ -829,6 +846,11 @@ impl TuiApp {
                 Span::raw(" tree:"),
                 Span::styled(tree_str, Style::default().fg(tree_color)),
                 source_badge_span(prov.workspace_snapshot),
+            ]),
+            Line::from(vec![
+                Span::raw("Hidden:  "),
+                Span::styled(hidden_str, Style::default().fg(hidden_color)),
+                source_badge_span(prov.allow_hidden),
             ]),
             Line::from(vec![
                 Span::raw("Dotfiles:"),

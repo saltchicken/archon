@@ -61,13 +61,78 @@ pub fn has_git_dir_component(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == ".git")
 }
 
+pub fn has_hidden_component(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(
+            c,
+            Component::Normal(os) if os.as_encoded_bytes().first() == Some(&b'.')
+        )
+    })
+}
+
+pub fn partition_negated_patterns<'a, I>(patterns: I) -> (Vec<String>, Vec<String>)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut neg = Vec::new();
+    let mut pos = Vec::new();
+    for raw in patterns {
+        let pat = raw.trim();
+        if pat.is_empty() {
+            continue;
+        }
+        if let Some(stripped) = pat.strip_prefix('!') {
+            let s = stripped.trim().trim_start_matches('/').to_string();
+            if !s.is_empty() {
+                neg.push(s);
+            }
+        } else {
+            let s = pat.trim_start_matches('/').to_string();
+            if !s.is_empty() {
+                pos.push(s);
+            }
+        }
+    }
+    (neg, pos)
+}
+
 pub fn build_globset(patterns: &[String], allow_recursive_shorthand: bool) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pat in patterns {
         builder.add(Glob::new(pat).with_context(|| format!("Invalid glob pattern: {pat}"))?);
+        if let Some(dir_prefix) = pat.strip_suffix("/**").filter(|p| !p.is_empty()) {
+            builder.add(
+                Glob::new(dir_prefix)
+                    .with_context(|| format!("Invalid glob pattern: {dir_prefix}"))?,
+            );
+            if allow_recursive_shorthand && !dir_prefix.contains(['/', '\\']) {
+                let rec_dir = format!("**/{dir_prefix}");
+                builder.add(
+                    Glob::new(&rec_dir)
+                        .with_context(|| format!("Invalid glob pattern: {rec_dir}"))?,
+                );
+            }
+        }
         if allow_recursive_shorthand && !pat.contains(['/', '\\']) {
             let rec = format!("**/{pat}");
             builder.add(Glob::new(&rec).with_context(|| format!("Invalid glob pattern: {rec}"))?);
+        }
+    }
+    Ok(builder.build()?)
+}
+
+pub fn build_ancestor_dir_globset(patterns: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pat in patterns {
+        let mut cur = pat.trim_end_matches("/**").trim_end_matches('/');
+        while let Some((parent, _)) = cur.rsplit_once('/') {
+            let parent = parent.trim_end_matches('/');
+            if parent.is_empty() || parent == "**" {
+                break;
+            }
+            builder
+                .add(Glob::new(parent).with_context(|| format!("Invalid glob pattern: {parent}"))?);
+            cur = parent;
         }
     }
     Ok(builder.build()?)

@@ -1121,7 +1121,7 @@ fn walk_external_crate_files(
     let include_set = (!include_patterns.is_empty())
         .then(|| build_globset(include_patterns, true))
         .transpose()?;
-    let exclude_set = ctx.build_exclude_globset(call_exclude, true)?;
+    let (exclude_set, neg_exclude_set) = ctx.build_exclude_globsets(call_exclude, true)?;
 
     let format_rel = |rel: &Path| -> String {
         let rel_str = rel.to_string_lossy();
@@ -1132,14 +1132,12 @@ fn walk_external_crate_files(
         }
     };
 
+    if scan_root != base_root {
+        let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
+        ctx.check_rel_path_allowed(&rel, &exclude_set, &neg_exclude_set)?;
+    }
     if scan_root.is_file() {
         let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
-        if exclude_set.is_match(&rel) {
-            bail!(
-                "Security violation: '{}' matches an excluded pattern",
-                rel.display()
-            );
-        }
         return Ok(vec![(scan_root.to_path_buf(), format_rel(&rel))]);
     }
 
@@ -1163,7 +1161,9 @@ fn walk_external_crate_files(
         let Some(relative) = diff_paths(path, base_root) else {
             continue;
         };
-        if exclude_set.is_match(&relative)
+        if ctx
+            .check_rel_path_allowed(&relative, &exclude_set, &neg_exclude_set)
+            .is_err()
             || include_set
                 .as_ref()
                 .is_some_and(|inc| !inc.is_match(&relative))

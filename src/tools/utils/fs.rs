@@ -83,7 +83,12 @@ where
             *count += 1;
 
             if meta.is_dir() {
-                let child_count = fs::read_dir(&path).map_or(0, Iterator::count);
+                let child_count = fs::read_dir(&path)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| e.file_name() != ".git" && allow_entry(&e.path()))
+                    .count();
                 let _ = writeln!(out, "{indent}{name}/ ({child_count} items)");
                 if depth < max_depth
                     && let Ok(canon) = dunce::canonicalize(&path)

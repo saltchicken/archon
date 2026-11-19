@@ -312,6 +312,7 @@ pub struct ConfigProvenance {
     pub ui: ConfigSource,
     pub dotfiles: ConfigSource,
     pub workspace_snapshot: ConfigSource,
+    pub allow_hidden: ConfigSource,
     /// Keys (`section.key` or top-level) set in both Global and Workspace `config.toml`
     /// with different values (Workspace overwrote Global).
     pub overwritten_keys: Vec<String>,
@@ -331,14 +332,20 @@ fn extract_toml_string_array(
     )
 }
 
-fn source_for_table_key(
+fn source_for_table_keys(
     global: Option<&toml::Table>,
     ws: Option<&toml::Table>,
     section: &str,
-    key: &str,
+    keys: &[&str],
 ) -> ConfigSource {
-    let g_val = global.and_then(|t| t.get(section)?.as_table()?.get(key));
-    let ws_val = ws.and_then(|t| t.get(section)?.as_table()?.get(key));
+    let g_val = global.and_then(|t| {
+        let sub = t.get(section)?.as_table()?;
+        keys.iter().find_map(|k| sub.get(*k))
+    });
+    let ws_val = ws.and_then(|t| {
+        let sub = t.get(section)?.as_table()?;
+        keys.iter().find_map(|k| sub.get(*k))
+    });
     match (g_val, ws_val) {
         (Some(gv), Some(wv)) => {
             if gv != wv {
@@ -351,6 +358,15 @@ fn source_for_table_key(
         (Some(_), None) => ConfigSource::Global,
         (None, None) => ConfigSource::Default,
     }
+}
+
+fn source_for_table_key(
+    global: Option<&toml::Table>,
+    ws: Option<&toml::Table>,
+    section: &str,
+    key: &str,
+) -> ConfigSource {
+    source_for_table_keys(global, ws, section, &[key])
 }
 
 fn source_for_section(
@@ -405,10 +421,25 @@ fn collect_overwritten_keys(global: Option<&toml::Table>, ws: Option<&toml::Tabl
                     if k == "workspace_snapshot" && sub_k == "file" {
                         continue;
                     }
-                    if let Some(g_sub_val) = g_sub.get(sub_k)
+                    let g_sub_val = g_sub.get(sub_k).or_else(|| {
+                        if k == "app" && matches!(sub_k.as_str(), "allow_hidden" | "include_hidden")
+                        {
+                            g_sub
+                                .get("allow_hidden")
+                                .or_else(|| g_sub.get("include_hidden"))
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(g_sub_val) = g_sub_val
                         && g_sub_val != w_sub_val
                     {
-                        out.push(format!("{k}.{sub_k}"));
+                        let norm_k = if k == "app" && sub_k == "include_hidden" {
+                            "allow_hidden"
+                        } else {
+                            sub_k.as_str()
+                        };
+                        out.push(format!("{k}.{norm_k}"));
                     }
                 }
             }
@@ -420,6 +451,7 @@ fn collect_overwritten_keys(global: Option<&toml::Table>, ws: Option<&toml::Tabl
         }
     }
     out.sort();
+    out.dedup();
     out
 }
 
@@ -441,6 +473,12 @@ fn build_provenance(
         ui: source_for_section(global_table, ws_table, "ui"),
         dotfiles: source_for_section(global_table, ws_table, "dotfiles"),
         workspace_snapshot: source_for_section(global_table, ws_table, "workspace_snapshot"),
+        allow_hidden: source_for_table_keys(
+            global_table,
+            ws_table,
+            "app",
+            &["allow_hidden", "include_hidden"],
+        ),
         overwritten_keys: collect_overwritten_keys(global_table, ws_table),
     }
 }
@@ -503,6 +541,8 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub skills_dir: String,
+    #[serde(alias = "include_hidden")]
+    pub allow_hidden: bool,
     pub enabled_tools: Vec<String>,
     pub auto_approve: Vec<String>,
 }
@@ -573,6 +613,7 @@ impl Default for AppSettings {
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
             skills_dir: "~/.config/archon/skills".into(),
+            allow_hidden: false,
             enabled_tools: crate::tools::ALL_TOOL_NAMES
                 .iter()
                 .map(|&s| String::from(s))
@@ -855,6 +896,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# Overrides ~/.config/archon/config.toml for this directory.\n",
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
+            "# allow_hidden = false\n",
             "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
