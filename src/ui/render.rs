@@ -7,7 +7,11 @@ use super::{
     theme, titled_block,
 };
 use crate::{
-    core::session::{ChatMessage, truncate_str},
+    core::{
+        config::{ConfigSource, MemoryScope, ToolProvenance},
+        session::{ChatMessage, truncate_str},
+        skills::{self, SkillDefinition},
+    },
     tools::{self, ToolCall},
 };
 use ratatui::{
@@ -15,9 +19,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        List, ListItem, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    },
+    widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use textwrap::core::display_width;
 
@@ -103,6 +105,85 @@ fn image_badge(m: &ChatMessage) -> String {
     m.images
         .as_ref()
         .map_or_else(String::new, |v| format!(" [+{} img]", v.len()))
+}
+
+fn source_style(src: ConfigSource) -> Style {
+    match src {
+        ConfigSource::Default | ConfigSource::Global => {
+            Style::default().fg(theme::TAB_GLOBAL_ACTIVE)
+        }
+        ConfigSource::Workspace => Style::default().fg(theme::TAB_WORKSPACE_ACTIVE),
+        ConfigSource::WorkspaceOverridesGlobal => Style::default()
+            .fg(theme::TAB_WORKSPACE_ACTIVE)
+            .add_modifier(Modifier::BOLD),
+        ConfigSource::Env | ConfigSource::Cli => Style::default()
+            .fg(theme::MODAL_HINT)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+fn source_badge_span(src: ConfigSource) -> Span<'static> {
+    Span::styled(format!(" [{}]", src.short_tag()), source_style(src))
+}
+
+fn tool_prov_style(prov: ToolProvenance) -> Style {
+    match prov {
+        ToolProvenance::DefaultEnabled | ToolProvenance::GlobalEnabled => {
+            Style::default().fg(theme::TAB_GLOBAL_ACTIVE)
+        }
+        ToolProvenance::WorkspaceEnabled
+        | ToolProvenance::GlobalAndWorkspaceEnabled
+        | ToolProvenance::WorkspaceAdded => Style::default().fg(theme::TAB_WORKSPACE_ACTIVE),
+        ToolProvenance::WorkspaceRemoved => Style::default()
+            .fg(theme::CTX_USAGE_WARN)
+            .add_modifier(Modifier::BOLD),
+        ToolProvenance::GlobalDisabled
+        | ToolProvenance::GlobalAndWorkspaceDisabled
+        | ToolProvenance::CliDisabled => Style::default().fg(theme::STATUS_DISABLED),
+    }
+}
+
+fn pack_overwritten_lines(keys: &[String], max_width: usize, max_lines: usize) -> Vec<String> {
+    let short_keys: Vec<String> = keys
+        .iter()
+        .map(|k| {
+            k.strip_prefix("workspace_snapshot.")
+                .map_or_else(|| k.clone(), |rest| format!("snap.{rest}"))
+        })
+        .collect();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for (idx, item) in short_keys.iter().enumerate() {
+        let is_last = idx + 1 == short_keys.len();
+        let piece = if is_last {
+            item.clone()
+        } else {
+            format!("{item},")
+        };
+
+        if current.is_empty() {
+            current = piece;
+        } else if current.len() + 1 + piece.len() <= max_width {
+            current.push(' ');
+            current.push_str(&piece);
+        } else {
+            lines.push(std::mem::replace(&mut current, piece));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.len() > max_lines && max_lines > 0 {
+        let extra = lines.len() - max_lines + 1;
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            *last = format!("+{extra} more overrides");
+        }
+    }
+    lines
 }
 
 impl TuiApp {
@@ -505,14 +586,17 @@ impl TuiApp {
 
     pub(super) fn draw(&mut self, f: &mut Frame) {
         self.term_area = f.area();
-        let sidebar_width = if self.sidebar_expanded { 36 } else { 0 };
+        let sidebar_width = if self.sidebar_expanded { 38 } else { 0 };
         let main_panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(sidebar_width), Constraint::Min(40)])
             .split(self.term_area);
 
         if self.sidebar_expanded {
+            self.sidebar_area = main_panes[0];
             self.draw_sidebar(f, main_panes[0]);
+        } else {
+            self.sidebar_area = Rect::default();
         }
         self.draw_chat_area(f, main_panes[1]);
 
@@ -533,11 +617,40 @@ impl TuiApp {
         }
     }
 
-    fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(11), Constraint::Min(6)])
-            .split(area);
+    fn effective_sidebar_skill(&self) -> Option<&SkillDefinition> {
+        let first_trimmed = self
+            .text_area
+            .lines()
+            .first()
+            .map_or("", |l| l.trim_start());
+        if let Some((cmd_token, _)) = skills::parse_at_command(first_trimmed)
+            && let Some(skill) = skills::find_skill(&self.config, cmd_token)
+        {
+            return Some(skill);
+        }
+        if (self.is_streaming
+            || self.active_tool_status.is_some()
+            || self.pending_tool.is_some()
+            || self.pending_truncated.is_some())
+            && let Some(ref name) = self.active_turn_skill
+        {
+            return skills::find_skill(&self.config, name);
+        }
+        None
+    }
+
+    fn build_sidebar_config_lines(&self) -> (String, Vec<Line<'static>>) {
+        let prov = &self.config.provenance;
+        let config_title = if !prov.overwritten_keys.is_empty() {
+            format!(
+                " Config [G → WS: {} overrides] ",
+                prov.overwritten_keys.len()
+            )
+        } else if prov.has_workspace_config {
+            " Config [Global + Workspace] ".to_string()
+        } else {
+            " Config [Global] ".to_string()
+        };
 
         let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
         let ctx_color = if pct >= 90.0 {
@@ -557,14 +670,135 @@ impl TuiApp {
                     .map(|p| crate::core::config::format_tilde_path(&p))
                     .unwrap_or_else(|_| "unknown".into())
             });
-        let settings_text = vec![
+
+        let model_src_span = if prov.default_model != ConfigSource::Cli
+            && self.model != self.config.startup_model()
+        {
+            Span::styled(" [UI]", Style::default().fg(theme::MODAL_HINT))
+        } else {
+            source_badge_span(prov.default_model)
+        };
+
+        let sys_label = self.current_system_label();
+        let sys_enabled = !self.current_system_prompt_text().trim().is_empty();
+        let sys_color = if sys_enabled {
+            theme::STATUS_ENABLED
+        } else {
+            theme::STATUS_DISABLED
+        };
+        let sys_src_span = if self.custom_system_prompt.is_some() {
+            Span::styled(" [UI]", Style::default().fg(theme::MODAL_HINT))
+        } else {
+            source_badge_span(prov.system_presets)
+        };
+
+        let g_mem = &self.config.global_memory;
+        let ws_mem = &self.config.workspace_memory;
+        let (g_mem_str, g_mem_color) = if g_mem.enabled {
+            (
+                format!("ON({})", g_mem.count()),
+                if g_mem.count() > 0 {
+                    theme::STATUS_ENABLED
+                } else {
+                    theme::TAB_GLOBAL_ACTIVE
+                },
+            )
+        } else {
+            (format!("OFF({})", g_mem.count()), theme::STATUS_DISABLED)
+        };
+        let (ws_mem_str, ws_mem_color) = if ws_mem.enabled {
+            (
+                format!("ON({})", ws_mem.count()),
+                if ws_mem.count() > 0 {
+                    theme::STATUS_ENABLED
+                } else {
+                    theme::TAB_GLOBAL_ACTIVE
+                },
+            )
+        } else {
+            (format!("OFF({})", ws_mem.count()), theme::STATUS_DISABLED)
+        };
+
+        let rule_count = self.config.app.auto_approve.len();
+        let rule_color = if rule_count > 0 {
+            theme::STATUS_ENABLED
+        } else {
+            theme::STATUS_DISABLED
+        };
+        let mut approve_spans = vec![
+            Span::raw("Approve: "),
+            Span::styled(
+                format!("{rule_count} rules"),
+                Style::default().fg(rule_color),
+            ),
+            source_badge_span(prov.auto_approve),
+        ];
+        if self.session_auto_approve_count > 0 {
+            approve_spans.push(Span::styled(
+                format!(" +{} sess", self.session_auto_approve_count),
+                Style::default().fg(theme::MODAL_HINT),
+            ));
+        }
+
+        let snap = &self.config.workspace_snapshot;
+        let (git_str, git_color) = if snap.git_root {
+            ("ON", theme::STATUS_ENABLED)
+        } else {
+            ("OFF", theme::STATUS_DISABLED)
+        };
+        let (tree_str, tree_color) = if snap.tree_only {
+            ("ON", theme::CTX_USAGE_WARN)
+        } else {
+            ("OFF", theme::TAB_GLOBAL_ACTIVE)
+        };
+
+        let df_tool_enabled = self.enable_tools && tools::is_tool_enabled("dotfiles", &self.config);
+        let df_dirs = &self.config.dotfiles.allowed_dirs;
+        let df_dirs_label = if df_dirs.iter().any(|d| d.trim() == "*") {
+            "*".to_string()
+        } else {
+            format!("{} dirs", df_dirs.len())
+        };
+        let (df_str, df_color) = if df_tool_enabled {
+            (format!("ON ({df_dirs_label})"), theme::STATUS_ENABLED)
+        } else {
+            (format!("OFF ({df_dirs_label})"), theme::STATUS_DISABLED)
+        };
+
+        let g_sched_tot = self.config.global_schedules.len();
+        let g_sched_on = self
+            .config
+            .global_schedules
+            .iter()
+            .filter(|s| s.enabled)
+            .count();
+        let ws_sched_tot = self.config.schedules.len();
+        let ws_sched_on = self.config.schedules.iter().filter(|s| s.enabled).count();
+        let sched_color = |on: usize, tot: usize| {
+            if tot == 0 {
+                theme::TAB_GLOBAL_ACTIVE
+            } else if on > 0 {
+                theme::STATUS_ENABLED
+            } else {
+                theme::STATUS_DISABLED
+            }
+        };
+
+        let mut lines = vec![
             Line::from(vec![
                 Span::raw("Dir:     "),
-                Span::styled(dir, Style::default().fg(theme::SIDEBAR_DIR)),
+                Span::styled(
+                    truncate_str(&dir, 22),
+                    Style::default().fg(theme::SIDEBAR_DIR),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("Model:   "),
-                Span::styled(&self.model, Style::default().fg(theme::SIDEBAR_MODEL)),
+                Span::styled(
+                    truncate_str(&self.model, 14),
+                    Style::default().fg(theme::SIDEBAR_MODEL),
+                ),
+                model_src_span,
                 Span::raw(" (^M)"),
             ]),
             Line::from(vec![
@@ -573,21 +807,289 @@ impl TuiApp {
                     format!("{}/{} ({pct:.0}%)", self.used_tokens, self.num_ctx),
                     Style::default().fg(ctx_color),
                 ),
+                source_badge_span(prov.models),
             ]),
-            Line::from(format!(
-                "Tools:   {} ({}KB max) (^T)",
-                if self.enable_tools { "ON" } else { "OFF" },
-                self.max_tool_output_size / 1024
-            )),
-            Line::from(format!("Skills:  {} loaded", self.config.skills.len())),
-            Line::from(format!("System:  {} (^Y)", self.current_system_label())),
-            Line::from(format!("Memory:  {} (^P)", self.current_memory_label())),
-            Line::from("Inspect: Payload (^G)"),
+            Line::from(vec![
+                Span::raw("System:  "),
+                Span::styled(truncate_str(sys_label, 14), Style::default().fg(sys_color)),
+                sys_src_span,
+                Span::raw(" (^Y)"),
+            ]),
+            Line::from(vec![
+                Span::raw("Memory:  G:"),
+                Span::styled(g_mem_str, Style::default().fg(g_mem_color)),
+                Span::raw(" WS:"),
+                Span::styled(ws_mem_str, Style::default().fg(ws_mem_color)),
+                Span::raw(" (^P)"),
+            ]),
+            Line::from(approve_spans),
+            Line::from(vec![
+                Span::raw("Snap:    git:"),
+                Span::styled(git_str, Style::default().fg(git_color)),
+                Span::raw(" tree:"),
+                Span::styled(tree_str, Style::default().fg(tree_color)),
+                source_badge_span(prov.workspace_snapshot),
+            ]),
+            Line::from(vec![
+                Span::raw("Dotfiles:"),
+                Span::styled(df_str, Style::default().fg(df_color)),
+                source_badge_span(prov.dotfiles),
+            ]),
+            Line::from(vec![
+                Span::raw("Sched:   G:"),
+                Span::styled(
+                    format!("{g_sched_on}/{g_sched_tot}"),
+                    Style::default().fg(sched_color(g_sched_on, g_sched_tot)),
+                ),
+                Span::raw(" WS:"),
+                Span::styled(
+                    format!("{ws_sched_on}/{ws_sched_tot}"),
+                    Style::default().fg(sched_color(ws_sched_on, ws_sched_tot)),
+                ),
+            ]),
         ];
+
+        for (i, ov_line) in pack_overwritten_lines(&prov.overwritten_keys, 25, 4)
+            .into_iter()
+            .enumerate()
+        {
+            let prefix = if i == 0 { "Overrode:" } else { "         " };
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(ov_line, Style::default().fg(theme::CTX_USAGE_WARN)),
+            ]));
+        }
+
+        lines.push(Line::from("Inspect: Payload (^G)"));
+        (config_title, lines)
+    }
+
+    fn build_sidebar_tool_lines(&self) -> (String, Vec<Line<'static>>) {
+        let active_skill = self.effective_sidebar_skill();
+        let active_skill_name = active_skill.map(|s| s.name.as_str());
+        let total_tools = tools::ALL_TOOL_NAMES.len();
+        let active_count = if self.enable_tools {
+            tools::ALL_TOOL_NAMES
+                .iter()
+                .filter(|&&name| {
+                    tools::is_tool_enabled_for_turn(name, &self.config, active_skill_name)
+                })
+                .count()
+        } else {
+            0
+        };
+
+        let kb = self.max_tool_output_size / 1024;
+        let src_tag = self.config.provenance.enabled_tools.short_tag();
+        let title = if !self.enable_tools {
+            format!(" Tools: OFF (0/{total_tools}, {kb}KB) [{src_tag}] (^T) ")
+        } else if let Some(sk) = active_skill {
+            format!(
+                " Tools: @{} ({active_count}/{total_tools}, {kb}KB) (^T) ",
+                sk.trigger()
+            )
+        } else {
+            format!(" Tools: ON ({active_count}/{total_tools}, {kb}KB) [{src_tag}] (^T) ")
+        };
+
+        let lines = tools::ALL_TOOL_NAMES
+            .iter()
+            .map(|&tool_name| {
+                let cfg_enabled = tools::is_tool_enabled(tool_name, &self.config);
+                let turn_enabled = self.enable_tools
+                    && tools::is_tool_enabled_for_turn(tool_name, &self.config, active_skill_name);
+                let prov = self.config.tool_provenance(tool_name);
+
+                let (glyph, name_style, state_str, state_style, tag_str, tag_style) =
+                    if !cfg_enabled {
+                        (
+                            "✗ ",
+                            Style::default().fg(theme::STATUS_DISABLED),
+                            "OFF",
+                            Style::default().fg(theme::STATUS_DISABLED),
+                            prov.short_tag(),
+                            tool_prov_style(prov),
+                        )
+                    } else if !self.enable_tools {
+                        (
+                            "~ ",
+                            Style::default().fg(theme::CTX_USAGE_WARN),
+                            "^T",
+                            Style::default().fg(theme::CTX_USAGE_WARN),
+                            prov.short_tag(),
+                            tool_prov_style(prov),
+                        )
+                    } else if !turn_enabled {
+                        (
+                            "~ ",
+                            Style::default().fg(theme::CTX_USAGE_WARN),
+                            "@OFF",
+                            Style::default().fg(theme::CTX_USAGE_WARN),
+                            "[-@sk]",
+                            Style::default().fg(theme::CTX_USAGE_WARN),
+                        )
+                    } else {
+                        (
+                            "✓ ",
+                            Style::default().fg(theme::STATUS_ENABLED),
+                            "ON",
+                            Style::default()
+                                .fg(theme::STATUS_ENABLED)
+                                .add_modifier(Modifier::BOLD),
+                            prov.short_tag(),
+                            tool_prov_style(prov),
+                        )
+                    };
+
+                Line::from(vec![
+                    Span::styled(format!("{glyph}{tool_name:<18} "), name_style),
+                    Span::styled(format!("{state_str:<4} "), state_style),
+                    Span::styled(format!("{tag_str:>8}"), tag_style),
+                ])
+            })
+            .collect();
+
+        (title, lines)
+    }
+
+    fn build_sidebar_skill_lines(&self) -> (String, Vec<Line<'static>>) {
+        if self.config.skills.is_empty() {
+            return (
+                " Skills (0 loaded) ".to_string(),
+                vec![Line::from(Span::styled(
+                    "No skills loaded",
+                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
+                ))],
+            );
+        }
+
+        let active_skill_name = self.effective_sidebar_skill().map(|s| s.name.as_str());
+        let mut ready_count = 0usize;
+        let mut lines = Vec::with_capacity(self.config.skills.len());
+
+        for skill in &self.config.skills {
+            let missing = skills::missing_skill_tools(skill, &self.config);
+            let needs_tools = !skill.tools.is_empty() || !skill.hooks.is_empty();
+            let is_active = active_skill_name.is_some_and(|a| a.eq_ignore_ascii_case(&skill.name));
+
+            let (glyph, name_style, detail, state_style) = if !missing.is_empty() {
+                let d = if missing.len() == 1 && missing[0].len() <= 5 {
+                    format!("OFF no:{}", missing[0])
+                } else {
+                    format!("OFF no:{}t", missing.len())
+                };
+                (
+                    "✗ ",
+                    Style::default().fg(theme::STATUS_DISABLED),
+                    d,
+                    Style::default().fg(theme::STATUS_DISABLED),
+                )
+            } else if needs_tools && !self.enable_tools {
+                (
+                    "~ ",
+                    Style::default().fg(theme::CTX_USAGE_WARN),
+                    "^T  (muted)".to_string(),
+                    Style::default().fg(theme::CTX_USAGE_WARN),
+                )
+            } else {
+                ready_count += 1;
+                let t_cnt = skill.tools.len();
+                let h_cnt = skill.hooks.len();
+                let d = match (t_cnt, h_cnt) {
+                    (0, 0) => "ON  (prompt)".to_string(),
+                    (t, 0) => format!("ON  ({t}t)"),
+                    (0, h) => format!("ON  ({h}h)"),
+                    (t, h) => format!("ON  ({t}t,{h}h)"),
+                };
+                let style = if is_active {
+                    Style::default()
+                        .fg(theme::SELECTION_HIGHLIGHT)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::STATUS_ENABLED)
+                };
+                ("✓ ", style, d, style)
+            };
+
+            let (scope_tag, scope_style) = if skill.overrides_global {
+                (
+                    "[G→WS]",
+                    Style::default()
+                        .fg(theme::TAB_WORKSPACE_ACTIVE)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                match skill.scope {
+                    MemoryScope::Global => ("[G]", Style::default().fg(theme::TAB_GLOBAL_ACTIVE)),
+                    MemoryScope::Workspace => {
+                        ("[WS]", Style::default().fg(theme::TAB_WORKSPACE_ACTIVE))
+                    }
+                }
+            };
+
+            let trigger = truncate_str(&format!("@{}", skill.trigger()), 12);
+            lines.push(Line::from(vec![
+                Span::styled(format!("{glyph}{trigger:<12} "), name_style),
+                Span::styled(format!("{detail:<12} "), state_style),
+                Span::styled(format!("{scope_tag:>6}"), scope_style),
+            ]));
+        }
+
+        let title = format!(
+            " Skills ({ready_count}/{} ready) ",
+            self.config.skills.len()
+        );
+        (title, lines)
+    }
+
+    fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {
+        let (config_title, settings_text) = self.build_sidebar_config_lines();
+        let (tools_title, tool_lines) = self.build_sidebar_tool_lines();
+        let (skills_title, skill_lines) = self.build_sidebar_skill_lines();
+
+        let config_h = (settings_text.len() as u16 + 2).min(area.height.saturating_sub(9).max(5));
+        let skills_h = (skill_lines.len().clamp(1, 5) as u16) + 2;
+        let images_h = (self.attachments.len().clamp(1, 4) as u16) + 2;
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(config_h),
+                Constraint::Fill(1),
+                Constraint::Length(skills_h),
+                Constraint::Length(images_h),
+            ])
+            .split(area);
+
         f.render_widget(
-            Paragraph::new(settings_text)
-                .block(titled_block(" Config ").padding(Padding::uniform(1))),
+            Paragraph::new(settings_text).block(titled_block(config_title)),
             chunks[0],
+        );
+
+        let tools_inner_h = usize::from(chunks[1].height.saturating_sub(2)).max(1);
+        let max_tools_scroll = tool_lines.len().saturating_sub(tools_inner_h);
+        self.sidebar_scroll = self.sidebar_scroll.min(max_tools_scroll);
+        let visible_tools: Vec<Line<'static>> = tool_lines
+            .into_iter()
+            .skip(self.sidebar_scroll)
+            .take(tools_inner_h)
+            .collect();
+
+        f.render_widget(
+            Paragraph::new(visible_tools).block(titled_block(tools_title)),
+            chunks[1],
+        );
+        if max_tools_scroll > 0 {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"));
+            let mut sb_state = ScrollbarState::new(max_tools_scroll).position(self.sidebar_scroll);
+            f.render_stateful_widget(scrollbar, chunks[1], &mut sb_state);
+        }
+
+        f.render_widget(
+            Paragraph::new(skill_lines).block(titled_block(skills_title)),
+            chunks[2],
         );
 
         let items: Vec<ListItem> = if self.attachments.is_empty() {
@@ -607,11 +1109,11 @@ impl TuiApp {
                 .collect()
         };
         f.render_widget(
-            List::new(items).block(
-                titled_block(format!(" Images ({}) ", self.attachments.len()))
-                    .padding(Padding::uniform(1)),
-            ),
-            chunks[1],
+            List::new(items).block(titled_block(format!(
+                " Images ({}) ",
+                self.attachments.len()
+            ))),
+            chunks[3],
         );
     }
 

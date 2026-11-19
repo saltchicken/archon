@@ -230,6 +230,227 @@ impl Default for ScheduleConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConfigSource {
+    #[default]
+    Default,
+    Global,
+    Workspace,
+    /// Present in both Global and Workspace config files with different values (Workspace overwrote Global).
+    WorkspaceOverridesGlobal,
+    Env,
+    Cli,
+}
+
+impl ConfigSource {
+    pub fn short_tag(self) -> &'static str {
+        match self {
+            Self::Default => "Def",
+            Self::Global => "G",
+            Self::Workspace => "WS",
+            Self::WorkspaceOverridesGlobal => "G→WS",
+            Self::Env => "Env",
+            Self::Cli => "CLI",
+        }
+    }
+
+    pub fn overwrote_global(self) -> bool {
+        matches!(self, Self::WorkspaceOverridesGlobal)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProvenance {
+    /// Enabled by compiled defaults (no config file set `enabled_tools`).
+    DefaultEnabled,
+    /// Enabled by Global config (`~/.config/archon/config.toml`).
+    GlobalEnabled,
+    /// Enabled by Workspace config (when Global did not set `enabled_tools`).
+    WorkspaceEnabled,
+    /// Enabled in both Global and Workspace config.
+    GlobalAndWorkspaceEnabled,
+    /// Disabled in Global config, but re-enabled by Workspace config override.
+    WorkspaceAdded,
+    /// Disabled by Global config (and Workspace did not override `enabled_tools`).
+    GlobalDisabled,
+    /// Enabled in Global (or Default), but disabled/dropped by Workspace `enabled_tools` override.
+    WorkspaceRemoved,
+    /// Disabled in both Global and Workspace `enabled_tools`.
+    GlobalAndWorkspaceDisabled,
+    /// Disabled by CLI `--allowed-tools` flag.
+    CliDisabled,
+}
+
+impl ToolProvenance {
+    pub fn short_tag(self) -> &'static str {
+        match self {
+            Self::DefaultEnabled => "[Def]",
+            Self::GlobalEnabled => "[G]",
+            Self::WorkspaceEnabled => "[WS]",
+            Self::GlobalAndWorkspaceEnabled => "[G+WS]",
+            Self::WorkspaceAdded => "[+WS]",
+            Self::GlobalDisabled => "[-G]",
+            Self::WorkspaceRemoved => "[-WS]",
+            Self::GlobalAndWorkspaceDisabled => "[-G/WS]",
+            Self::CliDisabled => "[-CLI]",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfigProvenance {
+    pub has_global_config: bool,
+    pub has_workspace_config: bool,
+    pub global_enabled_tools: Option<Vec<String>>,
+    pub workspace_enabled_tools: Option<Vec<String>>,
+    pub cli_allowed_tools: Option<Vec<String>>,
+    pub default_model: ConfigSource,
+    pub enabled_tools: ConfigSource,
+    pub auto_approve: ConfigSource,
+    pub models: ConfigSource,
+    pub system_presets: ConfigSource,
+    pub ui: ConfigSource,
+    pub dotfiles: ConfigSource,
+    pub workspace_snapshot: ConfigSource,
+    /// Keys (`section.key` or top-level) set in both Global and Workspace `config.toml`
+    /// with different values (Workspace overwrote Global).
+    pub overwritten_keys: Vec<String>,
+}
+
+fn extract_toml_string_array(
+    table: Option<&toml::Table>,
+    section: &str,
+    key: &str,
+) -> Option<Vec<String>> {
+    let arr = table?.get(section)?.as_table()?.get(key)?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(toml::Value::as_str)
+            .map(|s| s.trim().to_string())
+            .collect(),
+    )
+}
+
+fn source_for_table_key(
+    global: Option<&toml::Table>,
+    ws: Option<&toml::Table>,
+    section: &str,
+    key: &str,
+) -> ConfigSource {
+    let g_val = global.and_then(|t| t.get(section)?.as_table()?.get(key));
+    let ws_val = ws.and_then(|t| t.get(section)?.as_table()?.get(key));
+    match (g_val, ws_val) {
+        (Some(gv), Some(wv)) => {
+            if gv != wv {
+                ConfigSource::WorkspaceOverridesGlobal
+            } else {
+                ConfigSource::Workspace
+            }
+        }
+        (None, Some(_)) => ConfigSource::Workspace,
+        (Some(_), None) => ConfigSource::Global,
+        (None, None) => ConfigSource::Default,
+    }
+}
+
+fn source_for_section(
+    global: Option<&toml::Table>,
+    ws: Option<&toml::Table>,
+    section: &str,
+) -> ConfigSource {
+    let g_val = global.and_then(|t| t.get(section));
+    let ws_val = ws.and_then(|t| t.get(section));
+    match (g_val, ws_val) {
+        (Some(toml::Value::Table(gt)), Some(toml::Value::Table(wt))) => {
+            let has_diff_override = wt.iter().any(|(k, wv)| {
+                !(section == "workspace_snapshot" && k == "file")
+                    && gt.get(k).is_some_and(|gv| gv != wv)
+            });
+            if has_diff_override {
+                ConfigSource::WorkspaceOverridesGlobal
+            } else if !wt.is_empty() {
+                ConfigSource::Workspace
+            } else {
+                ConfigSource::Global
+            }
+        }
+        (Some(gv), Some(wv)) => {
+            if gv != wv {
+                ConfigSource::WorkspaceOverridesGlobal
+            } else {
+                ConfigSource::Workspace
+            }
+        }
+        (None, Some(_)) => ConfigSource::Workspace,
+        (Some(_), None) => ConfigSource::Global,
+        (None, None) => ConfigSource::Default,
+    }
+}
+
+fn collect_overwritten_keys(global: Option<&toml::Table>, ws: Option<&toml::Table>) -> Vec<String> {
+    let (Some(g_table), Some(w_table)) = (global, ws) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (k, w_val) in w_table {
+        if matches!(k.as_str(), "workspace" | "schedules") {
+            continue;
+        }
+        let Some(g_val) = g_table.get(k) else {
+            continue;
+        };
+        match (g_val, w_val) {
+            (toml::Value::Table(g_sub), toml::Value::Table(w_sub)) => {
+                for (sub_k, w_sub_val) in w_sub {
+                    if k == "workspace_snapshot" && sub_k == "file" {
+                        continue;
+                    }
+                    if let Some(g_sub_val) = g_sub.get(sub_k)
+                        && g_sub_val != w_sub_val
+                    {
+                        out.push(format!("{k}.{sub_k}"));
+                    }
+                }
+            }
+            _ => {
+                if g_val != w_val {
+                    out.push(k.clone());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn build_provenance(
+    global_table: Option<&toml::Table>,
+    ws_table: Option<&toml::Table>,
+) -> ConfigProvenance {
+    ConfigProvenance {
+        has_global_config: global_table.is_some(),
+        has_workspace_config: ws_table.is_some(),
+        global_enabled_tools: extract_toml_string_array(global_table, "app", "enabled_tools"),
+        workspace_enabled_tools: extract_toml_string_array(ws_table, "app", "enabled_tools"),
+        cli_allowed_tools: None,
+        default_model: source_for_table_key(global_table, ws_table, "app", "default_model"),
+        enabled_tools: source_for_table_key(global_table, ws_table, "app", "enabled_tools"),
+        auto_approve: source_for_table_key(global_table, ws_table, "app", "auto_approve"),
+        models: source_for_section(global_table, ws_table, "models"),
+        system_presets: source_for_section(global_table, ws_table, "system_presets"),
+        ui: source_for_section(global_table, ws_table, "ui"),
+        dotfiles: source_for_section(global_table, ws_table, "dotfiles"),
+        workspace_snapshot: source_for_section(global_table, ws_table, "workspace_snapshot"),
+        overwritten_keys: collect_overwritten_keys(global_table, ws_table),
+    }
+}
+
+fn tool_list_contains(list: &[String], tool_name: &str) -> bool {
+    list.iter()
+        .map(|s| s.trim())
+        .any(|t| t == "*" || t == tool_name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -255,6 +476,8 @@ pub struct Config {
     pub workspace_skills_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(skip)]
+    pub provenance: ConfigProvenance,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,6 +692,7 @@ impl Default for Config {
             skills: Vec::new(),
             workspace_skills_dir: None,
             workspace: None,
+            provenance: ConfigProvenance::default(),
         }
     }
 }
@@ -652,7 +876,67 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
 }
 
 impl Config {
+    pub fn set_cli_model_override(&mut self) {
+        self.provenance.default_model = ConfigSource::Cli;
+    }
+
+    pub fn tool_provenance(&self, tool_name: &str) -> ToolProvenance {
+        let in_global = self
+            .provenance
+            .global_enabled_tools
+            .as_ref()
+            .is_none_or(|g| tool_list_contains(g, tool_name));
+        let pre_cli_enabled = match self.provenance.workspace_enabled_tools.as_ref() {
+            Some(ws) => tool_list_contains(ws, tool_name),
+            None => in_global,
+        };
+        if let Some(ref cli) = self.provenance.cli_allowed_tools
+            && pre_cli_enabled
+            && !tool_list_contains(cli, tool_name)
+        {
+            return ToolProvenance::CliDisabled;
+        }
+        match self.provenance.workspace_enabled_tools.as_ref() {
+            Some(ws) => {
+                let in_ws = tool_list_contains(ws, tool_name);
+                match (in_global, in_ws) {
+                    (true, true) => {
+                        if self.provenance.global_enabled_tools.is_some() {
+                            ToolProvenance::GlobalAndWorkspaceEnabled
+                        } else {
+                            ToolProvenance::WorkspaceEnabled
+                        }
+                    }
+                    (false, true) => ToolProvenance::WorkspaceAdded,
+                    (true, false) => ToolProvenance::WorkspaceRemoved,
+                    (false, false) => ToolProvenance::GlobalAndWorkspaceDisabled,
+                }
+            }
+            None => {
+                if self.provenance.global_enabled_tools.is_some() {
+                    if in_global {
+                        ToolProvenance::GlobalEnabled
+                    } else {
+                        ToolProvenance::GlobalDisabled
+                    }
+                } else if in_global {
+                    ToolProvenance::DefaultEnabled
+                } else {
+                    ToolProvenance::GlobalDisabled
+                }
+            }
+        }
+    }
+
     pub fn restrict_enabled_tools(&mut self, allowed: &[String]) {
+        self.provenance.cli_allowed_tools = Some(
+            allowed
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        );
+        self.provenance.enabled_tools = ConfigSource::Cli;
         let allow_all = allowed.iter().map(|s| s.trim()).any(|t| t == "*");
         if allow_all {
             return;
@@ -778,6 +1062,14 @@ impl Config {
         let ws_skills_dir = ws_dir.join("skills");
         let (global_memory, workspace_memory) = load_memories(Some(ws_dir));
 
+        let global_table = fs::read_to_string(base_path)
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Table>(&s).ok());
+        let ws_table = fs::read_to_string(&local_config_path)
+            .ok()
+            .and_then(|s| toml::from_str::<toml::Table>(&s).ok());
+        let provenance = build_provenance(global_table.as_ref(), ws_table.as_ref());
+
         let base_figment =
             Figment::from(Serialized::defaults(Self::default())).merge(Toml::file(base_path));
         let (global_files, global_schedules) = base_figment
@@ -832,11 +1124,100 @@ impl Config {
 
         cfg.global_memory = global_memory;
         cfg.workspace_memory = workspace_memory;
+        cfg.provenance = provenance;
         cfg.skills = crate::core::skills::discover_skills(
             &cfg.app.skills_dir,
             Some(ws_skills_dir.as_path()),
         );
         cfg.workspace_skills_dir = Some(ws_skills_dir);
         (cfg, err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provenance_tracks_global_and_workspace_overrides() {
+        let global_toml: toml::Table = toml::from_str(
+            r#"
+            [app]
+            default_model = "qwen3.8:27b"
+            enabled_tools = ["cargo", "git"]
+            auto_approve = ["cargo:check"]
+
+            [workspace_snapshot]
+            git_root = true
+            include = ["**/*"]
+            exclude = ["target/**"]
+
+            [dotfiles]
+            allowed_dirs = ["fish", "kitty"]
+            "#,
+        )
+        .unwrap();
+
+        let ws_toml: toml::Table = toml::from_str(
+            r#"
+            workspace = "/tmp/demo"
+
+            [app]
+            enabled_tools = ["cargo", "read_file"]
+
+            [workspace_snapshot]
+            git_root = true
+            include = ["**/*.rs"]
+            file = ["README.md"]
+            "#,
+        )
+        .unwrap();
+
+        let prov = build_provenance(Some(&global_toml), Some(&ws_toml));
+        assert!(prov.has_global_config);
+        assert!(prov.has_workspace_config);
+        assert_eq!(prov.default_model, ConfigSource::Global);
+        assert_eq!(prov.enabled_tools, ConfigSource::WorkspaceOverridesGlobal);
+        assert!(prov.enabled_tools.overwrote_global());
+        assert_eq!(prov.auto_approve, ConfigSource::Global);
+        assert_eq!(prov.dotfiles, ConfigSource::Global);
+        assert_eq!(
+            prov.workspace_snapshot,
+            ConfigSource::WorkspaceOverridesGlobal
+        );
+        assert_eq!(
+            prov.overwritten_keys,
+            vec![
+                "app.enabled_tools".to_string(),
+                "workspace_snapshot.include".to_string(),
+            ]
+        );
+
+        let mut cfg = Config {
+            provenance: prov,
+            ..Config::default()
+        };
+        cfg.app.enabled_tools = vec!["cargo".into(), "read_file".into()];
+
+        assert_eq!(
+            cfg.tool_provenance("cargo"),
+            ToolProvenance::GlobalAndWorkspaceEnabled
+        );
+        assert_eq!(
+            cfg.tool_provenance("read_file"),
+            ToolProvenance::WorkspaceAdded
+        );
+        assert_eq!(cfg.tool_provenance("git"), ToolProvenance::WorkspaceRemoved);
+        assert_eq!(
+            cfg.tool_provenance("dotfiles"),
+            ToolProvenance::GlobalAndWorkspaceDisabled
+        );
+
+        cfg.restrict_enabled_tools(&["cargo".to_string()]);
+        assert_eq!(cfg.provenance.enabled_tools, ConfigSource::Cli);
+        assert_eq!(
+            cfg.tool_provenance("read_file"),
+            ToolProvenance::CliDisabled
+        );
     }
 }

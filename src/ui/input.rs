@@ -352,6 +352,18 @@ impl TuiApp {
         }
 
         let pos = Position::new(x, y);
+        if self.sidebar_expanded && self.sidebar_area.contains(pos) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1);
+                }
+                _ => {}
+            }
+            return;
+        }
         if !self.chat_area.contains(pos) {
             return;
         }
@@ -773,6 +785,7 @@ impl TuiApp {
                     || self.active_tool_status.is_some()
                     || !self.queued_messages.is_empty() =>
             {
+                self.active_turn_skill = None;
                 let _ = self.cmd_tx.send(EngineCommand::CancelStream);
             }
             KeyCode::PageUp => self.scroll_chat(-page_step),

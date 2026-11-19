@@ -341,6 +341,7 @@ impl TuiApp {
             raw_prompt.clone()
         };
 
+        self.active_turn_skill = turn.active_skill.clone();
         self.record_prompt_and_clear(&raw_prompt);
         self.scroll_to_bottom();
         let _ = self.cmd_tx.send(EngineCommand::SendPrompt { prompt, turn });

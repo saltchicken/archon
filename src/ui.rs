@@ -233,6 +233,10 @@ pub struct TuiApp {
     pub(super) hovered_header_msg: Option<usize>,
 
     pub(super) sidebar_expanded: bool,
+    pub(super) sidebar_area: Rect,
+    pub(super) sidebar_scroll: usize,
+    pub(super) active_turn_skill: Option<String>,
+    pub(super) session_auto_approve_count: usize,
     pub(super) term_focused: bool,
     pub(super) cursor_blink_on: bool,
 
@@ -379,6 +383,10 @@ impl TuiApp {
             last_mouse_pos: None,
             hovered_header_msg: None,
             sidebar_expanded: false,
+            sidebar_area: Rect::default(),
+            sidebar_scroll: 0,
+            active_turn_skill: None,
+            session_auto_approve_count: 0,
             term_focused: true,
             cursor_blink_on: true,
             modal: ActiveModal::None,
@@ -616,23 +624,6 @@ impl TuiApp {
             "Custom"
         } else {
             preset_label(&self.config.system_presets, self.sys_preset_idx)
-        }
-    }
-
-    pub(super) fn current_memory_label(&self) -> String {
-        let effective = self.config.effective_memory();
-        if !effective.enabled {
-            let stored = self.config.global_memory.count() + self.config.workspace_memory.count();
-            format!("OFF ({stored})")
-        } else {
-            let count = effective.count();
-            if count == 0 {
-                "Empty".into()
-            } else if count == 1 {
-                "1 item (ON)".into()
-            } else {
-                format!("{count} items (ON)")
-            }
         }
     }
 }

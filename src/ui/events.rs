@@ -52,15 +52,21 @@ impl TuiApp {
             EngineEvent::StreamDone {
                 prompt_tokens,
                 eval_tokens,
+                tool_calls,
                 ..
             } => {
+                if tool_calls.is_empty() {
+                    self.active_turn_skill = None;
+                }
                 self.finish_stream();
                 self.used_tokens = prompt_tokens + eval_tokens;
             }
             EngineEvent::StreamError(err) => {
+                self.active_turn_skill = None;
                 self.on_stream_error(err);
             }
             EngineEvent::Error(err) => {
+                self.active_turn_skill = None;
                 self.push_error_message(err);
             }
             EngineEvent::ToolStarted {
@@ -192,6 +198,9 @@ impl TuiApp {
             }
         }
         let session_changed = self.session_id != session_id;
+        if session_changed {
+            self.session_auto_approve_count = 0;
+        }
         self.session_id = session_id;
         self.session_is_fork = is_fork;
         self.session_is_pinned = is_pinned;
@@ -205,6 +214,7 @@ impl TuiApp {
                 .any(|(old, new)| old != new);
 
         let prev_msg_count = if is_reset_or_reload {
+            self.active_turn_skill = None;
             self.msg_states.clear();
             self.styled_messages.clear();
             self.copied_code_flash = None;

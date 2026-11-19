@@ -224,6 +224,9 @@ impl TuiApp {
 
     pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {
         if self.pending_tool.take().is_some() {
+            if approved && always_approve {
+                self.session_auto_approve_count += 1;
+            }
             self.modal = ActiveModal::None;
             self.follow_tail = true;
             let _ = self.cmd_tx.send(EngineCommand::ResolveTool {

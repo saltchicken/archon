@@ -1,6 +1,6 @@
 use crate::{
     core::{
-        config::{Config, expand_tilde, format_tilde_path},
+        config::{Config, MemoryScope, expand_tilde, format_tilde_path},
         session::ChatMessage,
     },
     tools::{ToolCall, ToolFunction},
@@ -60,6 +60,8 @@ pub struct SkillDefinition {
     pub hooks: Vec<SkillHook>,
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
+    pub scope: MemoryScope,
+    pub overrides_global: bool,
 }
 
 impl SkillDefinition {
@@ -177,6 +179,8 @@ pub(crate) fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDe
         hooks,
         prompt,
         dir_path: Some(dir_path.to_path_buf()),
+        scope: MemoryScope::Global,
+        overrides_global: false,
     })
 }
 
@@ -221,11 +225,13 @@ pub fn discover_skills(
     workspace_skills_dir: Option<&Path>,
 ) -> Vec<SkillDefinition> {
     let mut merged = Vec::new();
-    let upsert = |list: &mut Vec<SkillDefinition>, incoming: SkillDefinition| {
+    let upsert = |list: &mut Vec<SkillDefinition>, mut incoming: SkillDefinition| {
         if let Some(existing) = list
             .iter_mut()
             .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
         {
+            incoming.overrides_global =
+                existing.scope == MemoryScope::Global && incoming.scope == MemoryScope::Workspace;
             *existing = incoming;
         } else {
             list.push(incoming);
@@ -233,12 +239,14 @@ pub fn discover_skills(
     };
 
     let global_dir = expand_tilde(skills_dir);
-    for skill in scan_skills_dir(&global_dir) {
+    for mut skill in scan_skills_dir(&global_dir) {
+        skill.scope = MemoryScope::Global;
         upsert(&mut merged, skill);
     }
 
     if let Some(ws_dir) = workspace_skills_dir {
-        for skill in scan_skills_dir(ws_dir) {
+        for mut skill in scan_skills_dir(ws_dir) {
+            skill.scope = MemoryScope::Workspace;
             upsert(&mut merged, skill);
         }
     }
@@ -466,4 +474,58 @@ pub fn compose_system_prompt(
     }
 
     sections.join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_skills_tracks_scope_and_global_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global_dir = tmp.path().join("global_skills");
+        let ws_dir = tmp.path().join("ws_skills");
+
+        fs::create_dir_all(global_dir.join("coder")).unwrap();
+        fs::create_dir_all(global_dir.join("commit")).unwrap();
+        fs::create_dir_all(ws_dir.join("coder")).unwrap();
+        fs::create_dir_all(ws_dir.join("local-only")).unwrap();
+
+        fs::write(
+            global_dir.join("coder/SKILL.md"),
+            "+++\nname = \"coder\"\ncommand = \"coder\"\n+++\nGlobal coder",
+        )
+        .unwrap();
+        fs::write(
+            global_dir.join("commit/SKILL.md"),
+            "+++\nname = \"commit\"\ncommand = \"commit\"\n+++\nGlobal commit",
+        )
+        .unwrap();
+        fs::write(
+            ws_dir.join("coder/SKILL.md"),
+            "+++\nname = \"coder\"\ncommand = \"coder\"\n+++\nWorkspace coder",
+        )
+        .unwrap();
+        fs::write(
+            ws_dir.join("local-only/SKILL.md"),
+            "+++\nname = \"local-only\"\n+++\nWorkspace local",
+        )
+        .unwrap();
+
+        let skills = discover_skills(&global_dir.to_string_lossy(), Some(&ws_dir));
+        assert_eq!(skills.len(), 3);
+
+        let coder = skills.iter().find(|s| s.name == "coder").unwrap();
+        assert_eq!(coder.scope, MemoryScope::Workspace);
+        assert!(coder.overrides_global);
+        assert_eq!(coder.prompt, "Workspace coder");
+
+        let commit = skills.iter().find(|s| s.name == "commit").unwrap();
+        assert_eq!(commit.scope, MemoryScope::Global);
+        assert!(!commit.overrides_global);
+
+        let local = skills.iter().find(|s| s.name == "local-only").unwrap();
+        assert_eq!(local.scope, MemoryScope::Workspace);
+        assert!(!local.overrides_global);
+    }
 }

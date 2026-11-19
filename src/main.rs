@@ -64,6 +64,9 @@ async fn main() -> Result<()> {
     if let Some(ref allowed) = cli_args.allowed_tools {
         config.restrict_enabled_tools(allowed);
     }
+    if cli_args.model.is_some() {
+        config.set_cli_model_override();
+    }
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
