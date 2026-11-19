@@ -10,21 +10,21 @@ pub struct Tool;
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum CargoAction {
-    /// Check the package and all targets for compilation errors (`cargo check --locked --all-targets`).
+    /// Check the package and all targets for compilation errors (`cargo check --all-targets`).
     Check,
-    /// Run Clippy lints without modifying code (`cargo clippy --locked --all-targets`).
+    /// Run Clippy lints without modifying code (`cargo clippy --all-targets`).
     Clippy,
     /// Verify code formatting without modifying files (`cargo fmt --all --check`).
     FmtCheck,
     /// Format all workspace Rust code in-place (`cargo fmt --all`).
     Fmt,
-    /// Build package documentation without dependencies (`cargo doc --locked --no-deps`) to verify doc comments and intra-doc links.
+    /// Build package documentation without dependencies (`cargo doc --no-deps`) to verify doc comments and intra-doc links.
     Doc,
-    /// Inspect workspace packages and resolved metadata (`cargo metadata --locked --no-deps --format-version 1`).
+    /// Inspect workspace packages and resolved metadata (`cargo metadata --no-deps --format-version 1`).
     Metadata,
-    /// Display information about a package in the registry or dependency graph (`cargo info --locked <package>`).
+    /// Display information about a package in the registry or dependency graph (`cargo info <package>`).
     Info,
-    /// Display the dependency tree (`cargo tree --locked`).
+    /// Display the dependency tree (`cargo tree`).
     Tree,
 }
 
@@ -63,13 +63,13 @@ impl AsyncTool for Tool {
         let (base_flags, allow_targets, allow_bin, empty_msg): (&[&str], bool, bool, &str) =
             match args.action {
                 CargoAction::Check => (
-                    &["check", "--locked", "--all-targets", "--color", "never"],
+                    &["check", "--all-targets", "--color", "never"],
                     true,
                     true,
                     "cargo check passed with no warnings or errors.",
                 ),
                 CargoAction::Clippy => (
-                    &["clippy", "--locked", "--all-targets", "--color", "never"],
+                    &["clippy", "--all-targets", "--color", "never"],
                     true,
                     true,
                     "cargo clippy passed with no warnings or errors.",
@@ -87,25 +87,25 @@ impl AsyncTool for Tool {
                     "Formatted all workspace packages.",
                 ),
                 CargoAction::Doc => (
-                    &["doc", "--locked", "--no-deps", "--color", "never"],
+                    &["doc", "--no-deps", "--color", "never"],
                     true,
                     false,
                     "Documentation built successfully with no warnings or errors.",
                 ),
                 CargoAction::Metadata => (
-                    &["metadata", "--locked", "--no-deps", "--format-version", "1"],
+                    &["metadata", "--no-deps", "--format-version", "1"],
                     false,
                     false,
                     "No metadata output.",
                 ),
                 CargoAction::Info => (
-                    &["info", "--locked", "--color", "never"],
+                    &["info", "--color", "never"],
                     false,
                     false,
                     "No package information output.",
                 ),
                 CargoAction::Tree => (
-                    &["tree", "--locked", "--color", "never"],
+                    &["tree", "--color", "never"],
                     true,
                     false,
                     "No dependency tree output.",

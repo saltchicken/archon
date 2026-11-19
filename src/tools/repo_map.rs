@@ -87,6 +87,7 @@ enum SupportedLang {
     Tsx,
     Python,
     Go,
+    Lua,
 }
 
 impl SupportedLang {
@@ -97,6 +98,7 @@ impl SupportedLang {
             "tsx" | "jsx" => Some(Self::Tsx),
             "py" => Some(Self::Python),
             "go" => Some(Self::Go),
+            "lua" => Some(Self::Lua),
             _ => None,
         }
     }
@@ -108,6 +110,7 @@ impl SupportedLang {
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::Go => tree_sitter_go::LANGUAGE.into(),
+            Self::Lua => tree_sitter_lua::LANGUAGE.into(),
         }
     }
 
@@ -118,6 +121,7 @@ impl SupportedLang {
             Self::Tsx => "tsx",
             Self::Python => "py",
             Self::Go => "go",
+            Self::Lua => "lua",
         }
     }
 }
@@ -244,11 +248,13 @@ fn extract_leading_docs(node: Node<'_>, source: &str) -> Option<String> {
         }
 
         for line in source[sib.byte_range()].lines().rev().map(str::trim) {
-            let cleaned = ["///", "//!", "//", "#", "/**", "/*", "*"]
-                .iter()
-                .find_map(|p| line.strip_prefix(p))
-                .map(|s| s.trim_end_matches("*/").trim())
-                .filter(|c| !c.is_empty());
+            let cleaned = [
+                "///", "//!", "//", "---", "--[[", "--", "#", "/**", "/*", "*",
+            ]
+            .iter()
+            .find_map(|p| line.strip_prefix(p))
+            .map(|s| s.trim_end_matches("*/").trim_end_matches("]]").trim())
+            .filter(|c| !c.is_empty() && !c.starts_with('@'));
             if let Some(c) = cleaned {
                 docs.push(c.to_string());
             }
@@ -281,7 +287,57 @@ fn extract_python_docstring(node: Node<'_>, source: &str) -> Option<String> {
     None
 }
 
+fn find_lua_assigned_function(node: Node<'_>) -> Option<Node<'_>> {
+    let assign = if node.kind() == "assignment_statement" {
+        node
+    } else {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .find(|c| c.kind() == "assignment_statement")?
+    };
+    let mut cursor = assign.walk();
+    let expr_list = assign
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "expression_list")?;
+    let mut expr_cursor = expr_list.walk();
+    expr_list
+        .named_children(&mut expr_cursor)
+        .find(|c| c.kind() == "function_definition")
+}
+
 fn find_body_start_byte(node: Node<'_>, lang: SupportedLang) -> Option<usize> {
+    if lang == SupportedLang::Lua {
+        if let Some(params) = node
+            .child_by_field_name("parameters")
+            .or_else(|| find_lua_assigned_function(node)?.child_by_field_name("parameters"))
+        {
+            return Some(params.end_byte());
+        }
+        let assign = if node.kind() == "assignment_statement" {
+            Some(node)
+        } else {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .find(|c| c.kind() == "assignment_statement")
+        };
+        if let Some(assign) = assign {
+            let mut cursor = assign.walk();
+            if let Some(expr_list) = assign
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "expression_list")
+            {
+                let mut expr_cursor = expr_list.walk();
+                if let Some(table) = expr_list
+                    .named_children(&mut expr_cursor)
+                    .find(|c| c.kind() == "table_constructor")
+                    && table.end_position().row > table.start_position().row
+                {
+                    return Some(table.start_byte());
+                }
+            }
+        }
+    }
+
     let is_short_rust_adt = lang == SupportedLang::Rust
         && matches!(node.kind(), "struct_item" | "enum_item")
         && node
@@ -391,6 +447,31 @@ fn extract_node_name(node: Node<'_>, source: &str, lang: SupportedLang) -> Optio
             .map(|n| source[n.byte_range()].trim().to_string());
     }
 
+    if lang == SupportedLang::Lua
+        && matches!(node.kind(), "variable_declaration" | "assignment_statement")
+    {
+        let var_list = if node.kind() == "assignment_statement" {
+            node.named_children(&mut cursor)
+                .find(|c| c.kind() == "variable_list")
+        } else {
+            node.named_children(&mut cursor).find_map(|c| {
+                if c.kind() == "variable_list" {
+                    Some(c)
+                } else if c.kind() == "assignment_statement" {
+                    let mut ac = c.walk();
+                    c.named_children(&mut ac)
+                        .find(|sub| sub.kind() == "variable_list")
+                } else {
+                    None
+                }
+            })
+        };
+        return var_list
+            .and_then(|vl| vl.child_by_field_name("name").or_else(|| vl.named_child(0)))
+            .map(|n| collapse_whitespace(source[n.byte_range()].trim()))
+            .filter(|s| !s.is_empty());
+    }
+
     None
 }
 
@@ -441,6 +522,28 @@ fn classify_symbol_node(node: Node<'_>, lang: SupportedLang) -> Option<(&'static
             "method_declaration" => Some(("method", false)),
             "type_declaration" => Some(("type", false)),
             "const_declaration" => Some(("const", false)),
+            _ => None,
+        },
+        SupportedLang::Lua => match k {
+            "function_declaration" => {
+                let is_method = node
+                    .child_by_field_name("name")
+                    .is_some_and(|n| n.kind() == "method_index_expression");
+                Some((if is_method { "method" } else { "fn" }, false))
+            }
+            "variable_declaration" if node.parent().is_some_and(|p| p.kind() == "chunk") => {
+                if find_lua_assigned_function(node).is_some() {
+                    Some(("fn", false))
+                } else {
+                    Some(("local", false))
+                }
+            }
+            "assignment_statement"
+                if node.parent().is_some_and(|p| p.kind() == "chunk")
+                    && find_lua_assigned_function(node).is_some() =>
+            {
+                Some(("fn", false))
+            }
             _ => None,
         },
     }
@@ -632,7 +735,9 @@ fn clean_def_symbol_key(raw_name: &str) -> &str {
     let base = raw_name
         .rsplit_once(" for ")
         .map_or(raw_name, |(_, rhs)| rhs);
-    base.split('<').next().unwrap_or(base).trim()
+    let base = base.split('<').next().unwrap_or(base).trim();
+    base.rsplit_once(['.', ':'])
+        .map_or(base, |(_, rhs)| rhs.trim())
 }
 
 fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String]) {
@@ -678,9 +783,16 @@ fn compute_pagerank_and_scores(files: &mut [ParsedFile], focus_terms: &[String])
 
     for (i, file) in files.iter().enumerate() {
         let p = file.display_path.as_str();
-        if ["main.rs", "lib.rs", "mod.rs", "index.ts", "__init__.py"]
-            .iter()
-            .any(|s| p.ends_with(s))
+        if [
+            "main.rs",
+            "lib.rs",
+            "mod.rs",
+            "index.ts",
+            "__init__.py",
+            "init.lua",
+        ]
+        .iter()
+        .any(|s| p.ends_with(s))
         {
             personalization[i] += 0.5;
         }
@@ -764,10 +876,12 @@ fn parse_symbol_query(raw: &str) -> (Option<String>, String) {
     if let Some((parent, leaf)) = trimmed
         .rsplit_once("::")
         .or_else(|| trimmed.rsplit_once('.'))
+        .or_else(|| trimmed.rsplit_once(':'))
     {
         let p = parent
             .rsplit_once("::")
             .or_else(|| parent.rsplit_once('.'))
+            .or_else(|| parent.rsplit_once(':'))
             .map_or(parent, |(_, rhs)| rhs)
             .trim();
         (
@@ -831,7 +945,9 @@ fn matches_symbol_name(
         parent_scope.is_some_and(|actual| {
             clean_def_symbol_key(actual).eq_ignore_ascii_case(req_parent)
                 || actual.eq_ignore_ascii_case(req_parent)
-        })
+        }) || def_name
+            .rsplit_once(['.', ':'])
+            .is_some_and(|(prefix, _)| prefix.trim().eq_ignore_ascii_case(req_parent))
     })
 }
 
@@ -1229,7 +1345,7 @@ fn execute_map(
 
     if parsed_files.is_empty() {
         return Ok(
-            "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
+            "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go, .lua) found in scope."
                 .into(),
         );
     }
@@ -1523,14 +1639,14 @@ fn execute_references(
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "repo_map";
-    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, and Go. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly.";
+    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, Go, and Lua. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly.";
     type Args = RepoMapArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let candidate_files = collect_candidate_files(&args, ctx)?;
         if candidate_files.is_empty() {
             return Ok(
-                "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go) found in scope."
+                "No supported source files (.rs, .ts, .tsx, .js, .jsx, .py, .go, .lua) found in scope."
                     .into(),
             );
         }
@@ -1545,5 +1661,133 @@ impl BlockingTool for Tool {
                 execute_references(&args, candidate_files, snapshot, ctx.max_output_size)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lua_map_definition_and_references_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+
+        let core_lua = root.join("core.lua");
+        let init_lua = root.join("init.lua");
+
+        fs::write(
+            &core_lua,
+            r#"local M = {}
+
+--- Initialize the core module with options
+--- @param opts table
+function M.setup(opts)
+    return opts
+end
+
+function M:run_action(name)
+    return M.setup({ action = name })
+end
+
+M.assign_fn = function(x, y)
+    return x + y
+end
+
+local helper = function(val)
+    return M.assign_fn(val, 1)
+end
+
+return M
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            &init_lua,
+            r#"local core = require("core")
+
+local function bootstrap()
+    core.setup({ debug = true })
+    core:run_action("start")
+end
+
+bootstrap()
+"#,
+        )
+        .unwrap();
+
+        let candidates = vec![
+            (core_lua.clone(), "core.lua".into(), SupportedLang::Lua),
+            (init_lua.clone(), "init.lua".into(), SupportedLang::Lua),
+        ];
+        let settings = WorkspaceSnapshotSettings::default();
+
+        // 1. Test `map`
+        let map_args = RepoMapArgs {
+            action: RepoMapAction::Map,
+            symbol: String::new(),
+            focus_symbols: Vec::new(),
+            crate_name: String::new(),
+            target_path: String::new(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            include_docs: true,
+            max_tokens: Some(4000),
+            max_results: None,
+        };
+        let map_out = execute_map(map_args, candidates.clone(), &settings, 65536).unwrap();
+        assert!(map_out.contains("```lua"));
+        assert!(map_out.contains("/// Initialize the core module with options"));
+        assert!(map_out.contains("function M.setup(opts)"));
+        assert!(map_out.contains("function M:run_action(name)"));
+        assert!(map_out.contains("M.assign_fn = function(x, y)"));
+        assert!(map_out.contains("local helper = function(val)"));
+        assert!(map_out.contains("local function bootstrap()"));
+
+        // 2. Test `definition` with both qualified (`M.setup`, `M:run_action`) and bare (`setup`) names
+        for query in [
+            "setup",
+            "M.setup",
+            "M:run_action",
+            "M.assign_fn",
+            "bootstrap",
+        ] {
+            let def_args = RepoMapArgs {
+                action: RepoMapAction::Definition,
+                symbol: query.into(),
+                focus_symbols: Vec::new(),
+                crate_name: String::new(),
+                target_path: String::new(),
+                include: Vec::new(),
+                exclude: Vec::new(),
+                include_docs: true,
+                max_tokens: None,
+                max_results: None,
+            };
+            let def_out =
+                execute_definition(&def_args, candidates.clone(), &settings, 65536).unwrap();
+            assert!(
+                def_out.contains("# AST Definitions for"),
+                "Expected definition for {query}, got: {def_out}"
+            );
+        }
+
+        // 3. Test `references` and enclosing scope detection
+        let ref_args = RepoMapArgs {
+            action: RepoMapAction::References,
+            symbol: "M.setup".into(),
+            focus_symbols: Vec::new(),
+            crate_name: String::new(),
+            target_path: String::new(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            include_docs: true,
+            max_tokens: None,
+            max_results: None,
+        };
+        let ref_out = execute_references(&ref_args, candidates, &settings, 65536).unwrap();
+        assert!(ref_out.contains("[method M:run_action]"));
+        assert!(ref_out.contains("[fn bootstrap]"));
     }
 }

@@ -38,6 +38,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.27.2"
 tree-sitter-go = "0.25"
+tree-sitter-lua = "0.5"
 tree-sitter-python = "0.25"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23"
