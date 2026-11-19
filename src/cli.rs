@@ -40,6 +40,7 @@ pub struct CliArgs {
     pub skill: Option<String>,
     pub session_id: Option<String>,
     pub images: Vec<PathBuf>,
+    pub allowed_tools: Option<Vec<String>>,
     pub no_tools: bool,
     pub no_save: bool,
     pub auto_approve_all: bool,
@@ -103,6 +104,23 @@ impl CliArgs {
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
                     cli.images.push(PathBuf::from(p));
+                }
+                "--allowed-tools" | "--tools" => {
+                    let raw = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    let list = cli.allowed_tools.get_or_insert_with(Vec::new);
+                    for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        if item != "*" && !crate::tools::ALL_TOOL_NAMES.contains(&item) {
+                            bail!(
+                                "Unknown tool '{item}' in {arg}. Valid tools: {}",
+                                crate::tools::ALL_TOOL_NAMES.join(", ")
+                            );
+                        }
+                        if !list.iter().any(|existing| existing == item) {
+                            list.push(item.to_string());
+                        }
+                    }
                 }
                 "--no-tools" => cli.no_tools = true,
                 "--no-save" | "--ephemeral" => cli.no_save = true,
@@ -245,6 +263,7 @@ impl CliArgs {
                --session <ID>          Resume an existing session ID\n  \
                -i, --image <PATH>      Attach an image file (repeatable)\n  \
                -y, --yes               Auto-approve all tool executions in headless mode\n  \
+               --allowed-tools <LIST>  Restrict enabled tools to comma-separated list\n  \
                --no-tools              Disable tool calls\n  \
                --no-save               Do not persist the session to archon.db\n  \
                --thoughts              Stream model thinking to stderr\n  \

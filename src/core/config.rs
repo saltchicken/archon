@@ -206,6 +206,8 @@ pub struct ScheduleConfig {
     pub system_prompt: Option<String>,
     pub auto_approve: bool,
     pub no_tools: bool,
+    #[serde(alias = "allowed_tools", alias = "tools")]
+    pub enabled_tools: Option<Vec<String>>,
     pub save_session: bool,
 }
 
@@ -222,6 +224,7 @@ impl Default for ScheduleConfig {
             system_prompt: None,
             auto_approve: false,
             no_tools: false,
+            enabled_tools: None,
             save_session: false,
         }
     }
@@ -649,6 +652,31 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
 }
 
 impl Config {
+    pub fn restrict_enabled_tools(&mut self, allowed: &[String]) {
+        let allow_all = allowed.iter().map(|s| s.trim()).any(|t| t == "*");
+        if allow_all {
+            return;
+        }
+        let had_wildcard = self
+            .app
+            .enabled_tools
+            .iter()
+            .map(|s| s.trim())
+            .any(|t| t == "*");
+        if had_wildcard {
+            self.app.enabled_tools = allowed
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        } else {
+            self.app.enabled_tools.retain(|tool| {
+                let t = tool.trim();
+                allowed.iter().map(|a| a.trim()).any(|a| a == t)
+            });
+        }
+    }
+
     pub fn scoped_memory(&self, scope: MemoryScope) -> &Memory {
         match scope {
             MemoryScope::Global => &self.global_memory,

@@ -171,6 +171,18 @@ fn render_service(
     }
     if sched.no_tools {
         args.push("--no-tools".to_string());
+    } else if let Some(ref tools) = sched.enabled_tools {
+        let cleaned: Vec<&str> = tools
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if cleaned.is_empty() {
+            args.push("--no-tools".to_string());
+        } else {
+            args.push("--allowed-tools".to_string());
+            args.push(quote_systemd_arg(&cleaned.join(",")));
+        }
     }
     if !sched.save_session {
         args.push("--no-save".to_string());
@@ -288,6 +300,16 @@ fn sync_schedules(config: &Config, global: bool) -> Result<()> {
         if sched.prompt.trim().is_empty() {
             bail!("Schedule '{name}' is missing `prompt`.");
         }
+        if let Some(ref tools) = sched.enabled_tools {
+            for t in tools.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if t != "*" && !crate::tools::ALL_TOOL_NAMES.contains(&t) {
+                    bail!(
+                        "Schedule '{name}' specifies unknown tool '{t}' in `enabled_tools`. Valid tools: {}",
+                        crate::tools::ALL_TOOL_NAMES.join(", ")
+                    );
+                }
+            }
+        }
         validate_on_calendar(cal)?;
 
         let base = unit_base_name(&scope, name);
@@ -378,9 +400,25 @@ fn list_schedules(config: &Config, global: bool) -> Result<()> {
             } else {
                 "no-save"
             };
+            let tools_info = if sched.no_tools {
+                "no-tools".to_string()
+            } else if let Some(ref tools) = sched.enabled_tools {
+                let cleaned: Vec<&str> = tools
+                    .iter()
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if cleaned.is_empty() {
+                    "no-tools".to_string()
+                } else {
+                    format!("tools: [{}]", cleaned.join(", "))
+                }
+            } else {
+                "tools: default".to_string()
+            };
             println!(
-                "  - {} [{}] | on_calendar: {} | skill: {} | {}",
-                sched.name, state, sched.on_calendar, skill, save
+                "  - {} [{}] | on_calendar: {} | skill: {} | {} | {}",
+                sched.name, state, sched.on_calendar, skill, tools_info, save
             );
         }
     }
@@ -492,6 +530,7 @@ mod tests {
             system_prompt: None,
             auto_approve: true,
             no_tools: false,
+            enabled_tools: Some(vec!["read_file".to_string(), "search".to_string()]),
             save_session: false,
         };
 
@@ -504,7 +543,7 @@ mod tests {
         assert!(service.contains("WorkingDirectory=/home/user/project\n"));
         assert!(!service.contains("WorkingDirectory=\""));
         assert!(service.contains(
-            "ExecStart=\"/usr/bin/archon\" --skill \"review\" --model \"gemini-2.5-pro\" -y --no-save -p \"Review $$BRANCH (100%%)\""
+            "ExecStart=\"/usr/bin/archon\" --skill \"review\" --model \"gemini-2.5-pro\" -y --allowed-tools \"read_file,search\" --no-save -p \"Review $$BRANCH (100%%)\""
         ));
 
         let timer = render_timer(

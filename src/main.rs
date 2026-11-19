@@ -60,7 +60,10 @@ async fn main() -> Result<()> {
     load_dotenv(ws_config_dir.join(".env"));
     load_dotenv(".env");
 
-    let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+    let (mut config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+    if let Some(ref allowed) = cli_args.allowed_tools {
+        config.restrict_enabled_tools(allowed);
+    }
     let guard = core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
