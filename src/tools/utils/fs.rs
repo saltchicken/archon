@@ -196,46 +196,43 @@ pub async fn read_capped<R: AsyncRead + Unpin>(
 }
 
 pub fn read_text_file_inspected(path: &Path, max_file_size: u64) -> FileOutcome {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => return FileOutcome::Error(format!("Error reading file: {e}")),
-    };
-    let len = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(e) => return FileOutcome::Error(format!("Error reading file: {e}")),
-    };
-    if len == 0 {
-        return FileOutcome::Content(String::new());
-    }
-    if len > max_file_size {
-        return FileOutcome::Error("File exceeds maximum size limit.".into());
-    }
+    let res: Result<FileOutcome, std::io::Error> = (|| {
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
+        if len == 0 {
+            return Ok(FileOutcome::Content(String::new()));
+        }
+        if len > max_file_size {
+            return Ok(FileOutcome::Error(
+                "File exceeds maximum size limit.".into(),
+            ));
+        }
 
-    let mut chunk = [0u8; 8192];
-    let n = match file.read(&mut chunk) {
-        Ok(0) => return FileOutcome::Content(String::new()),
-        Ok(n) => n,
-        Err(e) => return FileOutcome::Error(format!("Error reading file: {e}")),
-    };
-    let sample = &chunk[..n];
-    let ctrl_count = sample
-        .iter()
-        .filter(|&&b| b < 32 && !matches!(b, b'\n' | b'\r' | b'\t' | 0x0C))
-        .count();
-    if sample.contains(&0) || (ctrl_count as f32 / sample.len() as f32) > 0.3 {
-        return FileOutcome::Skipped("Binary file detected.");
-    }
+        let mut chunk = [0u8; 8192];
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(FileOutcome::Content(String::new()));
+        }
+        let sample = &chunk[..n];
+        let ctrl_count = sample
+            .iter()
+            .filter(|&&b| b < 32 && !matches!(b, b'\n' | b'\r' | b'\t' | 0x0C))
+            .count();
+        if sample.contains(&0) || (ctrl_count as f32 / sample.len() as f32) > 0.3 {
+            return Ok(FileOutcome::Skipped("Binary file detected."));
+        }
 
-    let mut buffer = Vec::with_capacity(len as usize);
-    buffer.extend_from_slice(sample);
-    if let Err(e) = file.read_to_end(&mut buffer) {
-        return FileOutcome::Error(format!("Error reading file: {e}"));
-    }
+        let mut buffer = Vec::with_capacity(len as usize);
+        buffer.extend_from_slice(sample);
+        file.read_to_end(&mut buffer)?;
 
-    match String::from_utf8(buffer) {
-        Ok(s) => FileOutcome::Content(s),
-        Err(_) => FileOutcome::Skipped("Non-UTF-8 text / binary file detected."),
-    }
+        Ok(match String::from_utf8(buffer) {
+            Ok(s) => FileOutcome::Content(s),
+            Err(_) => FileOutcome::Skipped("Non-UTF-8 text / binary file detected."),
+        })
+    })();
+
+    res.unwrap_or_else(|e| FileOutcome::Error(format!("Error reading file: {e}")))
 }
 
 pub fn read_utf8_capped(path: &Path, max_file_size: u64) -> Option<String> {

@@ -165,6 +165,47 @@ impl Provider {
         }
     }
 
+    pub async fn complete_oneshot(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        num_ctx: u32,
+        system_prompt: &str,
+        user_prompt: String,
+    ) -> std::result::Result<(String, u64, u64), String> {
+        let messages = vec![ChatMessage::new("user", user_prompt)];
+        let payload = match self {
+            Self::Ollama => ollama::build_payload(&model, &messages, system_prompt, num_ctx, None),
+            Self::Gemini => gemini::build_payload(&messages, system_prompt, None),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        self.stream_payload(client, model, config, payload, tx)
+            .await;
+
+        let mut text = String::new();
+        let mut prompt_tokens = 0u64;
+        let mut eval_tokens = 0u64;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                EngineEvent::StreamChunk(c) => text.push_str(&c),
+                EngineEvent::StreamError(e) => return Err(e),
+                EngineEvent::StreamDone {
+                    prompt_tokens: pt,
+                    eval_tokens: et,
+                    ..
+                } => {
+                    prompt_tokens = pt;
+                    eval_tokens = et;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok((text, prompt_tokens, eval_tokens))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn condense_tool_output(
         &self,
@@ -193,26 +234,9 @@ impl Provider {
             "{query_ctx}{guide_ctx}Tool executed: {tool_summary} (tool: {tool_name})\nOutput limit applied: {max_size} bytes.\n\nPlease condense the following output into a focused summary preserving all essential technical details:\n\n<truncated_tool_output>\n{truncated_output}\n</truncated_tool_output>"
         );
 
-        let messages = vec![ChatMessage::new("user", prompt)];
-        let payload = match self {
-            Self::Ollama => ollama::build_payload(&model, &messages, system_prompt, num_ctx, None),
-            Self::Gemini => gemini::build_payload(&messages, system_prompt, None),
-        };
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        self.stream_payload(client, model, config, payload, tx)
-            .await;
-
-        let mut condensed = String::new();
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                EngineEvent::StreamChunk(c) => condensed.push_str(&c),
-                EngineEvent::StreamError(e) => return Err(e),
-                EngineEvent::StreamDone { .. } => break,
-                _ => {}
-            }
-        }
-
+        let (condensed, _, _) = self
+            .complete_oneshot(client, model, config, num_ctx, system_prompt, prompt)
+            .await?;
         if condensed.trim().is_empty() {
             return Err("Model returned an empty summary while condensing tool output.".into());
         }
@@ -260,36 +284,9 @@ impl Provider {
             "{guide_ctx}Please compact the following conversation transcript into a dense context checkpoint:\n\n<conversation_transcript>\n{transcript}</conversation_transcript>"
         );
 
-        let req_msgs = vec![ChatMessage::new("user", prompt)];
-        let payload = match self {
-            Self::Ollama => ollama::build_payload(&model, &req_msgs, system_prompt, num_ctx, None),
-            Self::Gemini => gemini::build_payload(&req_msgs, system_prompt, None),
-        };
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        self.stream_payload(client, model, config, payload, tx)
-            .await;
-
-        let mut summary = String::new();
-        let mut eval_tokens = 0u64;
-        let mut prompt_tokens = 0u64;
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                EngineEvent::StreamChunk(c) => summary.push_str(&c),
-                EngineEvent::StreamError(e) => return Err(e),
-                EngineEvent::StreamDone {
-                    prompt_tokens: pt,
-                    eval_tokens: et,
-                    ..
-                } => {
-                    prompt_tokens = pt;
-                    eval_tokens = et;
-                    break;
-                }
-                _ => {}
-            }
-        }
-
+        let (summary, prompt_tokens, eval_tokens) = self
+            .complete_oneshot(client, model, config, num_ctx, system_prompt, prompt)
+            .await?;
         if summary.trim().is_empty() {
             return Err("Model returned an empty summary while compacting conversation.".into());
         }

@@ -45,6 +45,20 @@ pub fn validate_relative_path(raw: &str) -> Result<&Path> {
     Ok(rel)
 }
 
+pub fn ensure_ancestor_within_root(target: &Path, root: &Path, label: &str) -> Result<PathBuf> {
+    if let Some(existing) = target
+        .ancestors()
+        .find(|p| p.exists() || p.symlink_metadata().is_ok())
+    {
+        let canon_anc = ensure_within_root(existing, root, label)?;
+        if let Ok(rem) = target.strip_prefix(existing) {
+            return Ok(canon_anc.join(rem));
+        }
+        return Ok(canon_anc);
+    }
+    Ok(target.to_path_buf())
+}
+
 pub fn resolve_existing_under(base_root: &Path, raw: &str, escape_label: &str) -> Result<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "." {
@@ -76,21 +90,18 @@ where
 {
     let mut neg = Vec::new();
     let mut pos = Vec::new();
-    for raw in patterns {
-        let pat = raw.trim();
-        if pat.is_empty() {
-            continue;
-        }
-        if let Some(stripped) = pat.strip_prefix('!') {
-            let s = stripped.trim().trim_start_matches('/').to_string();
-            if !s.is_empty() {
-                neg.push(s);
-            }
-        } else {
-            let s = pat.trim_start_matches('/').to_string();
-            if !s.is_empty() {
-                pos.push(s);
-            }
+    for pat in patterns
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let (target, raw) = match pat.strip_prefix('!') {
+            Some(s) => (&mut neg, s.trim()),
+            None => (&mut pos, pat),
+        };
+        let cleaned = raw.trim_start_matches('/');
+        if !cleaned.is_empty() {
+            target.push(cleaned.to_string());
         }
     }
     (neg, pos)

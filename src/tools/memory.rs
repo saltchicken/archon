@@ -146,46 +146,26 @@ impl BlockingTool for Tool {
                 let (_, global_mem) = load_scoped_memory_file(&global_path, true)?;
                 let (_, ws_mem) = load_scoped_memory_file(&ws_path, false)?;
 
+                let status_str = |enabled: bool| if enabled { "ENABLED" } else { "DISABLED" };
                 let effective_enabled =
                     global_mem.enabled || (ws_mem.enabled && !ws_mem.items.is_empty());
-                let status = if effective_enabled {
-                    "ENABLED"
-                } else {
-                    "DISABLED"
-                };
-                let global_status = if global_mem.enabled {
-                    "ENABLED"
-                } else {
-                    "DISABLED"
-                };
-                let ws_status = if ws_mem.enabled {
-                    "ENABLED"
-                } else {
-                    "DISABLED"
-                };
 
-                let mut out = format!("Memory Status: {status}\n\n");
-                out.push_str(&format!(
-                    "Global ({}) [{global_status}]:\n",
-                    format_tilde_path(&global_path)
-                ));
-                if global_mem.items.is_empty() {
-                    out.push_str("  (empty)\n");
-                } else {
-                    for (i, item) in global_mem.items.iter().enumerate() {
-                        out.push_str(&format!("  {}. {item}\n", i + 1));
-                    }
-                }
-
-                out.push_str(&format!(
-                    "\nWorkspace ({}) [{ws_status}]:\n",
-                    format_tilde_path(&ws_path)
-                ));
-                if ws_mem.items.is_empty() {
-                    out.push_str("  (empty)\n");
-                } else {
-                    for (i, item) in ws_mem.items.iter().enumerate() {
-                        out.push_str(&format!("  {}. {item}\n", i + 1));
+                let mut out = format!("Memory Status: {}\n", status_str(effective_enabled));
+                for (label, path, mem) in [
+                    ("Global", &global_path, &global_mem),
+                    ("Workspace", &ws_path, &ws_mem),
+                ] {
+                    out.push_str(&format!(
+                        "\n{label} ({}) [{}]:\n",
+                        format_tilde_path(path),
+                        status_str(mem.enabled)
+                    ));
+                    if mem.items.is_empty() {
+                        out.push_str("  (empty)\n");
+                    } else {
+                        for (i, item) in mem.items.iter().enumerate() {
+                            out.push_str(&format!("  {}. {item}\n", i + 1));
+                        }
                     }
                 }
 

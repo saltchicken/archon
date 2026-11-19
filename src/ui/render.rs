@@ -691,31 +691,27 @@ impl TuiApp {
             source_badge_span(prov.system_presets)
         };
 
-        let g_mem = &self.config.global_memory;
-        let ws_mem = &self.config.workspace_memory;
-        let (g_mem_str, g_mem_color) = if g_mem.enabled {
-            (
-                format!("ON({})", g_mem.count()),
-                if g_mem.count() > 0 {
-                    theme::STATUS_ENABLED
-                } else {
-                    theme::TAB_GLOBAL_ACTIVE
-                },
+        let mem_badge = |m: &crate::core::config::Memory| {
+            let color = if !m.enabled {
+                theme::STATUS_DISABLED
+            } else if m.count() > 0 {
+                theme::STATUS_ENABLED
+            } else {
+                theme::TAB_GLOBAL_ACTIVE
+            };
+            let state = if m.enabled { "ON" } else { "OFF" };
+            Span::styled(
+                format!("{state}({})", m.count()),
+                Style::default().fg(color),
             )
-        } else {
-            (format!("OFF({})", g_mem.count()), theme::STATUS_DISABLED)
         };
-        let (ws_mem_str, ws_mem_color) = if ws_mem.enabled {
-            (
-                format!("ON({})", ws_mem.count()),
-                if ws_mem.count() > 0 {
-                    theme::STATUS_ENABLED
-                } else {
-                    theme::TAB_GLOBAL_ACTIVE
-                },
-            )
-        } else {
-            (format!("OFF({})", ws_mem.count()), theme::STATUS_DISABLED)
+        let toggle_badge = |on: bool, on_color: Color, off_color: Color| {
+            let (s, c) = if on {
+                ("ON", on_color)
+            } else {
+                ("OFF", off_color)
+            };
+            Span::styled(s, Style::default().fg(c))
         };
 
         let rule_count = self.config.app.auto_approve.len();
@@ -740,16 +736,6 @@ impl TuiApp {
         }
 
         let snap = &self.config.workspace_snapshot;
-        let (git_str, git_color) = if snap.git_root {
-            ("ON", theme::STATUS_ENABLED)
-        } else {
-            ("OFF", theme::STATUS_DISABLED)
-        };
-        let (tree_str, tree_color) = if snap.tree_only {
-            ("ON", theme::CTX_USAGE_WARN)
-        } else {
-            ("OFF", theme::TAB_GLOBAL_ACTIVE)
-        };
         let hidden_neg_count = snap
             .exclude
             .iter()
@@ -781,23 +767,17 @@ impl TuiApp {
             (format!("OFF ({df_dirs_label})"), theme::STATUS_DISABLED)
         };
 
-        let g_sched_tot = self.config.global_schedules.len();
-        let g_sched_on = self
-            .config
-            .global_schedules
-            .iter()
-            .filter(|s| s.enabled)
-            .count();
-        let ws_sched_tot = self.config.schedules.len();
-        let ws_sched_on = self.config.schedules.iter().filter(|s| s.enabled).count();
-        let sched_color = |on: usize, tot: usize| {
-            if tot == 0 {
+        let sched_badge = |list: &[crate::core::config::ScheduleConfig]| {
+            let tot = list.len();
+            let on = list.iter().filter(|s| s.enabled).count();
+            let color = if tot == 0 {
                 theme::TAB_GLOBAL_ACTIVE
             } else if on > 0 {
                 theme::STATUS_ENABLED
             } else {
                 theme::STATUS_DISABLED
-            }
+            };
+            Span::styled(format!("{on}/{tot}"), Style::default().fg(color))
         };
 
         let mut lines = vec![
@@ -833,17 +813,21 @@ impl TuiApp {
             ]),
             Line::from(vec![
                 Span::raw("Memory:  G:"),
-                Span::styled(g_mem_str, Style::default().fg(g_mem_color)),
+                mem_badge(&self.config.global_memory),
                 Span::raw(" WS:"),
-                Span::styled(ws_mem_str, Style::default().fg(ws_mem_color)),
+                mem_badge(&self.config.workspace_memory),
                 Span::raw(" (^P)"),
             ]),
             Line::from(approve_spans),
             Line::from(vec![
                 Span::raw("Snap:    git:"),
-                Span::styled(git_str, Style::default().fg(git_color)),
+                toggle_badge(snap.git_root, theme::STATUS_ENABLED, theme::STATUS_DISABLED),
                 Span::raw(" tree:"),
-                Span::styled(tree_str, Style::default().fg(tree_color)),
+                toggle_badge(
+                    snap.tree_only,
+                    theme::CTX_USAGE_WARN,
+                    theme::TAB_GLOBAL_ACTIVE,
+                ),
                 source_badge_span(prov.workspace_snapshot),
             ]),
             Line::from(vec![
@@ -858,15 +842,9 @@ impl TuiApp {
             ]),
             Line::from(vec![
                 Span::raw("Sched:   G:"),
-                Span::styled(
-                    format!("{g_sched_on}/{g_sched_tot}"),
-                    Style::default().fg(sched_color(g_sched_on, g_sched_tot)),
-                ),
+                sched_badge(&self.config.global_schedules),
                 Span::raw(" WS:"),
-                Span::styled(
-                    format!("{ws_sched_on}/{ws_sched_tot}"),
-                    Style::default().fg(sched_color(ws_sched_on, ws_sched_tot)),
-                ),
+                sched_badge(&self.config.schedules),
             ]),
         ];
 

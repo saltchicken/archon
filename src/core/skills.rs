@@ -272,10 +272,26 @@ pub fn parse_at_command(raw_prompt: &str) -> Option<(&str, &str)> {
         Some(idx) => (&rest[..idx], rest[idx..].trim()),
         None => (rest, ""),
     };
-    if cmd_token.is_empty() {
-        return None;
+    (!cmd_token.is_empty()).then_some((cmd_token, args_str))
+}
+
+pub fn apply_at_skill_to_turn(
+    raw_prompt: &str,
+    turn: &mut crate::core::TurnConfig,
+    config: &Config,
+) -> std::result::Result<String, String> {
+    if let Some((cmd_token, args_str)) = parse_at_command(raw_prompt) {
+        let name = check_skill_activation(cmd_token, turn.enable_tools, config)?;
+        turn.active_skill = Some(name);
+        turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
+        Ok(if args_str.is_empty() {
+            raw_prompt.trim().to_string()
+        } else {
+            args_str.to_string()
+        })
+    } else {
+        Ok(raw_prompt.to_string())
     }
-    Some((cmd_token, args_str))
 }
 
 pub fn format_hook_summary(hook: &SkillHook) -> String {

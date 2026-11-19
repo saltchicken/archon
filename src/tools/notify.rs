@@ -78,10 +78,7 @@ impl AsyncTool for Tool {
 
         cmd.arg("--").arg(&effective_summary);
 
-        // Pass body as a second argument only if it was distinct from the summary.
-        if summary.is_none() && body.is_some() {
-            // body was used as the summary — nothing extra to pass
-        } else if let Some(b) = body {
+        if let Some(b) = body.filter(|_| summary.is_some()) {
             cmd.arg(b);
         }
 

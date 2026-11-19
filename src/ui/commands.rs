@@ -313,21 +313,13 @@ impl TuiApp {
         }
 
         let mut turn = self.current_turn_config();
-        let prompt = if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
+        let prompt = if let Some((cmd_token, _)) = skills::parse_at_command(&raw_prompt) {
             self.config.skills = skills::discover_skills(
                 &self.config.app.skills_dir,
                 self.config.workspace_skills_dir.as_deref(),
             );
-            match skills::check_skill_activation(cmd_token, self.enable_tools, &self.config) {
-                Ok(skill_name) => {
-                    turn.active_skill = Some(skill_name);
-                    turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
-                    if args_str.is_empty() {
-                        raw_prompt.trim().to_string()
-                    } else {
-                        args_str.to_string()
-                    }
-                }
+            match skills::apply_at_skill_to_turn(&raw_prompt, &mut turn, &self.config) {
+                Ok(p) => p,
                 Err(_) => {
                     turn.active_skill = Some(cmd_token.to_string());
                     let _ = self.cmd_tx.send(EngineCommand::SendPrompt {

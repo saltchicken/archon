@@ -36,9 +36,9 @@ use tracing::{debug, error, info};
 use utils::{
     fs::read_capped,
     path::{
-        build_ancestor_dir_globset, build_globset, ensure_within_root, has_git_dir_component,
-        has_hidden_component, partition_negated_patterns, resolve_existing_under,
-        validate_relative_path, workspace_root,
+        build_ancestor_dir_globset, build_globset, ensure_ancestor_within_root, ensure_within_root,
+        has_git_dir_component, has_hidden_component, partition_negated_patterns,
+        resolve_existing_under, validate_relative_path, workspace_root,
     },
 };
 
@@ -152,17 +152,7 @@ impl ToolContext {
         target: &Path,
         label: &str,
     ) -> Result<PathBuf> {
-        if let Some(existing) = target
-            .ancestors()
-            .find(|p| p.exists() || p.symlink_metadata().is_ok())
-        {
-            let canon_anc = self.ensure_within_workspace(existing, label)?;
-            if let Ok(rem) = target.strip_prefix(existing) {
-                return Ok(canon_anc.join(rem));
-            }
-            return Ok(canon_anc);
-        }
-        Ok(target.to_path_buf())
+        ensure_ancestor_within_root(target, &self.root, label)
     }
 
     pub fn validate_scoped_relative_path<'a>(&self, raw: &'a str) -> Result<&'a Path> {
@@ -174,22 +164,31 @@ impl ToolContext {
         Ok(rel)
     }
 
-    pub fn resolve_existing_under_root(&self, raw: &str, escape_label: &str) -> Result<PathBuf> {
+    fn resolve_under_base(
+        &self,
+        base_root: &Path,
+        raw: &str,
+        escape_label: &str,
+    ) -> Result<PathBuf> {
         let trimmed = raw.trim();
         let neg_ancestors = self.build_neg_exclude_ancestor_globset()?;
         if !trimmed.is_empty() && trimmed != "." {
             let rel = validate_relative_path(trimmed)?;
-            let target = self.root.join(rel);
+            let target = base_root.join(rel);
             if !(target.is_dir() && neg_ancestors.is_match(rel)) {
-                self.ensure_not_excluded(&target)?;
+                self.ensure_not_excluded_under(&target, base_root)?;
             }
         }
-        let canon = resolve_existing_under(&self.root, raw, escape_label)?;
-        let canon_rel = diff_paths(&canon, &self.root).unwrap_or_else(|| canon.clone());
+        let canon = resolve_existing_under(base_root, raw, escape_label)?;
+        let canon_rel = diff_paths(&canon, base_root).unwrap_or_else(|| canon.clone());
         if !(canon.is_dir() && neg_ancestors.is_match(&canon_rel)) {
-            self.ensure_not_excluded(&canon)?;
+            self.ensure_not_excluded_under(&canon, base_root)?;
         }
         Ok(canon)
+    }
+
+    pub fn resolve_existing_under_root(&self, raw: &str, escape_label: &str) -> Result<PathBuf> {
+        self.resolve_under_base(&self.root, raw, escape_label)
     }
 
     pub fn check_rel_path_allowed(
@@ -347,20 +346,7 @@ impl ToolContext {
             self.root.clone()
         };
         let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
-        let trimmed = target_path.trim();
-        let neg_ancestors = self.build_neg_exclude_ancestor_globset()?;
-        if !trimmed.is_empty() && trimmed != "." {
-            let rel = validate_relative_path(trimmed)?;
-            let target = base_root.join(rel);
-            if !(target.is_dir() && neg_ancestors.is_match(rel)) {
-                self.ensure_not_excluded_under(&target, &base_root)?;
-            }
-        }
-        let scan_root = resolve_existing_under(&base_root, target_path, escape_label)?;
-        let scan_rel = diff_paths(&scan_root, &base_root).unwrap_or_else(|| scan_root.clone());
-        if !(scan_root.is_dir() && neg_ancestors.is_match(&scan_rel)) {
-            self.ensure_not_excluded_under(&scan_root, &base_root)?;
-        }
+        let scan_root = self.resolve_under_base(&base_root, target_path, escape_label)?;
         Ok((base_root, scan_root))
     }
 
@@ -446,13 +432,19 @@ impl ToolContext {
         build_ancestor_dir_globset(&neg_cfg)
     }
 
-    pub fn walk_workspace_files(
+    pub fn walk_filtered_files<I, F>(
         &self,
         base_root: &Path,
         scan_root: &Path,
         include_patterns: &[String],
         call_exclude: &[String],
-    ) -> Result<Vec<(PathBuf, String)>> {
+        walker: I,
+        mut format_rel: F,
+    ) -> Result<Vec<(PathBuf, String)>>
+    where
+        I: IntoIterator<Item = DirEntry>,
+        F: FnMut(&Path) -> String,
+    {
         let include_set = (!include_patterns.is_empty())
             .then(|| build_globset(include_patterns, true))
             .transpose()?;
@@ -467,14 +459,11 @@ impl ToolContext {
         }
         if scan_root.is_file() {
             let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
-            return Ok(vec![(
-                scan_root.to_path_buf(),
-                rel.to_string_lossy().into_owned(),
-            )]);
+            return Ok(vec![(scan_root.to_path_buf(), format_rel(&rel))]);
         }
 
         let mut files = Vec::new();
-        for entry in self.build_walker(scan_root) {
+        for entry in walker {
             if files.len() >= self.config.workspace_snapshot.max_files {
                 break;
             }
@@ -494,11 +483,28 @@ impl ToolContext {
             {
                 continue;
             }
-            files.push((path.to_path_buf(), relative.to_string_lossy().into_owned()));
+            files.push((path.to_path_buf(), format_rel(&relative)));
         }
 
         files.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(files)
+    }
+
+    pub fn walk_workspace_files(
+        &self,
+        base_root: &Path,
+        scan_root: &Path,
+        include_patterns: &[String],
+        call_exclude: &[String],
+    ) -> Result<Vec<(PathBuf, String)>> {
+        self.walk_filtered_files(
+            base_root,
+            scan_root,
+            include_patterns,
+            call_exclude,
+            self.build_walker(scan_root),
+            |rel| rel.to_string_lossy().into_owned(),
+        )
     }
 
     pub async fn run_command<I, S>(&self, program: &str, args: I, empty_msg: &str) -> Result<String>
@@ -634,28 +640,26 @@ pub struct ToolFunction {
 
 pub fn call_signature(call: &ToolCall) -> String {
     let name = call.function.name.as_str();
-    let args = &call.function.arguments;
-
-    let sub = match name {
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" | "memory" => {
-            let raw = args
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
-            if name == "skill" && matches!(raw, "edit" | "update") {
-                "modify".to_string()
-            } else if name == "memory" && raw == "get" {
-                "read".to_string()
-            } else if name == "memory" && matches!(raw, "delete" | "rm") {
-                "remove".to_string()
-            } else if name == "dotfiles" && matches!(raw, "revert" | "checkout") {
-                "restore".to_string()
-            } else {
-                raw.to_string()
-            }
+    let sub = if matches!(
+        name,
+        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" | "memory"
+    ) {
+        let raw = call
+            .function
+            .arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        match (name, raw) {
+            ("skill", "edit" | "update") => "modify",
+            ("memory", "get") => "read",
+            ("memory", "delete" | "rm") => "remove",
+            ("dotfiles", "revert" | "checkout") => "restore",
+            (_, r) => r,
         }
-        _ => String::new(),
+    } else {
+        ""
     };
 
     if sub.is_empty() {

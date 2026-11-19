@@ -332,29 +332,27 @@ fn extract_toml_string_array(
     )
 }
 
+fn find_table_key<'a>(
+    table: Option<&'a toml::Table>,
+    section: &str,
+    keys: &[&str],
+) -> Option<&'a toml::Value> {
+    let sub = table?.get(section)?.as_table()?;
+    keys.iter().find_map(|k| sub.get(*k))
+}
+
 fn source_for_table_keys(
     global: Option<&toml::Table>,
     ws: Option<&toml::Table>,
     section: &str,
     keys: &[&str],
 ) -> ConfigSource {
-    let g_val = global.and_then(|t| {
-        let sub = t.get(section)?.as_table()?;
-        keys.iter().find_map(|k| sub.get(*k))
-    });
-    let ws_val = ws.and_then(|t| {
-        let sub = t.get(section)?.as_table()?;
-        keys.iter().find_map(|k| sub.get(*k))
-    });
-    match (g_val, ws_val) {
-        (Some(gv), Some(wv)) => {
-            if gv != wv {
-                ConfigSource::WorkspaceOverridesGlobal
-            } else {
-                ConfigSource::Workspace
-            }
-        }
-        (None, Some(_)) => ConfigSource::Workspace,
+    match (
+        find_table_key(global, section, keys),
+        find_table_key(ws, section, keys),
+    ) {
+        (Some(gv), Some(wv)) if gv != wv => ConfigSource::WorkspaceOverridesGlobal,
+        (_, Some(_)) => ConfigSource::Workspace,
         (Some(_), None) => ConfigSource::Global,
         (None, None) => ConfigSource::Default,
     }
@@ -390,14 +388,8 @@ fn source_for_section(
                 ConfigSource::Global
             }
         }
-        (Some(gv), Some(wv)) => {
-            if gv != wv {
-                ConfigSource::WorkspaceOverridesGlobal
-            } else {
-                ConfigSource::Workspace
-            }
-        }
-        (None, Some(_)) => ConfigSource::Workspace,
+        (Some(gv), Some(wv)) if gv != wv => ConfigSource::WorkspaceOverridesGlobal,
+        (_, Some(_)) => ConfigSource::Workspace,
         (Some(_), None) => ConfigSource::Global,
         (None, None) => ConfigSource::Default,
     }
@@ -923,50 +915,34 @@ impl Config {
     }
 
     pub fn tool_provenance(&self, tool_name: &str) -> ToolProvenance {
+        let has_global = self.provenance.global_enabled_tools.is_some();
         let in_global = self
             .provenance
             .global_enabled_tools
             .as_ref()
             .is_none_or(|g| tool_list_contains(g, tool_name));
-        let pre_cli_enabled = match self.provenance.workspace_enabled_tools.as_ref() {
-            Some(ws) => tool_list_contains(ws, tool_name),
-            None => in_global,
-        };
+        let in_ws = self
+            .provenance
+            .workspace_enabled_tools
+            .as_ref()
+            .map(|ws| tool_list_contains(ws, tool_name));
+
         if let Some(ref cli) = self.provenance.cli_allowed_tools
-            && pre_cli_enabled
+            && in_ws.unwrap_or(in_global)
             && !tool_list_contains(cli, tool_name)
         {
             return ToolProvenance::CliDisabled;
         }
-        match self.provenance.workspace_enabled_tools.as_ref() {
-            Some(ws) => {
-                let in_ws = tool_list_contains(ws, tool_name);
-                match (in_global, in_ws) {
-                    (true, true) => {
-                        if self.provenance.global_enabled_tools.is_some() {
-                            ToolProvenance::GlobalAndWorkspaceEnabled
-                        } else {
-                            ToolProvenance::WorkspaceEnabled
-                        }
-                    }
-                    (false, true) => ToolProvenance::WorkspaceAdded,
-                    (true, false) => ToolProvenance::WorkspaceRemoved,
-                    (false, false) => ToolProvenance::GlobalAndWorkspaceDisabled,
-                }
-            }
-            None => {
-                if self.provenance.global_enabled_tools.is_some() {
-                    if in_global {
-                        ToolProvenance::GlobalEnabled
-                    } else {
-                        ToolProvenance::GlobalDisabled
-                    }
-                } else if in_global {
-                    ToolProvenance::DefaultEnabled
-                } else {
-                    ToolProvenance::GlobalDisabled
-                }
-            }
+
+        match (has_global, in_global, in_ws) {
+            (true, true, Some(true)) => ToolProvenance::GlobalAndWorkspaceEnabled,
+            (false, true, Some(true)) => ToolProvenance::WorkspaceEnabled,
+            (_, false, Some(true)) => ToolProvenance::WorkspaceAdded,
+            (_, true, Some(false)) => ToolProvenance::WorkspaceRemoved,
+            (_, false, Some(false)) => ToolProvenance::GlobalAndWorkspaceDisabled,
+            (true, true, None) => ToolProvenance::GlobalEnabled,
+            (false, true, None) => ToolProvenance::DefaultEnabled,
+            (_, false, None) => ToolProvenance::GlobalDisabled,
         }
     }
 

@@ -3,16 +3,17 @@ use super::{
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents, render_directory_listing},
-        path::{build_globset, ensure_parent_dir, has_git_dir_component},
+        path::{
+            build_globset, ensure_ancestor_within_root, ensure_parent_dir, ensure_within_root,
+            has_git_dir_component,
+        },
         search::{SearchExecutionParams, search_candidate_files},
     },
 };
 use crate::core::{
-    EngineEvent,
     config::{Config, expand_tilde},
-    gemini, ollama,
     provider::Provider,
-    session::{ChatMessage, truncate_str},
+    session::truncate_str,
 };
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
@@ -243,6 +244,11 @@ fn check_allowed_dir(rel: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn check_allowed_file(rel: &Path, blocked: &GlobSet, config: &Config) -> Result<()> {
+    check_not_blocked(rel, blocked)?;
+    check_allowed_dir(rel, config)
+}
+
 fn resolve_existing_config_path(
     raw: &str,
     allow_root: bool,
@@ -254,8 +260,7 @@ fn resolve_existing_config_path(
         bail!("'path' inside ~/.config is required for this action");
     }
     let blocked = blocked_globset(&[])?;
-    check_not_blocked(&rel, &blocked)?;
-    check_allowed_dir(&rel, config)?;
+    check_allowed_file(&rel, &blocked, config)?;
 
     let candidate = if rel.as_os_str().is_empty() {
         root.clone()
@@ -265,17 +270,9 @@ fn resolve_existing_config_path(
     if !candidate.exists() {
         bail!("Target path does not exist: ~/.config/{}", rel.display());
     }
-    let canon = dunce::canonicalize(&candidate)?;
-    if !canon.starts_with(&root) {
-        bail!(
-            "Security violation: '~/.config/{}' resolves outside ~/.config ({})",
-            rel.display(),
-            canon.display()
-        );
-    }
+    let canon = ensure_within_root(&candidate, &root, &format!("~/.config/{}", rel.display()))?;
     let effective_rel = diff_paths(&canon, &root).unwrap_or(rel);
-    check_not_blocked(&effective_rel, &blocked)?;
-    check_allowed_dir(&effective_rel, config)?;
+    check_allowed_file(&effective_rel, &blocked, config)?;
     let display = if effective_rel.as_os_str().is_empty() {
         "~/.config".to_string()
     } else {
@@ -291,29 +288,14 @@ fn resolve_new_config_path(raw: &str, config: &Config) -> Result<(PathBuf, PathB
         bail!("'path' is required when creating a file in ~/.config");
     }
     let blocked = blocked_globset(&[])?;
-    check_not_blocked(&rel, &blocked)?;
-    check_allowed_dir(&rel, config)?;
+    check_allowed_file(&rel, &blocked, config)?;
 
     let target = root.join(&rel);
-    if target.exists() || target.symlink_metadata().is_ok() {
-        bail!(
-            "File already exists: ~/.config/{}. Use action: \"edit\" instead.",
-            rel.display()
-        );
-    }
-    if let Some(existing) = target
-        .ancestors()
-        .find(|p| p.exists() || p.symlink_metadata().is_ok())
-    {
-        let canon_anc = dunce::canonicalize(existing)?;
-        if !canon_anc.starts_with(&root) {
-            bail!(
-                "Security violation: '~/.config/{}' escapes ~/.config",
-                rel.display()
-            );
-        }
-    }
     let display = format!("~/.config/{}", rel.display());
+    if target.exists() || target.symlink_metadata().is_ok() {
+        bail!("File already exists: {display}. Use action: \"edit\" instead.");
+    }
+    ensure_ancestor_within_root(&target, &root, &display)?;
     Ok((root, target, display))
 }
 
@@ -383,8 +365,7 @@ fn run_validate(raw_path: &str, config: &Config) -> Result<String> {
                 continue;
             }
             if let Some(rel) = diff_paths(p, &root)
-                && (check_not_blocked(&rel, &blocked).is_err()
-                    || check_allowed_dir(&rel, config).is_err())
+                && check_allowed_file(&rel, &blocked, config).is_err()
             {
                 continue;
             }
@@ -611,39 +592,21 @@ fn resolve_git_targets(
     let blocked = blocked_globset(&[])?;
 
     if !rel.as_os_str().is_empty() {
-        check_not_blocked(&rel, &blocked)?;
-        check_allowed_dir(&rel, config)?;
-
+        check_allowed_file(&rel, &blocked, config)?;
         let candidate = root.join(&rel);
+        let label = format!("~/.config/{}", rel.display());
         let effective_rel = if candidate.exists() {
-            let canon = dunce::canonicalize(&candidate)?;
-            if !canon.starts_with(root) {
-                bail!(
-                    "Security violation: '~/.config/{}' resolves outside ~/.config ({})",
-                    rel.display(),
-                    canon.display()
-                );
-            }
+            let canon = ensure_within_root(&candidate, root, &label)?;
             let eff = diff_paths(&canon, root).unwrap_or(rel);
-            check_not_blocked(&eff, &blocked)?;
-            check_allowed_dir(&eff, config)?;
+            check_allowed_file(&eff, &blocked, config)?;
             eff
         } else {
-            if let Some(existing) = candidate.ancestors().find(|p| p.exists()) {
-                let canon_anc = dunce::canonicalize(existing)?;
-                if !canon_anc.starts_with(root) {
-                    bail!(
-                        "Security violation: '~/.config/{}' escapes ~/.config",
-                        rel.display()
-                    );
-                }
-            }
+            ensure_ancestor_within_root(&candidate, root, &label)?;
             rel
         };
 
         let rel_str = effective_rel.to_string_lossy().into_owned();
-        let display = format!("~/.config/{rel_str}");
-        return Ok((Some(display), vec![rel_str]));
+        return Ok((Some(format!("~/.config/{rel_str}")), vec![rel_str]));
     }
 
     let targets = configured_allowed_paths(root, config)
@@ -745,10 +708,7 @@ fn collect_restorable_files(
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .filter(|rel_str| {
-            let rel = Path::new(rel_str);
-            check_not_blocked(rel, &blocked).is_ok() && check_allowed_dir(rel, config).is_ok()
-        })
+        .filter(|rel_str| check_allowed_file(Path::new(rel_str), &blocked, config).is_ok())
         .map(String::from)
         .collect();
     files.sort();
@@ -858,16 +818,10 @@ fn ensure_bare_repo(git_dir: &Path, work_tree: &Path, config: &Config) -> Result
             .args(["config", "status.showUntrackedFiles", "no"])
             .output();
 
-        if cloned {
-            let has_head = bare_git_cmd(git_dir, work_tree)
-                .args(["rev-parse", "--verify", "HEAD"])
-                .output()
-                .is_ok_and(|o| o.status.success());
-            if has_head {
-                let _ = bare_git_cmd(git_dir, work_tree)
-                    .args(["read-tree", "HEAD"])
-                    .output();
-            }
+        if cloned && has_bare_head(git_dir, work_tree) {
+            let _ = bare_git_cmd(git_dir, work_tree)
+                .args(["read-tree", "HEAD"])
+                .output();
         }
     }
 
@@ -914,37 +868,16 @@ fn generate_commit_message(git_dir: &Path, work_tree: &Path, config: &Config) ->
     let prompt = format!(
         "Generate a commit message for these staged ~/.config changes:\n\n<stat>\n{stat}\n</stat>\n\n<diff>\n{diff}\n</diff>"
     );
-    let messages = vec![ChatMessage::new("user", prompt)];
 
     handle.block_on(async move {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .ok()?;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        match provider {
-            Provider::Ollama => {
-                let payload =
-                    ollama::build_payload(&model, &messages, system_prompt, num_ctx, None);
-                ollama::stream_chat(client, cfg.ollama.base_url, payload, tx).await;
-            }
-            Provider::Gemini => {
-                let api_key = cfg.gemini.resolve_api_key()?;
-                let payload = gemini::build_payload(&messages, system_prompt, None);
-                gemini::stream_chat(client, cfg.gemini.base_url, api_key, model, payload, tx).await;
-            }
-        }
-
-        let mut response = String::new();
-        while let Some(ev) = rx.recv().await {
-            match ev {
-                EngineEvent::StreamChunk(c) => response.push_str(&c),
-                EngineEvent::StreamError(_) => return None,
-                EngineEvent::StreamDone { .. } => break,
-                _ => {}
-            }
-        }
+        let (response, _, _) = provider
+            .complete_oneshot(client, model, cfg, num_ctx, system_prompt, prompt)
+            .await
+            .ok()?;
 
         let cleaned = response
             .trim()
@@ -966,11 +899,7 @@ fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
     let mut report = ensure_bare_repo(&git_dir, &root, config)?;
 
     // Update/stage deletions for already-tracked paths within allowed_dirs
-    let has_head = bare_git_cmd(&git_dir, &root)
-        .args(["rev-parse", "--verify", "HEAD"])
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if has_head {
+    if has_bare_head(&git_dir, &root) {
         let rel_strings: Vec<String> = allowed_paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -1032,12 +961,7 @@ fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
         report.push("No local changes to commit in tracked `dotfiles.allowed_dirs`.".into());
     }
 
-    if resolve_repo_url(&config.dotfiles.repo_url).is_some()
-        && bare_git_cmd(&git_dir, &root)
-            .args(["rev-parse", "--verify", "HEAD"])
-            .output()
-            .is_ok_and(|o| o.status.success())
-    {
+    if resolve_repo_url(&config.dotfiles.repo_url).is_some() && has_bare_head(&git_dir, &root) {
         let push_out = bare_git_cmd(&git_dir, &root)
             .args(["push", "-u", "origin", "HEAD"])
             .output()
@@ -1123,8 +1047,7 @@ impl BlockingTool for Tool {
                     ctx.max_output_size,
                     |path| {
                         diff_paths(path, &root).is_some_and(|rel| {
-                            check_not_blocked(&rel, &blocked).is_ok()
-                                && check_allowed_dir(&rel, &ctx.config).is_ok()
+                            check_allowed_file(&rel, &blocked, &ctx.config).is_ok()
                         })
                     },
                 )
@@ -1154,8 +1077,7 @@ impl BlockingTool for Tool {
                 let mut candidate_files = Vec::new();
                 if scan_root.is_file() {
                     let rel = diff_paths(&scan_root, &root).unwrap_or_else(|| scan_root.clone());
-                    check_not_blocked(&rel, &blocked)?;
-                    check_allowed_dir(&rel, &ctx.config)?;
+                    check_allowed_file(&rel, &blocked, &ctx.config)?;
                     let display = format!("~/.config/{}", rel.display());
                     candidate_files.push((scan_root, display));
                 } else {
@@ -1181,12 +1103,9 @@ impl BlockingTool for Tool {
                         let Some(rel) = diff_paths(&canon, &root) else {
                             continue;
                         };
-                        if check_not_blocked(&rel, &blocked).is_err()
-                            || check_allowed_dir(&rel, &ctx.config).is_err()
+                        if check_allowed_file(&rel, &blocked, &ctx.config).is_err()
+                            || include_set.as_ref().is_some_and(|inc| !inc.is_match(&rel))
                         {
-                            continue;
-                        }
-                        if include_set.as_ref().is_some_and(|inc| !inc.is_match(&rel)) {
                             continue;
                         }
                         candidate_files

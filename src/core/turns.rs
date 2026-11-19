@@ -321,23 +321,16 @@ impl CoreEngine {
             && !trimmed_draft.starts_with('!')
             && tools::parse_hash_tool_prefix(trimmed_draft).is_none()
         {
+            if trimmed_draft.starts_with('@') {
+                self.refresh_skills();
+            }
             let user_content =
-                if let Some((cmd_token, args_str)) = skills::parse_at_command(trimmed_draft) {
-                    self.refresh_skills();
-                    if let Ok(skill_name) =
-                        skills::check_skill_activation(cmd_token, turn.enable_tools, &self.config)
-                    {
-                        turn.active_skill = Some(skill_name);
-                        turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
-                    }
-                    if args_str.is_empty() {
-                        trimmed_draft.to_string()
-                    } else {
-                        args_str.to_string()
-                    }
-                } else {
-                    trimmed_draft.to_string()
-                };
+                skills::apply_at_skill_to_turn(trimmed_draft, &mut turn, &self.config)
+                    .unwrap_or_else(|_| {
+                        skills::parse_at_command(trimmed_draft)
+                            .filter(|(_, args)| !args.is_empty())
+                            .map_or_else(|| trimmed_draft.to_string(), |(_, args)| args.to_string())
+                    });
             preview_msgs.push(ChatMessage::new("user", user_content.clone()));
             for summary in skills::preview_due_hooks(
                 &self.config,

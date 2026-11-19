@@ -3,7 +3,10 @@ use super::{
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
-        path::{ensure_parent_dir, has_git_dir_component, validate_relative_path},
+        path::{
+            ensure_ancestor_within_root, ensure_parent_dir, ensure_within_root,
+            has_git_dir_component, validate_relative_path,
+        },
     },
 };
 use crate::core::{
@@ -92,6 +95,15 @@ pub struct SkillArgs {
     pub end_line: Option<usize>,
 }
 
+impl SkillArgs {
+    fn has_frontmatter_overrides(&self) -> bool {
+        self.description.is_some()
+            || self.command.is_some()
+            || self.tools.is_some()
+            || self.hooks.is_some()
+    }
+}
+
 struct ResolvedSkill {
     definition: SkillDefinition,
     scope_label: &'static str,
@@ -170,15 +182,9 @@ fn resolve_existing_reference(
             resolved.definition.name
         );
     }
-    let canon = dunce::canonicalize(&candidate)?;
     let canon_skill_dir =
         dunce::canonicalize(&resolved.skill_dir).unwrap_or_else(|_| resolved.skill_dir.clone());
-    if !canon.starts_with(&canon_skill_dir) {
-        bail!(
-            "Security violation: '{}' escapes skill directory",
-            rel.display()
-        );
-    }
+    let canon = ensure_within_root(&candidate, &canon_skill_dir, &rel.display().to_string())?;
     let display = format_tilde_path(&canon);
     Ok((canon, display))
 }
@@ -447,14 +453,10 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         if target_path.exists() {
             bail!("File already exists: {display}. Use action: \"modify\" instead.");
         }
-        if let Some(existing_anc) = target_path.ancestors().find(|p| p.exists())
-            && let (Ok(canon_anc), Ok(canon_root)) = (
-                dunce::canonicalize(existing_anc),
-                dunce::canonicalize(&root_dir),
-            )
-            && !canon_anc.starts_with(&canon_root)
+        if let Some(existing_root) = root_dir.ancestors().find(|p| p.exists())
+            && let Ok(canon_root) = dunce::canonicalize(existing_root)
         {
-            bail!("Security violation: target path escapes skills directory");
+            ensure_ancestor_within_root(&target_path, &canon_root, &display)?;
         }
         let body = args
             .content
@@ -487,13 +489,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             .starts_with("+++")
     }) {
         let (table, body) = validate_and_parse_skill_doc(raw_content, &skill_dir)?;
-        let has_overrides = args.description.is_some()
-            || args.command.is_some()
-            || args.tools.is_some()
-            || args.hooks.is_some()
-            || args.prompt.is_some();
-
-        if has_overrides {
+        if args.has_frontmatter_overrides() || args.prompt.is_some() {
             let prompt_body = args.prompt.as_deref().unwrap_or(&body);
             merge_and_format_skill_doc(
                 args,
@@ -583,12 +579,8 @@ pub fn preview_modify(
         original.clone()
     };
 
-    let has_field_updates = args.description.is_some()
-        || args.command.is_some()
-        || args.tools.is_some()
-        || args.hooks.is_some()
-        || args.prompt.is_some()
-        || args.content.is_some();
+    let has_field_updates =
+        args.has_frontmatter_overrides() || args.prompt.is_some() || args.content.is_some();
 
     if args.edits.is_empty() && !has_field_updates {
         bail!(
@@ -610,12 +602,7 @@ pub fn preview_modify(
         }
     }
 
-    if args.description.is_some()
-        || args.command.is_some()
-        || args.tools.is_some()
-        || args.hooks.is_some()
-        || body_override.is_some()
-    {
+    if args.has_frontmatter_overrides() || body_override.is_some() {
         let (table, current_body) = validate_and_parse_skill_doc(&working, &resolved.skill_dir)?;
         let def = &resolved.definition;
         let body = body_override.unwrap_or(&current_body);

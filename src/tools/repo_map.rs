@@ -1,9 +1,6 @@
 use super::{
     BlockingTool, ToolContext,
-    utils::{
-        fs::read_utf8_capped,
-        path::{build_globset, has_git_dir_component, resolve_existing_under},
-    },
+    utils::{fs::read_utf8_capped, path::resolve_existing_under},
 };
 use crate::core::{
     config::{WorkspaceSnapshotSettings, expand_tilde, format_tilde_path},
@@ -11,7 +8,6 @@ use crate::core::{
 };
 use anyhow::{Result, bail};
 use ignore::WalkBuilder;
-use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
@@ -1146,21 +1142,19 @@ fn resolve_installed_crate_dir(
 
     candidates.sort_by_key(|a| std::cmp::Reverse(parse_version_sort_key(&a.0)));
 
-    if explicit_ver.is_none() {
-        let locked_versions = find_locked_crate_versions(workspace_root, &crate_norm);
-        for locked in &locked_versions {
-            if let Some((_, path)) = candidates.iter().find(|(v, _)| v == locked) {
-                let label = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(requested_name)
-                    .to_string();
-                return Ok((path.clone(), label));
-            }
-        }
-    }
+    let best_path = explicit_ver
+        .is_none()
+        .then(|| find_locked_crate_versions(workspace_root, &crate_norm))
+        .into_iter()
+        .flatten()
+        .find_map(|locked| {
+            candidates
+                .iter()
+                .find(|(v, _)| *v == locked)
+                .map(|(_, p)| p.clone())
+        })
+        .unwrap_or_else(|| candidates.into_iter().next().unwrap().1);
 
-    let (_, best_path) = candidates.into_iter().next().unwrap();
     let label = best_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -1234,30 +1228,6 @@ fn walk_external_crate_files(
     include_patterns: &[String],
     call_exclude: &[String],
 ) -> Result<Vec<(PathBuf, String)>> {
-    let include_set = (!include_patterns.is_empty())
-        .then(|| build_globset(include_patterns, true))
-        .transpose()?;
-    let (exclude_set, neg_exclude_set) = ctx.build_exclude_globsets(call_exclude, true)?;
-
-    let format_rel = |rel: &Path| -> String {
-        let rel_str = rel.to_string_lossy();
-        match crate_label {
-            Some(label) if !rel_str.is_empty() => format!("{label}/{rel_str}"),
-            Some(label) => label.to_string(),
-            None => format_tilde_path(&base_root.join(rel)),
-        }
-    };
-
-    if scan_root != base_root {
-        let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
-        ctx.check_rel_path_allowed(&rel, &exclude_set, &neg_exclude_set)?;
-    }
-    if scan_root.is_file() {
-        let rel = diff_paths(scan_root, base_root).unwrap_or_else(|| scan_root.to_path_buf());
-        return Ok(vec![(scan_root.to_path_buf(), format_rel(&rel))]);
-    }
-
-    let mut files = Vec::new();
     let walker = WalkBuilder::new(scan_root)
         .hidden(false)
         .git_ignore(false)
@@ -1265,32 +1235,21 @@ fn walk_external_crate_files(
         .git_exclude(false)
         .build()
         .flatten();
-
-    for entry in walker {
-        if files.len() >= ctx.config.workspace_snapshot.max_files {
-            break;
-        }
-        let path = entry.path();
-        if !path.is_file() || has_git_dir_component(path) {
-            continue;
-        }
-        let Some(relative) = diff_paths(path, base_root) else {
-            continue;
-        };
-        if ctx
-            .check_rel_path_allowed(&relative, &exclude_set, &neg_exclude_set)
-            .is_err()
-            || include_set
-                .as_ref()
-                .is_some_and(|inc| !inc.is_match(&relative))
-        {
-            continue;
-        }
-        files.push((path.to_path_buf(), format_rel(&relative)));
-    }
-
-    files.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(files)
+    ctx.walk_filtered_files(
+        base_root,
+        scan_root,
+        include_patterns,
+        call_exclude,
+        walker,
+        |rel| {
+            let rel_str = rel.to_string_lossy();
+            match crate_label {
+                Some(label) if !rel_str.is_empty() => format!("{label}/{rel_str}"),
+                Some(label) => label.to_string(),
+                None => format_tilde_path(&base_root.join(rel)),
+            }
+        },
+    )
 }
 
 fn collect_candidate_files(

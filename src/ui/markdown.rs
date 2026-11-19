@@ -29,23 +29,6 @@ enum ListMarker {
     },
 }
 
-enum QuoteContent {
-    Plain(Vec<Span<'static>>),
-    Header {
-        level: usize,
-        spans: Vec<Span<'static>>,
-    },
-    ListItem {
-        indent: usize,
-        marker: ListMarker,
-        spans: Vec<Span<'static>>,
-    },
-    ListContinuation {
-        indent: usize,
-        spans: Vec<Span<'static>>,
-    },
-}
-
 enum WrappedLine {
     CodeFence(String),
     CodeLine(String),
@@ -67,7 +50,7 @@ enum WrappedLine {
     Blockquote {
         indent: usize,
         depth: usize,
-        content: QuoteContent,
+        content: Box<WrappedLine>,
     },
     Plain(Vec<Span<'static>>),
 }
@@ -981,6 +964,147 @@ impl Default for MarkdownParserState {
     }
 }
 
+fn parse_content_block_lines(
+    line: &str,
+    base_style: Style,
+    list_levels: &mut Vec<(usize, usize)>,
+    in_params_block: Option<&mut bool>,
+    options: &textwrap::Options<'_>,
+) -> Vec<WrappedLine> {
+    if let Some((level, hdr_content)) = parse_markdown_header(line) {
+        list_levels.clear();
+        if let Some(p) = in_params_block {
+            *p = false;
+        }
+        let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
+            .break_words(options.break_words);
+        return wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts)
+            .into_iter()
+            .map(|spans| WrappedLine::Header { level, spans })
+            .collect();
+    }
+
+    if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
+        if let Some(p) = in_params_block {
+            *p = false;
+        }
+        return wrap_list_item_lines(
+            raw_indent,
+            kind,
+            item_text,
+            base_style,
+            list_levels,
+            options.width,
+            options.break_words,
+        )
+        .into_iter()
+        .map(|(indent, maybe_marker, spans)| match maybe_marker {
+            Some(marker) => WrappedLine::ListItem {
+                indent,
+                marker,
+                spans,
+            },
+            None => WrappedLine::ListContinuation { indent, spans },
+        })
+        .collect();
+    }
+
+    if line.trim().is_empty() {
+        if let Some(p) = in_params_block {
+            *p = false;
+        }
+        return vec![WrappedLine::Plain(Vec::new())];
+    }
+
+    let trimmed = line.trim_start();
+    let is_top_level = in_params_block.is_some();
+    if let Some(in_params) = in_params_block {
+        if trimmed == "Parameters:" {
+            *in_params = true;
+        }
+        if *in_params {
+            list_levels.clear();
+            let style = if trimmed == "Parameters:" {
+                Style::default()
+                    .fg(theme::MD_TOOL_PARAM)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::MD_TOOL_PARAM)
+            };
+            return wrap_raw_line(line, style, options)
+                .into_iter()
+                .map(WrappedLine::Plain)
+                .collect();
+        }
+    }
+
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    while list_levels
+        .last()
+        .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
+    {
+        list_levels.pop();
+    }
+    if let Some(&(_, hanging_indent)) = list_levels.last() {
+        let text_width = options.width.saturating_sub(hanging_indent).max(1);
+        let cont_opts = textwrap::Options::new(text_width).break_words(options.break_words);
+        return wrap_markdown_line(trimmed, base_style, &cont_opts)
+            .into_iter()
+            .map(|spans| WrappedLine::ListContinuation {
+                indent: hanging_indent,
+                spans,
+            })
+            .collect();
+    }
+
+    if is_top_level && trimmed.starts_with("⚙ ") {
+        let style = Style::default()
+            .fg(theme::MD_TOOL_PARAM)
+            .add_modifier(Modifier::ITALIC);
+        return wrap_raw_line(line, style, options)
+            .into_iter()
+            .map(WrappedLine::Plain)
+            .collect();
+    }
+
+    wrap_markdown_line(line, base_style, options)
+        .into_iter()
+        .map(WrappedLine::Plain)
+        .collect()
+}
+
+fn style_content_line(item: &WrappedLine) -> Vec<Span<'static>> {
+    match item {
+        WrappedLine::Header { level, spans } => style_markdown_header_inner(*level, spans),
+        WrappedLine::ListItem {
+            indent,
+            marker,
+            spans: item_spans,
+        } => {
+            let mut spans = Vec::new();
+            if *indent > 0 {
+                spans.push(Span::raw(" ".repeat(*indent)));
+            }
+            spans.extend(style_list_marker(marker));
+            spans.extend(item_spans.iter().cloned());
+            spans
+        }
+        WrappedLine::ListContinuation {
+            indent,
+            spans: cont_spans,
+        } => {
+            let mut spans = Vec::new();
+            if *indent > 0 {
+                spans.push(Span::raw(" ".repeat(*indent)));
+            }
+            spans.extend(cont_spans.iter().cloned());
+            spans
+        }
+        WrappedLine::Plain(line_spans) => line_spans.clone(),
+        _ => Vec::new(),
+    }
+}
+
 impl MarkdownParserState {
     fn feed_line(
         &mut self,
@@ -1065,86 +1189,19 @@ impl MarkdownParserState {
             }
 
             let inner_width = options.width.saturating_sub(base_indent + depth * 2).max(1);
-            if let Some((level, hdr_content)) = parse_markdown_header(quote_text) {
-                self.quote_list_levels.clear();
-                let hdr_opts = textwrap::Options::new(inner_width.saturating_sub(6).max(1))
-                    .break_words(options.break_words);
-                for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
-                    out.push(WrappedLine::Blockquote {
-                        indent: base_indent,
-                        depth,
-                        content: QuoteContent::Header { level, spans },
-                    });
-                }
-            } else if let Some((q_raw_indent, kind, item_text)) = parse_list_item(quote_text) {
-                for (item_indent, maybe_marker, spans) in wrap_list_item_lines(
-                    q_raw_indent,
-                    kind,
-                    item_text,
-                    quote_style,
-                    &mut self.quote_list_levels,
-                    inner_width,
-                    options.break_words,
-                ) {
-                    let content = match maybe_marker {
-                        Some(marker) => QuoteContent::ListItem {
-                            indent: item_indent,
-                            marker,
-                            spans,
-                        },
-                        None => QuoteContent::ListContinuation {
-                            indent: item_indent,
-                            spans,
-                        },
-                    };
-                    out.push(WrappedLine::Blockquote {
-                        indent: base_indent,
-                        depth,
-                        content,
-                    });
-                }
-            } else if quote_text.trim().is_empty() {
+            let q_opts = textwrap::Options::new(inner_width).break_words(options.break_words);
+            for content in parse_content_block_lines(
+                quote_text,
+                quote_style,
+                &mut self.quote_list_levels,
+                None,
+                &q_opts,
+            ) {
                 out.push(WrappedLine::Blockquote {
                     indent: base_indent,
                     depth,
-                    content: QuoteContent::Plain(Vec::new()),
+                    content: Box::new(content),
                 });
-            } else {
-                let q_leading = quote_text.bytes().take_while(|&b| b == b' ').count();
-                while self
-                    .quote_list_levels
-                    .last()
-                    .is_some_and(|&(raw_indent, _)| raw_indent >= q_leading)
-                {
-                    self.quote_list_levels.pop();
-                }
-                if let Some(&(_, hanging_indent)) = self.quote_list_levels.last() {
-                    let text_width = inner_width.saturating_sub(hanging_indent).max(1);
-                    let cont_opts =
-                        textwrap::Options::new(text_width).break_words(options.break_words);
-                    for spans in
-                        wrap_markdown_line(quote_text.trim_start(), quote_style, &cont_opts)
-                    {
-                        out.push(WrappedLine::Blockquote {
-                            indent: base_indent,
-                            depth,
-                            content: QuoteContent::ListContinuation {
-                                indent: hanging_indent,
-                                spans,
-                            },
-                        });
-                    }
-                } else {
-                    let q_opts =
-                        textwrap::Options::new(inner_width).break_words(options.break_words);
-                    for spans in wrap_markdown_line(quote_text, quote_style, &q_opts) {
-                        out.push(WrappedLine::Blockquote {
-                            indent: base_indent,
-                            depth,
-                            content: QuoteContent::Plain(spans),
-                        });
-                    }
-                }
             }
             return;
         }
@@ -1152,87 +1209,13 @@ impl MarkdownParserState {
         self.quote_list_levels.clear();
         self.last_quote_depth = None;
 
-        if let Some((level, hdr_content)) = parse_markdown_header(line) {
-            self.list_levels.clear();
-            self.in_params_block = false;
-            let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
-                .break_words(options.break_words);
-            for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
-                out.push(WrappedLine::Header { level, spans });
-            }
-        } else if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
-            self.in_params_block = false;
-            for (indent, maybe_marker, spans) in wrap_list_item_lines(
-                raw_indent,
-                kind,
-                item_text,
-                Style::default(),
-                &mut self.list_levels,
-                options.width,
-                options.break_words,
-            ) {
-                match maybe_marker {
-                    Some(marker) => out.push(WrappedLine::ListItem {
-                        indent,
-                        marker,
-                        spans,
-                    }),
-                    None => out.push(WrappedLine::ListContinuation { indent, spans }),
-                }
-            }
-        } else if line.trim().is_empty() {
-            self.in_params_block = false;
-            out.push(WrappedLine::Plain(Vec::new()));
-        } else {
-            let trimmed = line.trim_start();
-            if trimmed == "Parameters:" {
-                self.in_params_block = true;
-            }
-            if self.in_params_block {
-                self.list_levels.clear();
-                let style = if trimmed == "Parameters:" {
-                    Style::default()
-                        .fg(theme::MD_TOOL_PARAM)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::MD_TOOL_PARAM)
-                };
-                for spans in wrap_raw_line(line, style, options) {
-                    out.push(WrappedLine::Plain(spans));
-                }
-                return;
-            }
-
-            let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
-            while self
-                .list_levels
-                .last()
-                .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
-            {
-                self.list_levels.pop();
-            }
-            if let Some(&(_, hanging_indent)) = self.list_levels.last() {
-                let text_width = options.width.saturating_sub(hanging_indent).max(1);
-                let cont_opts = textwrap::Options::new(text_width).break_words(options.break_words);
-                for spans in wrap_markdown_line(line.trim_start(), Style::default(), &cont_opts) {
-                    out.push(WrappedLine::ListContinuation {
-                        indent: hanging_indent,
-                        spans,
-                    });
-                }
-            } else if trimmed.starts_with("⚙ ") {
-                let style = Style::default()
-                    .fg(theme::MD_TOOL_PARAM)
-                    .add_modifier(Modifier::ITALIC);
-                for spans in wrap_raw_line(line, style, options) {
-                    out.push(WrappedLine::Plain(spans));
-                }
-            } else {
-                for spans in wrap_markdown_line(line, Style::default(), options) {
-                    out.push(WrappedLine::Plain(spans));
-                }
-            }
-        }
+        out.extend(parse_content_block_lines(
+            line,
+            Style::default(),
+            &mut self.list_levels,
+            Some(&mut self.in_params_block),
+            options,
+        ));
     }
 
     fn flush(&mut self, options: &textwrap::Options<'_>, out: &mut Vec<WrappedLine>) {
@@ -1309,25 +1292,6 @@ impl MarkdownParserState {
                     ]
                 }
                 WrappedLine::TableRow(spans) => spans.clone(),
-                WrappedLine::Header { level, spans } => style_markdown_header(*level, spans),
-                WrappedLine::ListItem {
-                    indent,
-                    marker,
-                    spans: item_spans,
-                } => {
-                    let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
-                    spans.extend(style_list_marker(marker));
-                    spans.extend(item_spans.iter().cloned());
-                    spans
-                }
-                WrappedLine::ListContinuation {
-                    indent,
-                    spans: cont_spans,
-                } => {
-                    let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
-                    spans.extend(cont_spans.iter().cloned());
-                    spans
-                }
                 WrappedLine::Blockquote {
                     indent,
                     depth,
@@ -1335,42 +1299,12 @@ impl MarkdownParserState {
                 } => {
                     let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
                     spans.extend(style_blockquote_bars(*depth));
-                    match content {
-                        QuoteContent::Plain(q_spans) => {
-                            spans.extend(q_spans.iter().cloned());
-                        }
-                        QuoteContent::Header {
-                            level,
-                            spans: h_spans,
-                        } => {
-                            spans.extend(style_markdown_header_inner(*level, h_spans));
-                        }
-                        QuoteContent::ListItem {
-                            indent: item_indent,
-                            marker,
-                            spans: item_spans,
-                        } => {
-                            if *item_indent > 0 {
-                                spans.push(Span::raw(" ".repeat(*item_indent)));
-                            }
-                            spans.extend(style_list_marker(marker));
-                            spans.extend(item_spans.iter().cloned());
-                        }
-                        QuoteContent::ListContinuation {
-                            indent: cont_indent,
-                            spans: cont_spans,
-                        } => {
-                            if *cont_indent > 0 {
-                                spans.push(Span::raw(" ".repeat(*cont_indent)));
-                            }
-                            spans.extend(cont_spans.iter().cloned());
-                        }
-                    }
+                    spans.extend(style_content_line(content));
                     spans
                 }
-                WrappedLine::Plain(line_spans) => {
+                other => {
                     let mut spans = vec![Span::raw("  ")];
-                    spans.extend(line_spans.iter().cloned());
+                    spans.extend(style_content_line(other));
                     spans
                 }
             };
@@ -1495,12 +1429,6 @@ fn style_markdown_header_inner(
             Style::default().fg(theme::MD_HEADER_ACCENT),
         ));
     }
-    spans
-}
-
-fn style_markdown_header(level: usize, content_spans: &[Span<'static>]) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw("  ")];
-    spans.extend(style_markdown_header_inner(level, content_spans));
     spans
 }
 

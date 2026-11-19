@@ -318,18 +318,9 @@ impl CliApp {
             turn.active_skill = Some(name);
             turn.skill_args = Some(raw_prompt.clone());
             raw_prompt
-        } else if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
-            let name = skills::check_skill_activation(cmd_token, enable_tools, &self.config)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            turn.active_skill = Some(name);
-            turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
-            if args_str.is_empty() {
-                raw_prompt
-            } else {
-                args_str.to_string()
-            }
         } else {
-            raw_prompt
+            skills::apply_at_skill_to_turn(&raw_prompt, &mut turn, &self.config)
+                .map_err(|e| anyhow::anyhow!(e))?
         };
 
         // 1. Load existing session if requested

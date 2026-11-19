@@ -67,6 +67,31 @@ fn render_modal<W: Widget>(f: &mut Frame, percent_x: u16, percent_y: u16, widget
     render_modal_at(f, centered_rect(percent_x, percent_y, f.area()), widget);
 }
 
+fn hint_line(text: impl Into<String>) -> Line<'static> {
+    Line::from(Span::styled(
+        text.into(),
+        Style::default().fg(theme::MODAL_HINT),
+    ))
+}
+
+fn tab_styles(
+    first_active: bool,
+    first_color: ratatui::style::Color,
+    second_color: ratatui::style::Color,
+) -> (Style, Style) {
+    let active = |c| {
+        Style::default()
+            .fg(c)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    };
+    let inactive = Style::default().fg(theme::TAB_INACTIVE);
+    if first_active {
+        (active(first_color), inactive)
+    } else {
+        (inactive, active(second_color))
+    }
+}
+
 fn selection_style(selected: bool, active: bool) -> (&'static str, Style) {
     let prefix = if selected { ">> " } else { "   " };
     let style = if selected {
@@ -266,20 +291,11 @@ impl TuiApp {
         let recent_count = self.sessions.iter().filter(|s| !s.pinned).count();
         let pinned_count = self.sessions.iter().filter(|s| s.pinned).count();
 
-        let (recent_style, pinned_style) = match self.session_view {
-            SessionView::Recent => (
-                Style::default()
-                    .fg(theme::TAB_RECENT_ACTIVE)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(theme::TAB_INACTIVE),
-            ),
-            SessionView::Pinned => (
-                Style::default().fg(theme::TAB_INACTIVE),
-                Style::default()
-                    .fg(theme::TAB_PINNED_ACTIVE)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-        };
+        let (recent_style, pinned_style) = tab_styles(
+            self.session_view == SessionView::Recent,
+            theme::TAB_RECENT_ACTIVE,
+            theme::TAB_PINNED_ACTIVE,
+        );
 
         let pin_action_label = match self.session_view {
             SessionView::Recent => "[P] Pin",
@@ -298,11 +314,8 @@ impl TuiApp {
             Span::raw("]"),
         ]);
 
-        let footer_lines = vec![Line::from(Span::styled(
-            format!(
-                " [Tab/←/→] Switch View   {pin_action_label}   [⏎] Load   [D] Delete   [Esc] Close"
-            ),
-            Style::default().fg(theme::MODAL_HINT),
+        let footer_lines = vec![hint_line(format!(
+            " [Tab/←/→] Switch View   {pin_action_label}   [⏎] Load   [D] Delete   [Esc] Close"
         ))];
 
         let chunks = Layout::default()
@@ -414,27 +427,18 @@ impl TuiApp {
             )),
             Line::from(format!("> {}", sanitize_line(&self.tool_feedback))),
             Line::from(""),
-            Line::from(Span::styled(
-                "[⏎] Approve Once",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[^A] Always (Session)",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[Esc] Decline",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[⇧Esc] Cancel All",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[↑/↓/PgUp/PgDn] Scroll",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
         ]);
+        lines.extend(
+            [
+                "[⏎] Approve Once",
+                "[^A] Always (Session)",
+                "[Esc] Decline",
+                "[⇧Esc] Cancel All",
+                "[↑/↓/PgUp/PgDn] Scroll",
+            ]
+            .into_iter()
+            .map(hint_line),
+        );
 
         let widget = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -572,39 +576,21 @@ impl TuiApp {
             )),
             Line::from(format!("> {}", sanitize_line(&self.truncated_guide_prompt))),
             Line::from(""),
-            Line::from(Span::styled(
-                format!("[⏎] Proceed Truncated ({max_kb}KB)"),
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                format!("[^F] Proceed Full ({captured_full_kb}KB)"),
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[^C] Condense Truncated",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[^G] Condense Full",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[Esc/^D] Discard Output",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[⇧Esc] Cancel All",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[Tab/Click] Fold/Unfold",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
-            Line::from(Span::styled(
-                "[↑/↓/PgUp/PgDn] Scroll",
-                Style::default().fg(theme::MODAL_HINT),
-            )),
+            hint_line(format!("[⏎] Proceed Truncated ({max_kb}KB)")),
+            hint_line(format!("[^F] Proceed Full ({captured_full_kb}KB)")),
         ]);
+        lines.extend(
+            [
+                "[^C] Condense Truncated",
+                "[^G] Condense Full",
+                "[Esc/^D] Discard Output",
+                "[⇧Esc] Cancel All",
+                "[Tab/Click] Fold/Unfold",
+                "[↑/↓/PgUp/PgDn] Scroll",
+            ]
+            .into_iter()
+            .map(hint_line),
+        );
 
         let widget = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
             chat_block(format!(
@@ -652,20 +638,11 @@ impl TuiApp {
         } else {
             ("DISABLED", theme::STATUS_DISABLED)
         };
-        let (global_style, ws_style) = match self.memory_scope {
-            MemoryScope::Global => (
-                Style::default()
-                    .fg(theme::TAB_GLOBAL_ACTIVE)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-                Style::default().fg(theme::TAB_INACTIVE),
-            ),
-            MemoryScope::Workspace => (
-                Style::default().fg(theme::TAB_INACTIVE),
-                Style::default()
-                    .fg(theme::TAB_WORKSPACE_ACTIVE)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-        };
+        let (global_style, ws_style) = tab_styles(
+            self.memory_scope == MemoryScope::Global,
+            theme::TAB_GLOBAL_ACTIVE,
+            theme::TAB_WORKSPACE_ACTIVE,
+        );
         let header = Line::from(vec![
             Span::styled(
                 "Persistent Memory (MEMORY.md) ",
@@ -720,8 +697,8 @@ impl TuiApp {
             " [C] Copy to Clipboard",
             " [Esc/^G] Close",
         ]
-        .iter()
-        .map(|s| Line::from(Span::styled(*s, Style::default().fg(theme::MODAL_HINT))))
+        .into_iter()
+        .map(hint_line)
         .collect();
         f.render_widget(Paragraph::new(payload_footer), chunks[1]);
     }
@@ -756,15 +733,7 @@ fn draw_editor_modal(
     let area = centered_rect(75, 60, f.area());
     f.render_widget(Clear, area);
 
-    let footer_lines: Vec<Line> = footer_text
-        .split('\n')
-        .map(|s| {
-            Line::from(Span::styled(
-                s.to_string(),
-                Style::default().fg(theme::MODAL_HINT),
-            ))
-        })
-        .collect();
+    let footer_lines: Vec<Line> = footer_text.split('\n').map(hint_line).collect();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
