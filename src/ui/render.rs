@@ -1,8 +1,7 @@
 use super::{
     ActiveModal, CodeCopyButton, ForkButton, MsgUiState, SlashCommand, TuiApp,
     markdown::{
-        extract_code_block_from, is_opening_code_fence, render_markdown, render_thought_markdown,
-        spans_display_width,
+        extract_code_block_from, is_opening_code_fence, render_markdown, spans_display_width,
     },
     theme, titled_block,
 };
@@ -240,6 +239,8 @@ impl TuiApp {
     fn rebuild_styled_messages(&mut self, available_width: usize, options: &textwrap::Options<'_>) {
         if self.last_wrap_width != available_width {
             self.styled_messages.clear();
+            self.stream_cache.clear();
+            self.stream_thought_cache.clear();
             self.stream_dirty = true;
             self.stream_thought_dirty = true;
             self.last_wrap_width = available_width;
@@ -282,29 +283,22 @@ impl TuiApp {
             self.msg_states[i].unfolded = true;
 
             if self.stream_thought_dirty {
-                let sanitized_thought = sanitize_line(&self.streaming_thought);
-                self.styled_stream_thought = if sanitized_thought.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    render_thought_markdown(&sanitized_thought, options)
-                };
+                self.stream_thought_cache
+                    .update(&self.streaming_thought, options, true);
                 self.stream_thought_dirty = false;
             }
 
             if self.stream_dirty {
-                let sanitized_stream = sanitize_line(&self.streaming_text);
-                self.styled_stream = if sanitized_stream.trim().is_empty() {
-                    Vec::new()
-                } else {
-                    render_markdown(&sanitized_stream, options)
-                };
+                self.stream_cache
+                    .update(&self.streaming_text, options, false);
                 self.stream_dirty = false;
             }
 
-            let styled_stream = if self.streaming_text.is_empty() {
-                self.styled_stream_thought.clone()
+            let use_thought = self.streaming_text.is_empty();
+            let styled_stream = if use_thought {
+                std::mem::take(&mut self.stream_thought_cache.lines)
             } else {
-                self.styled_stream.clone()
+                std::mem::take(&mut self.stream_cache.lines)
             };
             self.render_message_block(
                 i,
@@ -314,6 +308,11 @@ impl TuiApp {
                 lines,
                 false,
             );
+            if use_thought {
+                self.stream_thought_cache.lines = styled_stream;
+            } else {
+                self.stream_cache.lines = styled_stream;
+            }
         } else if let Some(ref tool_status) = self.active_tool_status {
             let i = self.messages.len();
             let start_visual = lines.len();

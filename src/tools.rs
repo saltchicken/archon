@@ -143,30 +143,6 @@ impl ToolContext {
         })
     }
 
-    fn from_cwd() -> Result<Self> {
-        let root = workspace_root()?;
-        let ws_dir = crate::core::config::workspace_config_dir_for(&root);
-        let base_path = crate::core::config::archon_config_root().join("config.toml");
-        let config = if base_path.exists() {
-            Config::load(&base_path, &ws_dir).0
-        } else {
-            let mut cfg = Config::default();
-            let ws_skills_dir = ws_dir.join("skills");
-            cfg.skills = crate::core::skills::discover_skills(
-                &cfg.app.skills_dir,
-                Some(ws_skills_dir.as_path()),
-            );
-            cfg.workspace_skills_dir = Some(ws_skills_dir);
-            cfg
-        };
-        Ok(Self {
-            root,
-            max_output_size: 0,
-            active_skill: None,
-            config,
-        })
-    }
-
     pub fn ensure_within_workspace(&self, path: &Path, label: &str) -> Result<PathBuf> {
         ensure_within_root(path, &self.root, label)
     }
@@ -1052,13 +1028,21 @@ fn append_diff_result(out: &mut String, res: Result<(String, String, String, Opt
     }
 }
 
-fn format_edit_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+fn format_edit_approval(
+    out: &mut String,
+    args: &Value,
+    obj: &Map<String, Value>,
+    config: &Config,
+    active_skill: Option<&str>,
+) {
     let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
     let _ = writeln!(out, "  file_path: {file_path}");
     append_filtered_kvs(out, obj, &["file_path", "edits"]);
 
-    let preview = parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
-        .and_then(|parsed| edit_file::preview_edits(&parsed, &ToolContext::from_cwd()?));
+    let preview =
+        parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME).and_then(|parsed| {
+            edit_file::preview_edits(&parsed, &ToolContext::new(config, active_skill, 0)?)
+        });
 
     match preview {
         Ok((_, original, updated, hunk_count)) => {
@@ -1076,10 +1060,17 @@ fn format_edit_approval(out: &mut String, args: &Value, obj: &Map<String, Value>
     }
 }
 
-fn format_fs_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+fn format_fs_approval(
+    out: &mut String,
+    args: &Value,
+    obj: &Map<String, Value>,
+    config: &Config,
+    active_skill: Option<&str>,
+) {
     append_filtered_kvs(out, obj, &[]);
-    let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME)
-        .and_then(|parsed| fs::preview_action(&parsed, &ToolContext::from_cwd()?));
+    let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME).and_then(|parsed| {
+        fs::preview_action(&parsed, &ToolContext::new(config, active_skill, 0)?)
+    });
     match preview {
         Ok((summary, maybe_diff)) => {
             let _ = write!(out, "\n--- OPERATION ---\n{summary}\n");
@@ -1091,50 +1082,57 @@ fn format_fs_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) 
     }
 }
 
-fn format_dotfiles_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+fn format_dotfiles_approval(
+    out: &mut String,
+    args: &Value,
+    obj: &Map<String, Value>,
+    config: &Config,
+) {
     append_filtered_kvs(out, obj, &["edits", "content"]);
 
-    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME)
-        && let Ok(ctx) = ToolContext::from_cwd()
-    {
+    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) {
         match parsed.action {
             dotfiles::DotfilesAction::Edit => append_diff_result(
                 out,
-                dotfiles::preview_edit(&parsed, &ctx.config)
+                dotfiles::preview_edit(&parsed, config)
                     .map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
             ),
             dotfiles::DotfilesAction::Create => append_diff_result(
                 out,
-                dotfiles::preview_create(&parsed, &ctx.config)
+                dotfiles::preview_create(&parsed, config)
                     .map(|(_, d)| (d, String::new(), parsed.content, None)),
             ),
-            dotfiles::DotfilesAction::Restore => {
-                match dotfiles::preview_restore(&parsed, &ctx.config) {
-                    Ok((file_count, diff)) => {
-                        let _ = writeln!(out, "  files: {file_count}");
-                        out.push_str("\n--- UNIFIED DIFF ---\n");
-                        out.push_str(if diff.trim().is_empty() {
-                            "(No differences)\n"
-                        } else {
-                            &diff
-                        });
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
+            dotfiles::DotfilesAction::Restore => match dotfiles::preview_restore(&parsed, config) {
+                Ok((file_count, diff)) => {
+                    let _ = writeln!(out, "  files: {file_count}");
+                    out.push_str("\n--- UNIFIED DIFF ---\n");
+                    out.push_str(if diff.trim().is_empty() {
+                        "(No differences)\n"
+                    } else {
+                        &diff
+                    });
+                    if !out.ends_with('\n') {
+                        out.push('\n');
                     }
-                    Err(e) => append_warning(out, &e),
                 }
-            }
+                Err(e) => append_warning(out, &e),
+            },
             _ => {}
         }
     }
 }
 
-fn format_skill_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+fn format_skill_approval(
+    out: &mut String,
+    args: &Value,
+    obj: &Map<String, Value>,
+    config: &Config,
+    active_skill: Option<&str>,
+) {
     append_filtered_kvs(out, obj, &["edits", "content", "prompt"]);
 
     if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
-        && let Ok(ctx) = ToolContext::from_cwd()
+        && let Ok(ctx) = ToolContext::new(config, active_skill, 0)
     {
         match parsed.action {
             skill::SkillAction::Modify => append_diff_result(
@@ -1150,11 +1148,17 @@ fn format_skill_approval(out: &mut String, args: &Value, obj: &Map<String, Value
     }
 }
 
-fn format_memory_approval(out: &mut String, args: &Value, obj: &Map<String, Value>) {
+fn format_memory_approval(
+    out: &mut String,
+    args: &Value,
+    obj: &Map<String, Value>,
+    config: &Config,
+    active_skill: Option<&str>,
+) {
     append_filtered_kvs(out, obj, &[]);
 
     if let Ok(parsed) = parse_args::<memory::MemoryArgs>(args, memory::Tool::NAME)
-        && let Ok(ctx) = ToolContext::from_cwd()
+        && let Ok(ctx) = ToolContext::new(config, active_skill, 0)
         && !matches!(
             parsed.action,
             memory::MemoryAction::List | memory::MemoryAction::Read
@@ -1167,7 +1171,7 @@ fn format_memory_approval(out: &mut String, args: &Value, obj: &Map<String, Valu
     }
 }
 
-pub fn format_approval(call: &ToolCall) -> String {
+pub fn format_approval(call: &ToolCall, config: &Config, active_skill: Option<&str>) -> String {
     let name = &call.function.name;
     let args = &call.function.arguments;
     let sig = call_signature(call);
@@ -1181,11 +1185,11 @@ pub fn format_approval(call: &ToolCall) -> String {
 
     let mut out = format!("Tool: {name} (Rule: {sig})\n");
     match name.as_str() {
-        "edit_file" => format_edit_approval(&mut out, args, obj),
-        "fs" => format_fs_approval(&mut out, args, obj),
-        "dotfiles" => format_dotfiles_approval(&mut out, args, obj),
-        "skill" => format_skill_approval(&mut out, args, obj),
-        "memory" => format_memory_approval(&mut out, args, obj),
+        "edit_file" => format_edit_approval(&mut out, args, obj, config, active_skill),
+        "fs" => format_fs_approval(&mut out, args, obj, config, active_skill),
+        "dotfiles" => format_dotfiles_approval(&mut out, args, obj, config),
+        "skill" => format_skill_approval(&mut out, args, obj, config, active_skill),
+        "memory" => format_memory_approval(&mut out, args, obj, config, active_skill),
         _ => {
             let mut multiline_blocks = Vec::new();
             for (k, v) in obj {

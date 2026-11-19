@@ -98,8 +98,10 @@ impl CoreEngine {
             return;
         };
         let (index, total) = self.tool_batch_progress();
+        let formatted_preview =
+            tools::format_approval(call, &self.config, self.active_turn_skill());
         let _ = self.tx.send(EngineEvent::ToolApprovalRequested {
-            formatted_preview: tools::format_approval(call),
+            formatted_preview,
             index,
             total,
         });

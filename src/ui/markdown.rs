@@ -580,7 +580,7 @@ fn draw_table_border(col_widths: &[usize], left: char, mid: char, right: char) -
     format!("{left}{}{right}", segments.join(&mid.to_string()))
 }
 
-fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<Vec<WrappedLine>> {
+fn format_markdown_table(raw_lines: &[String], available_width: usize) -> Option<Vec<WrappedLine>> {
     if raw_lines.len() < 2 {
         return None;
     }
@@ -703,7 +703,7 @@ fn format_markdown_table(raw_lines: &[&str], available_width: usize) -> Option<V
 }
 
 fn flush_table_buffer(
-    table_buf: &mut Vec<&str>,
+    table_buf: &mut Vec<String>,
     out: &mut Vec<WrappedLine>,
     options: &textwrap::Options<'_>,
     list_levels: &mut Vec<(usize, usize)>,
@@ -952,93 +952,121 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     count >= min_len && trimmed[count..].trim().is_empty()
 }
 
-fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine> {
-    let mut out = Vec::new();
-    let mut table_buf: Vec<&str> = Vec::new();
-    let mut list_levels: Vec<(usize, usize)> = Vec::new();
-    let mut quote_list_levels: Vec<(usize, usize)> = Vec::new();
-    let mut last_quote_depth: Option<usize> = None;
-    let mut code_fence: Option<(char, usize)> = None;
-    let mut in_diff_hunk = false;
-    let mut in_params_block = false;
-    let quote_style = Style::default()
-        .fg(theme::MD_QUOTE_TEXT)
-        .add_modifier(Modifier::ITALIC);
+#[derive(Clone)]
+struct MarkdownParserState {
+    table_buf: Vec<String>,
+    list_levels: Vec<(usize, usize)>,
+    quote_list_levels: Vec<(usize, usize)>,
+    last_quote_depth: Option<usize>,
+    code_fence: Option<(char, usize)>,
+    in_diff_hunk: bool,
+    in_params_block: bool,
+    in_code_block: bool,
+    code_fence_width: usize,
+}
 
-    for line in content.lines() {
-        if let Some((fence_char, fence_len)) = code_fence {
+impl Default for MarkdownParserState {
+    fn default() -> Self {
+        Self {
+            table_buf: Vec::new(),
+            list_levels: Vec::new(),
+            quote_list_levels: Vec::new(),
+            last_quote_depth: None,
+            code_fence: None,
+            in_diff_hunk: false,
+            in_params_block: false,
+            in_code_block: false,
+            code_fence_width: 7,
+        }
+    }
+}
+
+impl MarkdownParserState {
+    fn feed_line(
+        &mut self,
+        line: &str,
+        options: &textwrap::Options<'_>,
+        out: &mut Vec<WrappedLine>,
+    ) {
+        let quote_style = Style::default()
+            .fg(theme::MD_QUOTE_TEXT)
+            .add_modifier(Modifier::ITALIC);
+
+        if let Some((fence_char, fence_len)) = self.code_fence {
             if is_closing_fence(line, fence_char, fence_len) {
-                code_fence = None;
+                self.code_fence = None;
                 out.push(WrappedLine::CodeFence(String::new()));
             } else {
                 out.push(WrappedLine::CodeLine(line.to_string()));
             }
-            continue;
+            return;
         }
 
         if let Some((fence_char, fence_len, lang)) = parse_opening_fence(line) {
-            flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
-            quote_list_levels.clear();
-            last_quote_depth = None;
-            in_diff_hunk = false;
-            in_params_block = false;
-            code_fence = Some((fence_char, fence_len));
+            self.flush(options, out);
+            self.quote_list_levels.clear();
+            self.last_quote_depth = None;
+            self.in_diff_hunk = false;
+            self.in_params_block = false;
+            self.code_fence = Some((fence_char, fence_len));
             out.push(WrappedLine::CodeFence(lang.to_string()));
-            continue;
+            return;
         }
 
         if is_diff_hunk_header(line) {
-            flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
-            list_levels.clear();
-            quote_list_levels.clear();
-            last_quote_depth = None;
-            in_params_block = false;
-            in_diff_hunk = true;
+            self.flush(options, out);
+            self.list_levels.clear();
+            self.quote_list_levels.clear();
+            self.last_quote_depth = None;
+            self.in_params_block = false;
+            self.in_diff_hunk = true;
             for part in wrap_raw_line(line, Style::default(), options) {
                 out.push(WrappedLine::Plain(part));
             }
-            continue;
+            return;
         }
 
-        if in_diff_hunk {
+        if self.in_diff_hunk {
             if is_diff_body_line(line) {
                 for part in wrap_raw_line(line, Style::default(), options) {
                     out.push(WrappedLine::Plain(part));
                 }
-                continue;
+                return;
             }
-            in_diff_hunk = false;
+            self.in_diff_hunk = false;
         }
 
         if !line.trim_start().starts_with('>') && is_table_line(line) {
-            quote_list_levels.clear();
-            last_quote_depth = None;
-            in_params_block = false;
-            table_buf.push(line);
-            continue;
+            self.quote_list_levels.clear();
+            self.last_quote_depth = None;
+            self.in_params_block = false;
+            self.table_buf.push(line.to_string());
+            return;
         }
 
-        flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
+        self.flush(options, out);
 
         if let Some((leading_spaces, depth, quote_text)) = parse_blockquote(line) {
-            in_params_block = false;
-            while list_levels
+            self.in_params_block = false;
+            while self
+                .list_levels
                 .last()
                 .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
             {
-                list_levels.pop();
+                self.list_levels.pop();
             }
-            let base_indent = list_levels
+            let base_indent = self
+                .list_levels
                 .last()
                 .map_or(0, |&(_, hanging_indent)| hanging_indent);
-            if last_quote_depth != Some(depth) {
-                quote_list_levels.clear();
-                last_quote_depth = Some(depth);
+            if self.last_quote_depth != Some(depth) {
+                self.quote_list_levels.clear();
+                self.last_quote_depth = Some(depth);
             }
 
             let inner_width = options.width.saturating_sub(base_indent + depth * 2).max(1);
             if let Some((level, hdr_content)) = parse_markdown_header(quote_text) {
-                quote_list_levels.clear();
+                self.quote_list_levels.clear();
                 let hdr_opts = textwrap::Options::new(inner_width.saturating_sub(6).max(1))
                     .break_words(options.break_words);
                 for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
@@ -1054,7 +1082,7 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                     kind,
                     item_text,
                     quote_style,
-                    &mut quote_list_levels,
+                    &mut self.quote_list_levels,
                     inner_width,
                     options.break_words,
                 ) {
@@ -1083,13 +1111,14 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 });
             } else {
                 let q_leading = quote_text.bytes().take_while(|&b| b == b' ').count();
-                while quote_list_levels
+                while self
+                    .quote_list_levels
                     .last()
                     .is_some_and(|&(raw_indent, _)| raw_indent >= q_leading)
                 {
-                    quote_list_levels.pop();
+                    self.quote_list_levels.pop();
                 }
-                if let Some(&(_, hanging_indent)) = quote_list_levels.last() {
+                if let Some(&(_, hanging_indent)) = self.quote_list_levels.last() {
                     let text_width = inner_width.saturating_sub(hanging_indent).max(1);
                     let cont_opts =
                         textwrap::Options::new(text_width).break_words(options.break_words);
@@ -1117,28 +1146,28 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                     }
                 }
             }
-            continue;
+            return;
         }
 
-        quote_list_levels.clear();
-        last_quote_depth = None;
+        self.quote_list_levels.clear();
+        self.last_quote_depth = None;
 
         if let Some((level, hdr_content)) = parse_markdown_header(line) {
-            list_levels.clear();
-            in_params_block = false;
+            self.list_levels.clear();
+            self.in_params_block = false;
             let hdr_opts = textwrap::Options::new(options.width.saturating_sub(6).max(1))
                 .break_words(options.break_words);
             for spans in wrap_markdown_line(hdr_content, header_text_style(level), &hdr_opts) {
                 out.push(WrappedLine::Header { level, spans });
             }
         } else if let Some((raw_indent, kind, item_text)) = parse_list_item(line) {
-            in_params_block = false;
+            self.in_params_block = false;
             for (indent, maybe_marker, spans) in wrap_list_item_lines(
                 raw_indent,
                 kind,
                 item_text,
                 Style::default(),
-                &mut list_levels,
+                &mut self.list_levels,
                 options.width,
                 options.break_words,
             ) {
@@ -1152,15 +1181,15 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 }
             }
         } else if line.trim().is_empty() {
-            in_params_block = false;
+            self.in_params_block = false;
             out.push(WrappedLine::Plain(Vec::new()));
         } else {
             let trimmed = line.trim_start();
             if trimmed == "Parameters:" {
-                in_params_block = true;
+                self.in_params_block = true;
             }
-            if in_params_block {
-                list_levels.clear();
+            if self.in_params_block {
+                self.list_levels.clear();
                 let style = if trimmed == "Parameters:" {
                     Style::default()
                         .fg(theme::MD_TOOL_PARAM)
@@ -1171,17 +1200,18 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
                 for spans in wrap_raw_line(line, style, options) {
                     out.push(WrappedLine::Plain(spans));
                 }
-                continue;
+                return;
             }
 
             let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
-            while list_levels
+            while self
+                .list_levels
                 .last()
                 .is_some_and(|&(raw_indent, _)| raw_indent >= leading_spaces)
             {
-                list_levels.pop();
+                self.list_levels.pop();
             }
-            if let Some(&(_, hanging_indent)) = list_levels.last() {
+            if let Some(&(_, hanging_indent)) = self.list_levels.last() {
                 let text_width = options.width.saturating_sub(hanging_indent).max(1);
                 let cont_opts = textwrap::Options::new(text_width).break_words(options.break_words);
                 for spans in wrap_markdown_line(line.trim_start(), Style::default(), &cont_opts) {
@@ -1204,8 +1234,223 @@ fn wrap_text(content: &str, options: &textwrap::Options<'_>) -> Vec<WrappedLine>
             }
         }
     }
-    flush_table_buffer(&mut table_buf, &mut out, options, &mut list_levels);
-    out
+
+    fn flush(&mut self, options: &textwrap::Options<'_>, out: &mut Vec<WrappedLine>) {
+        flush_table_buffer(&mut self.table_buf, out, options, &mut self.list_levels);
+    }
+
+    fn style_wrapped(
+        &mut self,
+        content_lines: &[WrappedLine],
+        is_thought: bool,
+        out: &mut Vec<Line<'static>>,
+    ) {
+        let border_style = Style::default().fg(theme::MD_CODE_BORDER);
+        let thought_style = Style::default()
+            .fg(theme::MD_THOUGHT)
+            .add_modifier(Modifier::ITALIC);
+
+        for item in content_lines {
+            let mut formatted = match item {
+                WrappedLine::CodeFence(lang) => {
+                    let spans = if !self.in_code_block {
+                        let lang = lang.trim();
+                        let copy_badge = Span::styled(
+                            "󰆏",
+                            Style::default()
+                                .fg(theme::BADGE_CODE_COPY)
+                                .add_modifier(Modifier::BOLD),
+                        );
+                        if lang.is_empty() {
+                            self.code_fence_width = 7;
+                            vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    format!("╭{} ", "─".repeat(self.code_fence_width)),
+                                    border_style,
+                                ),
+                                copy_badge,
+                            ]
+                        } else {
+                            self.code_fence_width = display_width(lang) + 6;
+                            vec![
+                                Span::raw("  "),
+                                Span::styled("╭─ ", border_style),
+                                Span::styled(
+                                    lang.to_string(),
+                                    border_style.add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" ─── ", border_style),
+                                copy_badge,
+                            ]
+                        }
+                    } else {
+                        vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("╰{}", "─".repeat(self.code_fence_width)),
+                                border_style,
+                            ),
+                        ]
+                    };
+                    self.in_code_block = !self.in_code_block;
+                    spans
+                }
+                WrappedLine::CodeLine(line) => {
+                    vec![
+                        Span::styled("  │ ", border_style),
+                        Span::styled(line.clone(), Style::default().fg(theme::MD_CODE_TEXT)),
+                    ]
+                }
+                WrappedLine::TableBorder(line) => {
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(line.clone(), Style::default().fg(theme::MD_TABLE_BORDER)),
+                    ]
+                }
+                WrappedLine::TableRow(spans) => spans.clone(),
+                WrappedLine::Header { level, spans } => style_markdown_header(*level, spans),
+                WrappedLine::ListItem {
+                    indent,
+                    marker,
+                    spans: item_spans,
+                } => {
+                    let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
+                    spans.extend(style_list_marker(marker));
+                    spans.extend(item_spans.iter().cloned());
+                    spans
+                }
+                WrappedLine::ListContinuation {
+                    indent,
+                    spans: cont_spans,
+                } => {
+                    let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
+                    spans.extend(cont_spans.iter().cloned());
+                    spans
+                }
+                WrappedLine::Blockquote {
+                    indent,
+                    depth,
+                    content,
+                } => {
+                    let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
+                    spans.extend(style_blockquote_bars(*depth));
+                    match content {
+                        QuoteContent::Plain(q_spans) => {
+                            spans.extend(q_spans.iter().cloned());
+                        }
+                        QuoteContent::Header {
+                            level,
+                            spans: h_spans,
+                        } => {
+                            spans.extend(style_markdown_header_inner(*level, h_spans));
+                        }
+                        QuoteContent::ListItem {
+                            indent: item_indent,
+                            marker,
+                            spans: item_spans,
+                        } => {
+                            if *item_indent > 0 {
+                                spans.push(Span::raw(" ".repeat(*item_indent)));
+                            }
+                            spans.extend(style_list_marker(marker));
+                            spans.extend(item_spans.iter().cloned());
+                        }
+                        QuoteContent::ListContinuation {
+                            indent: cont_indent,
+                            spans: cont_spans,
+                        } => {
+                            if *cont_indent > 0 {
+                                spans.push(Span::raw(" ".repeat(*cont_indent)));
+                            }
+                            spans.extend(cont_spans.iter().cloned());
+                        }
+                    }
+                    spans
+                }
+                WrappedLine::Plain(line_spans) => {
+                    let mut spans = vec![Span::raw("  ")];
+                    spans.extend(line_spans.iter().cloned());
+                    spans
+                }
+            };
+
+            if is_thought {
+                for span in &mut formatted {
+                    span.style = span.style.patch(thought_style);
+                }
+            }
+            out.push(Line::from(formatted));
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MarkdownStreamCache {
+    committed_bytes: usize,
+    committed_line_count: usize,
+    pub(super) lines: Vec<Line<'static>>,
+    state: MarkdownParserState,
+    wrapped_scratch: Vec<WrappedLine>,
+}
+
+impl MarkdownStreamCache {
+    pub(super) fn clear(&mut self) {
+        self.committed_bytes = 0;
+        self.committed_line_count = 0;
+        self.lines.clear();
+        self.state = MarkdownParserState::default();
+        self.wrapped_scratch.clear();
+    }
+
+    pub(super) fn update(
+        &mut self,
+        raw_text: &str,
+        options: &textwrap::Options<'_>,
+        is_thought: bool,
+    ) {
+        if raw_text.trim().is_empty() {
+            self.lines.clear();
+            return;
+        }
+        if raw_text.len() < self.committed_bytes {
+            self.clear();
+        }
+
+        self.lines.truncate(self.committed_line_count);
+
+        let remaining = &raw_text[self.committed_bytes..];
+        let mut offset = 0usize;
+        while let Some(nl_rel) = remaining[offset..].find('\n') {
+            let line_end = offset + nl_rel;
+            let raw_line = &remaining[offset..line_end];
+            let sanitized = super::render::sanitize_line(raw_line);
+            self.wrapped_scratch.clear();
+            self.state
+                .feed_line(&sanitized, options, &mut self.wrapped_scratch);
+            if !self.wrapped_scratch.is_empty() {
+                self.state
+                    .style_wrapped(&self.wrapped_scratch, is_thought, &mut self.lines);
+            }
+            offset = line_end + 1;
+        }
+        self.committed_bytes += offset;
+        self.committed_line_count = self.lines.len();
+
+        let tail = &raw_text[self.committed_bytes..];
+        let sanitized_tail = super::render::sanitize_line(tail);
+        if !sanitized_tail.is_empty() || !self.state.table_buf.is_empty() {
+            let mut temp_state = self.state.clone();
+            self.wrapped_scratch.clear();
+            if !sanitized_tail.is_empty() {
+                temp_state.feed_line(&sanitized_tail, options, &mut self.wrapped_scratch);
+            }
+            temp_state.flush(options, &mut self.wrapped_scratch);
+            if !self.wrapped_scratch.is_empty() {
+                temp_state.style_wrapped(&self.wrapped_scratch, is_thought, &mut self.lines);
+            }
+        }
+    }
 }
 
 fn parse_markdown_header(line: &str) -> Option<(usize, &str)> {
@@ -1349,135 +1594,19 @@ fn style_list_marker(marker: &ListMarker) -> Vec<Span<'static>> {
     }
 }
 
-fn style_lines(content_lines: &[WrappedLine]) -> Vec<Line<'static>> {
-    let mut in_code_block = false;
-    let mut code_fence_width = 7usize;
-    let mut out = Vec::with_capacity(content_lines.len());
-    let border_style = Style::default().fg(theme::MD_CODE_BORDER);
-
-    for item in content_lines {
-        let formatted = match item {
-            WrappedLine::CodeFence(lang) => {
-                let spans = if !in_code_block {
-                    let lang = lang.trim();
-                    let copy_badge = Span::styled(
-                        "󰆏",
-                        Style::default()
-                            .fg(theme::BADGE_CODE_COPY)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                    if lang.is_empty() {
-                        code_fence_width = 7;
-                        vec![
-                            Span::raw("  "),
-                            Span::styled(
-                                format!("╭{} ", "─".repeat(code_fence_width)),
-                                border_style,
-                            ),
-                            copy_badge,
-                        ]
-                    } else {
-                        code_fence_width = display_width(lang) + 6;
-                        vec![
-                            Span::raw("  "),
-                            Span::styled("╭─ ", border_style),
-                            Span::styled(
-                                lang.to_string(),
-                                border_style.add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(" ─── ", border_style),
-                            copy_badge,
-                        ]
-                    }
-                } else {
-                    vec![
-                        Span::raw("  "),
-                        Span::styled(format!("╰{}", "─".repeat(code_fence_width)), border_style),
-                    ]
-                };
-                in_code_block = !in_code_block;
-                spans
-            }
-            WrappedLine::CodeLine(line) => {
-                vec![
-                    Span::styled("  │ ", border_style),
-                    Span::styled(line.clone(), Style::default().fg(theme::MD_CODE_TEXT)),
-                ]
-            }
-            WrappedLine::TableBorder(line) => {
-                vec![
-                    Span::raw("  "),
-                    Span::styled(line.clone(), Style::default().fg(theme::MD_TABLE_BORDER)),
-                ]
-            }
-            WrappedLine::TableRow(spans) => spans.clone(),
-            WrappedLine::Header { level, spans } => style_markdown_header(*level, spans),
-            WrappedLine::ListItem {
-                indent,
-                marker,
-                spans: item_spans,
-            } => {
-                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
-                spans.extend(style_list_marker(marker));
-                spans.extend(item_spans.iter().cloned());
-                spans
-            }
-            WrappedLine::ListContinuation {
-                indent,
-                spans: cont_spans,
-            } => {
-                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
-                spans.extend(cont_spans.iter().cloned());
-                spans
-            }
-            WrappedLine::Blockquote {
-                indent,
-                depth,
-                content,
-            } => {
-                let mut spans = vec![Span::raw(format!("  {}", " ".repeat(*indent)))];
-                spans.extend(style_blockquote_bars(*depth));
-                match content {
-                    QuoteContent::Plain(q_spans) => {
-                        spans.extend(q_spans.iter().cloned());
-                    }
-                    QuoteContent::Header {
-                        level,
-                        spans: h_spans,
-                    } => {
-                        spans.extend(style_markdown_header_inner(*level, h_spans));
-                    }
-                    QuoteContent::ListItem {
-                        indent: item_indent,
-                        marker,
-                        spans: item_spans,
-                    } => {
-                        if *item_indent > 0 {
-                            spans.push(Span::raw(" ".repeat(*item_indent)));
-                        }
-                        spans.extend(style_list_marker(marker));
-                        spans.extend(item_spans.iter().cloned());
-                    }
-                    QuoteContent::ListContinuation {
-                        indent: cont_indent,
-                        spans: cont_spans,
-                    } => {
-                        if *cont_indent > 0 {
-                            spans.push(Span::raw(" ".repeat(*cont_indent)));
-                        }
-                        spans.extend(cont_spans.iter().cloned());
-                    }
-                }
-                spans
-            }
-            WrappedLine::Plain(line_spans) => {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(line_spans.iter().cloned());
-                spans
-            }
-        };
-        out.push(Line::from(formatted));
+fn render_markdown_with_mode(
+    content: &str,
+    options: &textwrap::Options<'_>,
+    is_thought: bool,
+) -> Vec<Line<'static>> {
+    let mut state = MarkdownParserState::default();
+    let mut wrapped = Vec::new();
+    for line in content.lines() {
+        state.feed_line(line, options, &mut wrapped);
     }
+    state.flush(options, &mut wrapped);
+    let mut out = Vec::with_capacity(wrapped.len());
+    state.style_wrapped(&wrapped, is_thought, &mut out);
     out
 }
 
@@ -1485,27 +1614,12 @@ pub(super) fn render_markdown(
     content: &str,
     options: &textwrap::Options<'_>,
 ) -> Vec<Line<'static>> {
-    style_lines(&wrap_text(content, options))
+    render_markdown_with_mode(content, options, false)
 }
 
-pub(super) fn render_thought_markdown(
-    content: &str,
-    options: &textwrap::Options<'_>,
-) -> Vec<Line<'static>> {
-    let thought_style = Style::default()
-        .fg(theme::MD_THOUGHT)
-        .add_modifier(Modifier::ITALIC);
-    render_markdown(content, options)
-        .into_iter()
-        .map(|line| {
-            Line::from(
-                line.spans
-                    .into_iter()
-                    .map(|span| Span::styled(span.content, span.style.patch(thought_style)))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect()
+#[cfg(test)]
+fn render_thought_markdown(content: &str, options: &textwrap::Options<'_>) -> Vec<Line<'static>> {
+    render_markdown_with_mode(content, options, true)
 }
 
 pub(super) fn is_opening_code_fence(line: &Line<'_>) -> bool {
@@ -1567,5 +1681,43 @@ mod tests {
     #[test]
     fn inline_triple_backticks_do_not_open_code_block() {
         assert!(parse_opening_fence("```inline```").is_none());
+    }
+
+    #[test]
+    fn incremental_stream_cache_matches_full_render_at_every_chunk() {
+        let doc = "# Heading 1\r\n\nSome **bold** and `inline code` text.\n\n- Item 1\n  - Nested task:\n    - [x] Done\n    - [ ] Todo\n\n| Col A | Col B |\n| :--- | ---: |\n| 1 | 200 |\n| 3000 | 4 |\n\n> Quoted line\n> > Deeper quote\n\n```rust\nfn demo(x: i32) -> i32 {\n    x + 1\n}\n```\n\nFinal paragraph.";
+        let opts = textwrap::Options::new(60);
+
+        for (is_thought, step) in [(false, 1usize), (false, 5), (true, 3)] {
+            let mut cache = MarkdownStreamCache::default();
+            let mut acc = String::new();
+            let bytes = doc.as_bytes();
+            let mut idx = 0;
+
+            while idx < bytes.len() {
+                let mut next = (idx + step).min(bytes.len());
+                while next < bytes.len() && !doc.is_char_boundary(next) {
+                    next += 1;
+                }
+                acc.push_str(&doc[idx..next]);
+                idx = next;
+
+                cache.update(&acc, &opts, is_thought);
+                let sanitized = super::super::render::sanitize_line(&acc);
+                let expected = if sanitized.trim().is_empty() {
+                    Vec::new()
+                } else if is_thought {
+                    render_thought_markdown(&sanitized, &opts)
+                } else {
+                    render_markdown(&sanitized, &opts)
+                };
+                assert_eq!(
+                    cache.lines,
+                    expected,
+                    "Mismatch for step={step}, is_thought={is_thought} at prefix len={}",
+                    acc.len()
+                );
+            }
+        }
     }
 }

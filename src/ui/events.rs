@@ -43,7 +43,7 @@ impl TuiApp {
             EngineEvent::StreamChunk(c) => {
                 if self.streaming_text.is_empty() && !c.is_empty() {
                     self.streaming_thought.clear();
-                    self.styled_stream_thought.clear();
+                    self.stream_thought_cache.clear();
                     self.stream_thought_dirty = false;
                 }
                 self.streaming_text.push_str(&c);
@@ -269,8 +269,8 @@ impl TuiApp {
         self.active_tool_status = None;
         self.streaming_text.clear();
         self.streaming_thought.clear();
-        self.styled_stream.clear();
-        self.styled_stream_thought.clear();
+        self.stream_cache.clear();
+        self.stream_thought_cache.clear();
         self.stream_dirty = true;
         self.stream_thought_dirty = true;
         self.scroll_to_bottom();
@@ -330,8 +330,8 @@ impl TuiApp {
     pub(super) fn finish_stream(&mut self) {
         self.is_streaming = false;
         self.active_tool_status = None;
-        self.styled_stream.clear();
-        self.styled_stream_thought.clear();
+        self.stream_cache.clear();
+        self.stream_thought_cache.clear();
         self.stream_dirty = false;
         self.stream_thought_dirty = false;
     }
