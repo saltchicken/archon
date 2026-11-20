@@ -326,7 +326,8 @@ pub fn is_hook_already_in_session(
 ) -> bool {
     executed_hooks.contains(key)
         || messages.iter().any(|m| {
-            (m.role == "hook" || (m.role == "local" && m.include_in_context))
+            m.include_in_context
+                && matches!(m.role.as_str(), "hook" | "local")
                 && m.tool_name.as_deref() == Some(summary)
         })
 }
@@ -626,5 +627,15 @@ Run checks and notify."#;
         assert_eq!(after_turn.len(), 1);
         assert_eq!(after_turn[0].1.function.name, "notify");
         assert_eq!(after_turn[0].0, "notify (summary=Turn finished)");
+
+        // An `after_turn` hook message (which has `include_in_context = false`)
+        // should not suppress a subsequent `on_activate` hook with the same summary.
+        let mut after_msg = ChatMessage::new_hook("cargo:metadata", "ok", false);
+        after_msg.include_in_context = false;
+        let mut fresh_executed = HashSet::new();
+        let due_with_after_msg =
+            collect_due_hooks(&cfg, Some("runner"), &mut fresh_executed, &[after_msg]);
+        assert_eq!(due_with_after_msg.len(), 2);
+        assert_eq!(due_with_after_msg[0].0, "cargo:metadata");
     }
 }

@@ -97,12 +97,16 @@ impl CoreEngine {
         true
     }
 
-    fn spawn_hooks(&mut self, hooks: Vec<(String, ToolCall)>, after_turn: bool) {
+    fn spawn_hooks(
+        &mut self,
+        hooks: Vec<(String, ToolCall)>,
+        active_skill: Option<String>,
+        after_turn: bool,
+    ) {
         let total = hooks.len();
         let phase = if after_turn { "after-turn" } else { "pre-turn" };
         info!("Running {total} {phase} skill hook(s)");
         let cfg = self.config.clone();
-        let active_skill = self.turn.active_skill.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
 
@@ -121,6 +125,7 @@ impl CoreEngine {
                     summary,
                     output: res.truncated_output,
                     truncated: res.truncated,
+                    after_turn,
                 });
             }
             let _ = tx.send(EngineEvent::HooksFinished { after_turn });
@@ -139,7 +144,7 @@ impl CoreEngine {
             return;
         }
 
-        self.spawn_hooks(hooks, false);
+        self.spawn_hooks(hooks, turn.active_skill.clone(), false);
     }
 
     pub(super) async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
@@ -382,7 +387,9 @@ impl CoreEngine {
         let final_text = std::mem::take(&mut self.inflight.stream_buffer);
         self.inflight.thought_stream_buffer.clear();
 
-        if !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty() {
+        let has_response =
+            !final_text.trim().is_empty() || !tool_calls.is_empty() || !thoughts.is_empty();
+        if has_response {
             self.session.messages.push(ChatMessage {
                 tool_calls: (!tool_calls.is_empty()).then(|| tool_calls.clone()),
                 thoughts: (!thoughts.is_empty()).then_some(thoughts),
@@ -404,7 +411,7 @@ impl CoreEngine {
             let _ = self.tx.send(ev);
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
-        } else {
+        } else if has_response {
             let after_hooks =
                 skills::collect_after_turn_hooks(&self.config, self.turn.active_skill.as_deref());
             if after_hooks.is_empty() {
@@ -415,8 +422,11 @@ impl CoreEngine {
                     .tx
                     .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
                 self.inflight.pending_stream_done = Some(ev);
-                self.spawn_hooks(after_hooks, true);
+                self.spawn_hooks(after_hooks, self.turn.active_skill.clone(), true);
             }
+        } else {
+            let _ = self.tx.send(ev);
+            self.flush_queued_interjections().await;
         }
     }
 
@@ -436,12 +446,17 @@ impl CoreEngine {
         summary: String,
         output: String,
         truncated: bool,
+        after_turn: bool,
     ) {
         self.sync_tool_side_effects(&tool_name);
-        info!("Skill hook '{summary}' completed (truncated: {truncated})");
-        self.session
-            .messages
-            .push(ChatMessage::new_hook(summary, output, truncated));
+        info!(
+            "Skill hook '{summary}' completed (truncated: {truncated}, after_turn: {after_turn})"
+        );
+        let mut msg = ChatMessage::new_hook(summary, output, truncated);
+        if after_turn {
+            msg.include_in_context = false;
+        }
+        self.session.messages.push(msg);
         self.save_and_emit_chat(Vec::new()).await;
     }
 

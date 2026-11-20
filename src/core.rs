@@ -400,8 +400,9 @@ impl CoreEngine {
                 summary,
                 output,
                 truncated,
+                after_turn,
             } => {
-                self.on_hook_completed(tool_name, summary, output, truncated)
+                self.on_hook_completed(tool_name, summary, output, truncated, after_turn)
                     .await;
             }
             EngineEvent::HooksFinished { after_turn } => {

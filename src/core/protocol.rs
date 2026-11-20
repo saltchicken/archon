@@ -149,6 +149,7 @@ pub enum EngineEvent {
         summary: String,
         output: String,
         truncated: bool,
+        after_turn: bool,
     },
     HooksFinished {
         after_turn: bool,
