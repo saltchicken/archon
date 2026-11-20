@@ -266,8 +266,11 @@ impl TuiApp {
                 if formatted.trim().is_empty() {
                     self.styled_messages.push(Vec::new());
                 } else {
-                    self.styled_messages
-                        .push(render_markdown(&formatted, options));
+                    self.styled_messages.push(render_markdown(
+                        &formatted,
+                        options,
+                        self.config.ui.style_code_blocks,
+                    ));
                 }
             }
         }
@@ -283,14 +286,22 @@ impl TuiApp {
             self.msg_states[i].unfolded = true;
 
             if self.stream_thought_dirty {
-                self.stream_thought_cache
-                    .update(&self.streaming_thought, options, true);
+                self.stream_thought_cache.update(
+                    &self.streaming_thought,
+                    options,
+                    true,
+                    self.config.ui.style_code_blocks,
+                );
                 self.stream_thought_dirty = false;
             }
 
             if self.stream_dirty {
-                self.stream_cache
-                    .update(&self.streaming_text, options, false);
+                self.stream_cache.update(
+                    &self.streaming_text,
+                    options,
+                    false,
+                    self.config.ui.style_code_blocks,
+                );
                 self.stream_dirty = false;
             }
 
@@ -1171,7 +1182,11 @@ impl TuiApp {
             self.msg_states[block_idx].unfolded = true;
             let qm = &self.queued_messages[q_idx];
             let header = format!("USER{} (QUEUED — Esc to send now)", image_badge(qm));
-            let styled_queued = render_markdown(&sanitize_line(&qm.content), &options);
+            let styled_queued = render_markdown(
+                &sanitize_line(&qm.content),
+                &options,
+                self.config.ui.style_code_blocks,
+            );
             self.render_message_block(
                 block_idx,
                 (&header, theme::HEADER_QUEUED),

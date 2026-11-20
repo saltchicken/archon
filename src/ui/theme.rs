@@ -77,7 +77,7 @@ pub const DIFF_CONTEXT: Color = Color::Cyan;
 // ─── Markdown Rendering ──────────────────────────────────────────────────────
 pub const MD_INLINE_CODE: Color = Color::Yellow;
 pub const MD_CODE_BORDER: Color = Color::Blue;
-pub const MD_CODE_TEXT: Color = Color::LightCyan;
+pub const MD_CODE_TEXT: Color = Color::Cyan;
 pub const MD_CODE_KEYWORD: Color = Color::Green;
 pub const MD_CODE_TYPE: Color = Color::Yellow;
 pub const MD_CODE_FUNCTION: Color = Color::Blue;

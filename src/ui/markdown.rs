@@ -2069,6 +2069,7 @@ struct MarkdownParserState {
     code_fence_width: usize,
     code_lang: CodeLang,
     code_hl_state: CodeHighlightState,
+    style_code_blocks: bool,
 }
 
 impl Default for MarkdownParserState {
@@ -2085,6 +2086,7 @@ impl Default for MarkdownParserState {
             code_fence_width: 7,
             code_lang: CodeLang::Plain,
             code_hl_state: CodeHighlightState::Normal,
+            style_code_blocks: true,
         }
     }
 }
@@ -2363,7 +2365,11 @@ impl MarkdownParserState {
                 WrappedLine::CodeFence(lang) => {
                     let spans = if !self.in_code_block {
                         let lang = lang.trim();
-                        self.code_lang = CodeLang::from_fence(lang);
+                        if self.style_code_blocks {
+                            self.code_lang = CodeLang::from_fence(lang);
+                        } else {
+                            self.code_lang = CodeLang::Plain;
+                        }
                         self.code_hl_state = CodeHighlightState::Normal;
                         let copy_badge = Span::styled(
                             "󰆏",
@@ -2410,11 +2416,18 @@ impl MarkdownParserState {
                 }
                 WrappedLine::CodeLine(line) => {
                     let mut spans = vec![Span::styled("  │ ", border_style)];
-                    spans.extend(highlight_code_line(
-                        line,
-                        self.code_lang,
-                        &mut self.code_hl_state,
-                    ));
+                    if self.style_code_blocks {
+                        spans.extend(highlight_code_line(
+                            line,
+                            self.code_lang,
+                            &mut self.code_hl_state,
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            line.clone(),
+                            Style::default().fg(theme::MD_CODE_TEXT),
+                        ));
+                    }
                     spans
                 }
                 WrappedLine::TableBorder(line) => {
@@ -2474,14 +2487,18 @@ impl MarkdownStreamCache {
         raw_text: &str,
         options: &textwrap::Options<'_>,
         is_thought: bool,
+        style_code_blocks: bool,
     ) {
         if raw_text.trim().is_empty() {
             self.lines.clear();
             return;
         }
-        if raw_text.len() < self.committed_bytes {
+        if raw_text.len() < self.committed_bytes
+            || self.state.style_code_blocks != style_code_blocks
+        {
             self.clear();
         }
+        self.state.style_code_blocks = style_code_blocks;
 
         self.lines.truncate(self.committed_line_count);
 
@@ -2658,8 +2675,12 @@ fn render_markdown_with_mode(
     content: &str,
     options: &textwrap::Options<'_>,
     is_thought: bool,
+    style_code_blocks: bool,
 ) -> Vec<Line<'static>> {
-    let mut state = MarkdownParserState::default();
+    let mut state = MarkdownParserState {
+        style_code_blocks,
+        ..Default::default()
+    };
     let mut wrapped = Vec::new();
     for line in content.lines() {
         state.feed_line(line, options, &mut wrapped);
@@ -2673,13 +2694,18 @@ fn render_markdown_with_mode(
 pub(super) fn render_markdown(
     content: &str,
     options: &textwrap::Options<'_>,
+    style_code_blocks: bool,
 ) -> Vec<Line<'static>> {
-    render_markdown_with_mode(content, options, false)
+    render_markdown_with_mode(content, options, false, style_code_blocks)
 }
 
 #[cfg(test)]
-fn render_thought_markdown(content: &str, options: &textwrap::Options<'_>) -> Vec<Line<'static>> {
-    render_markdown_with_mode(content, options, true)
+fn render_thought_markdown(
+    content: &str,
+    options: &textwrap::Options<'_>,
+    style_code_blocks: bool,
+) -> Vec<Line<'static>> {
+    render_markdown_with_mode(content, options, true, style_code_blocks)
 }
 
 pub(super) fn is_opening_code_fence(line: &Line<'_>) -> bool {
@@ -2717,7 +2743,7 @@ mod tests {
     fn four_backtick_fence_preserves_inner_three_backtick_fence() {
         let md = "````md\n```rs\nfn main() {}\n```\n````";
         let opts = textwrap::Options::new(80);
-        let lines = render_markdown(md, &opts);
+        let lines = render_markdown(md, &opts, true);
 
         assert!(is_opening_code_fence(&lines[0]));
         assert_eq!(
@@ -2730,7 +2756,7 @@ mod tests {
     fn closing_fence_requires_no_trailing_text() {
         let md = "```rs\n```not-a-close\nlet x = 1;\n```";
         let opts = textwrap::Options::new(80);
-        let lines = render_markdown(md, &opts);
+        let lines = render_markdown(md, &opts, true);
 
         assert_eq!(
             extract_code_block_from(&lines, 0),
@@ -2762,14 +2788,14 @@ mod tests {
                 acc.push_str(&doc[idx..next]);
                 idx = next;
 
-                cache.update(&acc, &opts, is_thought);
+                cache.update(&acc, &opts, is_thought, true);
                 let sanitized = super::super::render::sanitize_line(&acc);
                 let expected = if sanitized.trim().is_empty() {
                     Vec::new()
                 } else if is_thought {
-                    render_thought_markdown(&sanitized, &opts)
+                    render_thought_markdown(&sanitized, &opts, true)
                 } else {
-                    render_markdown(&sanitized, &opts)
+                    render_markdown(&sanitized, &opts, true)
                 };
                 assert_eq!(
                     cache.lines,
@@ -2785,7 +2811,7 @@ mod tests {
     fn code_block_syntax_highlighting_styles_rust_and_toml_and_preserves_copy_text() {
         let md = "```rust\n#[derive(Debug)]\npub fn add(x: i32) -> i32 {\n    // comment\n    println!(\"val: {}\", x + 1);\n    x + 1\n}\n```\n\n```toml\n[package]\nname = \"archon\"\nversion = \"0.3.0\"\nenabled = true\ncount = 42 # inline comment\n```";
         let opts = textwrap::Options::new(80);
-        let lines = render_markdown(md, &opts);
+        let lines = render_markdown(md, &opts, true);
 
         assert!(is_opening_code_fence(&lines[0]));
         assert_eq!(
@@ -2872,5 +2898,48 @@ mod tests {
                 .iter()
                 .any(|s| s.content.as_ref() == "true" && s.style.fg == Some(theme::MD_CODE_NUMBER))
         );
+    }
+
+    #[test]
+    fn code_block_styling_can_be_disabled_and_preserves_copy_text() {
+        let md = "```rust\nfn main() {\n    let x = \"󰆏\";\n}\n```\n```toml\nkey = \"val\"\n```";
+        let opts = textwrap::Options::new(80);
+        let lines = render_markdown(md, &opts, false);
+
+        assert!(is_opening_code_fence(&lines[0]));
+        assert_eq!(
+            extract_code_block_from(&lines, 0),
+            "fn main() {\n    let x = \"󰆏\";\n}"
+        );
+        // Box border is preserved, but code inside has uniform MD_CODE_TEXT without syntax highlighting
+        assert_eq!(lines[1].spans.len(), 2);
+        assert_eq!(lines[1].spans[0].content.as_ref(), "  │ ");
+        assert_eq!(
+            lines[1].spans[0].style,
+            Style::default().fg(theme::MD_CODE_BORDER)
+        );
+        assert_eq!(lines[1].spans[1].content.as_ref(), "fn main() {");
+        assert_eq!(
+            lines[1].spans[1].style,
+            Style::default().fg(theme::MD_CODE_TEXT)
+        );
+
+        // Closing fence still renders box bottom border without copy badge
+        assert!(!is_opening_code_fence(&lines[4]));
+        assert!(
+            lines[4]
+                .spans
+                .get(1)
+                .is_some_and(|s| s.content.starts_with('╰'))
+        );
+
+        // Second block still opens and extracts independently
+        assert!(is_opening_code_fence(&lines[5]));
+        assert_eq!(extract_code_block_from(&lines, 5), "key = \"val\"");
+
+        // Streaming cache matches full render when style_code_blocks is false
+        let mut cache = MarkdownStreamCache::default();
+        cache.update(md, &opts, false, false);
+        assert_eq!(cache.lines, lines);
     }
 }
