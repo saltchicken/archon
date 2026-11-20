@@ -72,7 +72,7 @@ pub struct SkillArgs {
     /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`).
     #[serde(default)]
     pub tools: Option<Vec<String>>,
-    /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`).
+    /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}` for the previous assistant response).
     #[serde(default)]
     pub hooks: Option<Vec<SkillHook>>,
     /// Optional markdown prompt body for `SKILL.md` (without `+++` frontmatter) when `action` is `create` or `modify`.

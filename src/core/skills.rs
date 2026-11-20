@@ -50,7 +50,7 @@ pub struct SkillHook {
     pub trigger: HookTrigger,
     /// Built-in tool name to execute (e.g. `"workspace_snapshot"`, `"repo_map"`, `"git"`).
     pub tool: String,
-    /// Tool arguments object (e.g. `{"tree_only": true}`).
+    /// Tool arguments object (e.g. `{"tree_only": true}`). String values may include `{{last_response}}` to substitute the previous assistant response (e.g. in `after_turn` or `every_turn` hooks).
     #[serde(default = "default_hook_args")]
     pub args: serde_json::Value,
 }
@@ -345,6 +345,34 @@ pub fn preview_due_hooks(
         .collect()
 }
 
+fn last_assistant_response(messages: &[ChatMessage]) -> &str {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+        .map(|m| m.content.trim())
+        .unwrap_or("")
+}
+
+fn interpolate_hook_args(args: &serde_json::Value, last_response: &str) -> serde_json::Value {
+    match args {
+        serde_json::Value::String(s) if s.contains("{{last_response}}") => {
+            serde_json::Value::String(s.replace("{{last_response}}", last_response))
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| interpolate_hook_args(v, last_response))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), interpolate_hook_args(v, last_response)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 pub fn collect_due_hooks(
     config: &Config,
     active_skill: Option<&str>,
@@ -354,6 +382,7 @@ pub fn collect_due_hooks(
     let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
         return Vec::new();
     };
+    let last_response = last_assistant_response(messages);
     let mut due_hooks = Vec::new();
     for (idx, hook) in skill.hooks.iter().enumerate() {
         let summary = format_hook_summary(hook);
@@ -373,7 +402,7 @@ pub fn collect_due_hooks(
                 ToolCall {
                     function: ToolFunction {
                         name: hook.tool.clone(),
-                        arguments: hook.args.clone(),
+                        arguments: interpolate_hook_args(&hook.args, last_response),
                     },
                     thought_signature: None,
                 },
@@ -386,10 +415,12 @@ pub fn collect_due_hooks(
 pub fn collect_after_turn_hooks(
     config: &Config,
     active_skill: Option<&str>,
+    last_response: &str,
 ) -> Vec<(String, ToolCall)> {
     let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
         return Vec::new();
     };
+    let trimmed_response = last_response.trim();
     skill
         .hooks
         .iter()
@@ -400,7 +431,7 @@ pub fn collect_after_turn_hooks(
                 ToolCall {
                     function: ToolFunction {
                         name: hook.tool.clone(),
-                        arguments: hook.args.clone(),
+                        arguments: interpolate_hook_args(&hook.args, trimmed_response),
                     },
                     thought_signature: None,
                 },
@@ -623,7 +654,7 @@ Run checks and notify."#;
         assert_eq!(pre_turn_2.len(), 1);
         assert_eq!(pre_turn_2[0].0, "cargo:check");
 
-        let after_turn = collect_after_turn_hooks(&cfg, Some("runner"));
+        let after_turn = collect_after_turn_hooks(&cfg, Some("runner"), "All checks passed");
         assert_eq!(after_turn.len(), 1);
         assert_eq!(after_turn[0].1.function.name, "notify");
         assert_eq!(after_turn[0].0, "notify (summary=Turn finished)");
@@ -637,5 +668,63 @@ Run checks and notify."#;
             collect_due_hooks(&cfg, Some("runner"), &mut fresh_executed, &[after_msg]);
         assert_eq!(due_with_after_msg.len(), 2);
         assert_eq!(due_with_after_msg[0].0, "cargo:metadata");
+    }
+
+    #[test]
+    fn hooks_interpolate_last_response_in_string_args() {
+        let raw = r#"+++
+name = "notifier"
+command = "notifier"
+tools = ["notify", "create_file"]
+
+[[hooks]]
+trigger = "every_turn"
+tool = "create_file"
+args = { file_path = "prev.txt", content = "Prev: {{last_response}}" }
+
+[[hooks]]
+trigger = "after_turn"
+tool = "notify"
+args = { summary = "Turn finished", body = "{{last_response}}", nested = ["a", "{{last_response}}"] }
++++
+Notify with last response."#;
+
+        let skill = parse_skill_markdown(raw, Path::new("/tmp/notifier")).unwrap();
+        let cfg = Config {
+            skills: vec![skill],
+            ..Config::default()
+        };
+
+        // `after_turn` interpolates the just-completed response while preserving the clean template summary.
+        let after = collect_after_turn_hooks(&cfg, Some("notifier"), "  Build succeeded.\n");
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].0,
+            "notify (body={{last_response}}, nested=[\"a\",\"{{last_response}}\"], summary=Turn finished)"
+        );
+        assert_eq!(after[0].1.function.arguments["summary"], "Turn finished");
+        assert_eq!(after[0].1.function.arguments["body"], "Build succeeded.");
+        assert_eq!(
+            after[0].1.function.arguments["nested"],
+            serde_json::json!(["a", "Build succeeded."])
+        );
+
+        // `every_turn` pulls the most recent non-empty assistant message (or "" if none).
+        let mut executed = HashSet::new();
+        let pre_empty = collect_due_hooks(&cfg, Some("notifier"), &mut executed, &[]);
+        assert_eq!(pre_empty.len(), 1);
+        assert_eq!(pre_empty[0].1.function.arguments["content"], "Prev: ");
+
+        let msgs = vec![
+            ChatMessage::new("user", "hi"),
+            ChatMessage::new("assistant", "First reply"),
+            ChatMessage::new("assistant", "   "),
+            ChatMessage::new("user", "next"),
+        ];
+        let pre_with_prev = collect_due_hooks(&cfg, Some("notifier"), &mut executed, &msgs);
+        assert_eq!(
+            pre_with_prev[0].1.function.arguments["content"],
+            "Prev: First reply"
+        );
     }
 }

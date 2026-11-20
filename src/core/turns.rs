@@ -412,8 +412,18 @@ impl CoreEngine {
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else if has_response {
-            let after_hooks =
-                skills::collect_after_turn_hooks(&self.config, self.turn.active_skill.as_deref());
+            let last_response = self
+                .session
+                .messages
+                .last()
+                .filter(|m| m.role == "assistant")
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let after_hooks = skills::collect_after_turn_hooks(
+                &self.config,
+                self.turn.active_skill.as_deref(),
+                last_response,
+            );
             if after_hooks.is_empty() {
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
