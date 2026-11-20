@@ -935,6 +935,1127 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     count >= min_len && trimmed[count..].trim().is_empty()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum CodeLang {
+    Rust,
+    Toml,
+    Json,
+    Yaml,
+    Shell,
+    Python,
+    TypeScript,
+    Go,
+    Lua,
+    Sql,
+    Diff,
+    #[default]
+    Plain,
+}
+
+impl CodeLang {
+    fn from_fence(tag: &str) -> Self {
+        let token = tag
+            .split(|c: char| c.is_whitespace() || c == ',' || c == '{')
+            .find(|s| !s.is_empty())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match token.as_str() {
+            "rs" | "rust" => Self::Rust,
+            "toml" | "ini" | "cfg" | "conf" => Self::Toml,
+            "json" | "jsonc" | "jsonl" => Self::Json,
+            "yaml" | "yml" => Self::Yaml,
+            "sh" | "bash" | "zsh" | "fish" | "shell" | "console" => Self::Shell,
+            "py" | "python" | "python3" => Self::Python,
+            "ts" | "tsx" | "js" | "jsx" | "typescript" | "javascript" | "c" | "cpp" | "c++"
+            | "h" | "hpp" | "java" | "csharp" | "cs" | "kotlin" | "kt" | "swift" | "zig"
+            | "css" | "scss" => Self::TypeScript,
+            "go" | "golang" => Self::Go,
+            "lua" => Self::Lua,
+            "sql" | "sqlite" | "postgres" | "postgresql" | "mysql" => Self::Sql,
+            "diff" | "patch" => Self::Diff,
+            _ => Self::Plain,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum CodeHighlightState {
+    #[default]
+    Normal,
+    BlockComment(usize),
+    MultiLineString {
+        quote: char,
+        count: usize,
+        raw_hashes: Option<usize>,
+    },
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+fn is_ident_continue(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+fn is_code_keyword(lang: CodeLang, word: &str) -> bool {
+    match lang {
+        CodeLang::Rust => matches!(
+            word,
+            "as" | "async"
+                | "await"
+                | "break"
+                | "const"
+                | "continue"
+                | "crate"
+                | "dyn"
+                | "else"
+                | "enum"
+                | "extern"
+                | "fn"
+                | "for"
+                | "if"
+                | "impl"
+                | "in"
+                | "let"
+                | "loop"
+                | "match"
+                | "mod"
+                | "move"
+                | "mut"
+                | "pub"
+                | "ref"
+                | "return"
+                | "self"
+                | "Self"
+                | "static"
+                | "struct"
+                | "super"
+                | "trait"
+                | "type"
+                | "unsafe"
+                | "use"
+                | "where"
+                | "while"
+                | "yield"
+        ),
+        CodeLang::Python => matches!(
+            word,
+            "and"
+                | "as"
+                | "assert"
+                | "async"
+                | "await"
+                | "break"
+                | "class"
+                | "continue"
+                | "def"
+                | "del"
+                | "elif"
+                | "else"
+                | "except"
+                | "finally"
+                | "for"
+                | "from"
+                | "global"
+                | "if"
+                | "import"
+                | "in"
+                | "is"
+                | "lambda"
+                | "match"
+                | "case"
+                | "nonlocal"
+                | "not"
+                | "or"
+                | "pass"
+                | "raise"
+                | "return"
+                | "try"
+                | "while"
+                | "with"
+                | "yield"
+                | "self"
+        ),
+        CodeLang::TypeScript => matches!(
+            word,
+            "async"
+                | "await"
+                | "break"
+                | "case"
+                | "catch"
+                | "class"
+                | "const"
+                | "continue"
+                | "debugger"
+                | "default"
+                | "delete"
+                | "do"
+                | "else"
+                | "enum"
+                | "export"
+                | "extends"
+                | "finally"
+                | "for"
+                | "from"
+                | "function"
+                | "if"
+                | "implements"
+                | "import"
+                | "in"
+                | "instanceof"
+                | "interface"
+                | "let"
+                | "namespace"
+                | "new"
+                | "of"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "readonly"
+                | "return"
+                | "static"
+                | "super"
+                | "switch"
+                | "this"
+                | "throw"
+                | "try"
+                | "type"
+                | "typeof"
+                | "var"
+                | "void"
+                | "while"
+                | "with"
+                | "yield"
+                | "struct"
+                | "fn"
+                | "pub"
+                | "comptime"
+                | "defer"
+                | "errdefer"
+        ),
+        CodeLang::Go => matches!(
+            word,
+            "break"
+                | "case"
+                | "chan"
+                | "const"
+                | "continue"
+                | "default"
+                | "defer"
+                | "else"
+                | "fallthrough"
+                | "for"
+                | "func"
+                | "go"
+                | "goto"
+                | "if"
+                | "import"
+                | "interface"
+                | "map"
+                | "package"
+                | "range"
+                | "return"
+                | "select"
+                | "struct"
+                | "switch"
+                | "type"
+                | "var"
+        ),
+        CodeLang::Lua => matches!(
+            word,
+            "and"
+                | "break"
+                | "do"
+                | "else"
+                | "elseif"
+                | "end"
+                | "for"
+                | "function"
+                | "goto"
+                | "if"
+                | "in"
+                | "local"
+                | "not"
+                | "or"
+                | "repeat"
+                | "return"
+                | "then"
+                | "until"
+                | "while"
+                | "self"
+        ),
+        CodeLang::Shell => matches!(
+            word,
+            "if" | "then"
+                | "else"
+                | "elif"
+                | "fi"
+                | "case"
+                | "esac"
+                | "for"
+                | "select"
+                | "while"
+                | "until"
+                | "do"
+                | "done"
+                | "in"
+                | "function"
+                | "time"
+                | "export"
+                | "local"
+                | "readonly"
+                | "return"
+                | "exit"
+                | "set"
+                | "unset"
+                | "end"
+                | "switch"
+                | "break"
+                | "continue"
+                | "source"
+        ),
+        CodeLang::Sql => {
+            let upper = word.to_ascii_uppercase();
+            matches!(
+                upper.as_str(),
+                "SELECT"
+                    | "FROM"
+                    | "WHERE"
+                    | "INSERT"
+                    | "INTO"
+                    | "VALUES"
+                    | "UPDATE"
+                    | "SET"
+                    | "DELETE"
+                    | "CREATE"
+                    | "DROP"
+                    | "ALTER"
+                    | "TABLE"
+                    | "INDEX"
+                    | "VIEW"
+                    | "JOIN"
+                    | "INNER"
+                    | "LEFT"
+                    | "RIGHT"
+                    | "FULL"
+                    | "OUTER"
+                    | "ON"
+                    | "AS"
+                    | "AND"
+                    | "OR"
+                    | "NOT"
+                    | "IN"
+                    | "IS"
+                    | "BY"
+                    | "GROUP"
+                    | "ORDER"
+                    | "HAVING"
+                    | "LIMIT"
+                    | "OFFSET"
+                    | "UNION"
+                    | "ALL"
+                    | "DISTINCT"
+                    | "PRIMARY"
+                    | "KEY"
+                    | "FOREIGN"
+                    | "REFERENCES"
+                    | "DEFAULT"
+                    | "CASCADE"
+                    | "BEGIN"
+                    | "COMMIT"
+                    | "ROLLBACK"
+                    | "RETURNING"
+                    | "WITH"
+                    | "CASE"
+                    | "WHEN"
+                    | "THEN"
+                    | "ELSE"
+                    | "END"
+                    | "ASC"
+                    | "DESC"
+                    | "EXISTS"
+            )
+        }
+        _ => false,
+    }
+}
+
+fn is_code_literal_or_builtin_type(lang: CodeLang, word: &str) -> Option<Style> {
+    let lit_style = Style::default()
+        .fg(theme::MD_CODE_NUMBER)
+        .add_modifier(Modifier::BOLD);
+    let type_style = Style::default().fg(theme::MD_CODE_TYPE);
+
+    match lang {
+        CodeLang::Rust => {
+            if matches!(word, "true" | "false") {
+                return Some(lit_style);
+            }
+            if matches!(
+                word,
+                "bool"
+                    | "char"
+                    | "str"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "f32"
+                    | "f64"
+                    | "String"
+                    | "Vec"
+                    | "Option"
+                    | "Result"
+                    | "Box"
+                    | "Arc"
+                    | "Rc"
+                    | "Some"
+                    | "None"
+                    | "Ok"
+                    | "Err"
+            ) {
+                return Some(type_style);
+            }
+        }
+        CodeLang::Toml | CodeLang::Json | CodeLang::Yaml => {
+            if matches!(
+                word,
+                "true" | "false" | "null" | "nil" | "True" | "False" | "None" | "yes" | "no"
+            ) {
+                return Some(lit_style);
+            }
+        }
+        CodeLang::Python => {
+            if matches!(word, "True" | "False" | "None") {
+                return Some(lit_style);
+            }
+            if matches!(
+                word,
+                "int"
+                    | "str"
+                    | "float"
+                    | "bool"
+                    | "list"
+                    | "dict"
+                    | "set"
+                    | "tuple"
+                    | "bytes"
+                    | "object"
+                    | "Any"
+                    | "Optional"
+                    | "Union"
+                    | "List"
+                    | "Dict"
+                    | "Set"
+                    | "Tuple"
+            ) {
+                return Some(type_style);
+            }
+        }
+        CodeLang::TypeScript => {
+            if matches!(
+                word,
+                "true" | "false" | "null" | "undefined" | "NaN" | "Infinity"
+            ) {
+                return Some(lit_style);
+            }
+            if matches!(
+                word,
+                "string"
+                    | "number"
+                    | "boolean"
+                    | "any"
+                    | "unknown"
+                    | "never"
+                    | "symbol"
+                    | "bigint"
+                    | "object"
+                    | "Promise"
+                    | "Record"
+                    | "Partial"
+                    | "Array"
+                    | "Map"
+                    | "Set"
+            ) {
+                return Some(type_style);
+            }
+        }
+        CodeLang::Go => {
+            if matches!(word, "true" | "false" | "nil" | "iota") {
+                return Some(lit_style);
+            }
+            if matches!(
+                word,
+                "bool"
+                    | "string"
+                    | "int"
+                    | "int8"
+                    | "int16"
+                    | "int32"
+                    | "int64"
+                    | "uint"
+                    | "uint8"
+                    | "uint16"
+                    | "uint32"
+                    | "uint64"
+                    | "uintptr"
+                    | "byte"
+                    | "rune"
+                    | "float32"
+                    | "float64"
+                    | "complex64"
+                    | "complex128"
+                    | "error"
+                    | "any"
+            ) {
+                return Some(type_style);
+            }
+        }
+        CodeLang::Lua => {
+            if matches!(word, "true" | "false" | "nil") {
+                return Some(lit_style);
+            }
+        }
+        CodeLang::Shell => {
+            if matches!(word, "true" | "false") {
+                return Some(lit_style);
+            }
+        }
+        CodeLang::Sql => {
+            let upper = word.to_ascii_uppercase();
+            if matches!(upper.as_str(), "NULL" | "TRUE" | "FALSE") {
+                return Some(lit_style);
+            }
+            if matches!(
+                upper.as_str(),
+                "INT"
+                    | "INTEGER"
+                    | "BIGINT"
+                    | "SMALLINT"
+                    | "TEXT"
+                    | "VARCHAR"
+                    | "CHAR"
+                    | "BOOLEAN"
+                    | "BOOL"
+                    | "REAL"
+                    | "FLOAT"
+                    | "DOUBLE"
+                    | "NUMERIC"
+                    | "DECIMAL"
+                    | "DATE"
+                    | "TIMESTAMP"
+                    | "TIMESTAMPTZ"
+                    | "UUID"
+                    | "JSON"
+                    | "JSONB"
+                    | "BLOB"
+                    | "SERIAL"
+            ) {
+                return Some(type_style);
+            }
+        }
+        CodeLang::Diff | CodeLang::Plain => {}
+    }
+
+    if matches!(
+        lang,
+        CodeLang::Rust | CodeLang::Python | CodeLang::TypeScript | CodeLang::Go
+    ) && word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    {
+        return Some(type_style);
+    }
+
+    None
+}
+
+fn highlight_code_line(
+    line: &str,
+    lang: CodeLang,
+    state: &mut CodeHighlightState,
+) -> Vec<Span<'static>> {
+    let text_style = Style::default().fg(theme::MD_CODE_TEXT);
+    let kw_style = Style::default()
+        .fg(theme::MD_CODE_KEYWORD)
+        .add_modifier(Modifier::BOLD);
+    let fn_style = Style::default().fg(theme::MD_CODE_FUNCTION);
+    let str_style = Style::default().fg(theme::MD_CODE_STRING);
+    let num_style = Style::default().fg(theme::MD_CODE_NUMBER);
+    let comment_style = Style::default()
+        .fg(theme::MD_CODE_COMMENT)
+        .add_modifier(Modifier::ITALIC);
+    let key_style = Style::default()
+        .fg(theme::MD_CODE_KEY)
+        .add_modifier(Modifier::BOLD);
+    let macro_style = Style::default()
+        .fg(theme::MD_CODE_MACRO)
+        .add_modifier(Modifier::ITALIC);
+    let punct_style = Style::default().fg(theme::MD_CODE_PUNCT);
+    let type_style = Style::default().fg(theme::MD_CODE_TYPE);
+
+    if line.is_empty() {
+        return Vec::new();
+    }
+
+    if lang == CodeLang::Plain {
+        return vec![Span::styled(line.to_string(), text_style)];
+    }
+
+    if lang == CodeLang::Diff {
+        let style = if line.starts_with("+++") || line.starts_with("---") {
+            Style::default()
+                .fg(theme::DIFF_FILE_HEADER)
+                .add_modifier(Modifier::BOLD)
+        } else if line.starts_with("@@") {
+            Style::default().fg(theme::DIFF_HUNK_HEADER)
+        } else if line.starts_with('+') {
+            Style::default().fg(theme::DIFF_ADD)
+        } else if line.starts_with('-') {
+            Style::default().fg(theme::DIFF_DELETE)
+        } else {
+            text_style
+        };
+        return vec![Span::styled(line.to_string(), style)];
+    }
+
+    let mut spans = Vec::new();
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+
+    // Handle TOML / INI section headers and keys on normal lines
+    if lang == CodeLang::Toml && *state == CodeHighlightState::Normal {
+        let leading_ws = line.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+        let trimmed = &line[leading_ws..];
+        if trimmed.starts_with('[') {
+            if leading_ws > 0 {
+                push_merged_span(&mut spans, &line[..leading_ws], text_style);
+            }
+            if let Some(comment_pos) = trimmed.find('#') {
+                push_merged_span(
+                    &mut spans,
+                    &trimmed[..comment_pos],
+                    type_style.add_modifier(Modifier::BOLD),
+                );
+                push_merged_span(&mut spans, &trimmed[comment_pos..], comment_style);
+            } else {
+                push_merged_span(&mut spans, trimmed, type_style.add_modifier(Modifier::BOLD));
+            }
+            return spans;
+        }
+        // Check for `key =` at line start (not inside array/inline table)
+        if !trimmed.starts_with('#')
+            && let Some(eq_rel) = trimmed.find('=')
+        {
+            let before_eq = &trimmed[..eq_rel];
+            let before_trimmed = before_eq.trim_end();
+            if !before_trimmed.is_empty()
+                && before_trimmed
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '"' | '\''))
+            {
+                if leading_ws > 0 {
+                    push_merged_span(&mut spans, &line[..leading_ws], text_style);
+                }
+                let key_len = before_trimmed.len();
+                push_merged_span(&mut spans, before_trimmed, key_style);
+                if eq_rel > key_len {
+                    push_merged_span(&mut spans, &trimmed[key_len..eq_rel], text_style);
+                }
+                push_merged_span(&mut spans, "=", punct_style);
+                i = leading_ws + eq_rel + 1;
+            }
+        }
+    }
+
+    // Handle YAML keys at start of line
+    if lang == CodeLang::Yaml && *state == CodeHighlightState::Normal {
+        let leading_ws = line.bytes().take_while(|b| b.is_ascii_whitespace()).count();
+        let mut offset = leading_ws;
+        if line[offset..].starts_with("- ") {
+            if leading_ws > 0 {
+                push_merged_span(&mut spans, &line[..leading_ws], text_style);
+            }
+            push_merged_span(&mut spans, "- ", punct_style);
+            offset += 2;
+        }
+        let rest = &line[offset..];
+        if !rest.starts_with('#')
+            && let Some(colon_rel) = rest.find(':')
+        {
+            let after_colon = &rest[colon_rel + 1..];
+            let before_colon = &rest[..colon_rel];
+            if (after_colon.is_empty()
+                || after_colon.starts_with(' ')
+                || after_colon.starts_with('\t'))
+                && !before_colon.is_empty()
+                && before_colon.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '"' | '\'')
+                })
+            {
+                if offset == leading_ws && leading_ws > 0 {
+                    push_merged_span(&mut spans, &line[..leading_ws], text_style);
+                }
+                push_merged_span(&mut spans, before_colon, key_style);
+                push_merged_span(&mut spans, ":", punct_style);
+                i = offset + colon_rel + 1;
+            }
+        }
+    }
+
+    while i < len {
+        // 1. Continuation of multi-line state
+        match *state {
+            CodeHighlightState::BlockComment(mut depth) => {
+                let start = i;
+                while i < len {
+                    if lang == CodeLang::Rust && line[i..].starts_with("/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if line[i..].starts_with("*/") {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            *state = CodeHighlightState::Normal;
+                            break;
+                        }
+                    } else {
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                }
+                if depth > 0 {
+                    *state = CodeHighlightState::BlockComment(depth);
+                }
+                push_merged_span(&mut spans, &line[start..i], comment_style);
+                continue;
+            }
+            CodeHighlightState::MultiLineString {
+                quote,
+                count,
+                raw_hashes,
+            } => {
+                let start = i;
+                if let Some(hashes) = raw_hashes {
+                    while i < len {
+                        if bytes[i] == quote as u8 {
+                            let h_count = line[i + 1..].bytes().take_while(|&b| b == b'#').count();
+                            if h_count >= hashes {
+                                i += 1 + hashes;
+                                *state = CodeHighlightState::Normal;
+                                break;
+                            }
+                        }
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                } else if count == 3 {
+                    let delim = if quote == '"' { "\"\"\"" } else { "'''" };
+                    while i < len {
+                        if bytes[i] == b'\\' && i + 1 < len {
+                            i += 1 + line[i + 1..].chars().next().map_or(1, char::len_utf8);
+                            continue;
+                        }
+                        if line[i..].starts_with(delim) {
+                            i += 3;
+                            *state = CodeHighlightState::Normal;
+                            break;
+                        }
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                } else {
+                    while i < len {
+                        if bytes[i] == b'\\' && i + 1 < len {
+                            i += 1 + line[i + 1..].chars().next().map_or(1, char::len_utf8);
+                            continue;
+                        }
+                        if bytes[i] == quote as u8 {
+                            i += 1;
+                            *state = CodeHighlightState::Normal;
+                            break;
+                        }
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                }
+                push_merged_span(&mut spans, &line[start..i], str_style);
+                continue;
+            }
+            CodeHighlightState::Normal => {}
+        }
+
+        let rest = &line[i..];
+        let b = bytes[i];
+
+        // 2. Whitespace
+        if b.is_ascii_whitespace() {
+            let ws_len = rest.bytes().take_while(|c| c.is_ascii_whitespace()).count();
+            push_merged_span(&mut spans, &rest[..ws_len], text_style);
+            i += ws_len;
+            continue;
+        }
+
+        // 3. Comments
+        if matches!(
+            lang,
+            CodeLang::Rust | CodeLang::TypeScript | CodeLang::Go | CodeLang::Json
+        ) && rest.starts_with("//")
+        {
+            push_merged_span(&mut spans, rest, comment_style);
+            break;
+        }
+        if matches!(
+            lang,
+            CodeLang::Rust | CodeLang::TypeScript | CodeLang::Go | CodeLang::Sql | CodeLang::Json
+        ) && rest.starts_with("/*")
+        {
+            let start = i;
+            i += 2;
+            let mut depth = 1usize;
+            while i < len {
+                if lang == CodeLang::Rust && line[i..].starts_with("/*") {
+                    depth += 1;
+                    i += 2;
+                } else if line[i..].starts_with("*/") {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += line[i..].chars().next().map_or(1, char::len_utf8);
+                }
+            }
+            if depth > 0 {
+                *state = CodeHighlightState::BlockComment(depth);
+            }
+            push_merged_span(&mut spans, &line[start..i], comment_style);
+            continue;
+        }
+        if matches!(
+            lang,
+            CodeLang::Toml | CodeLang::Yaml | CodeLang::Python | CodeLang::Shell
+        ) && b == b'#'
+        {
+            push_merged_span(&mut spans, rest, comment_style);
+            break;
+        }
+        if matches!(lang, CodeLang::Lua | CodeLang::Sql) && rest.starts_with("--") {
+            push_merged_span(&mut spans, rest, comment_style);
+            break;
+        }
+
+        // 4. Rust attributes: `#[...]` or `#![...]`
+        if lang == CodeLang::Rust && (rest.starts_with("#[") || rest.starts_with("#![")) {
+            let start = i;
+            let mut bracket_depth = 0usize;
+            while i < len {
+                if bytes[i] == b'[' {
+                    bracket_depth += 1;
+                } else if bytes[i] == b']' {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    if bracket_depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                i += line[i..].chars().next().map_or(1, char::len_utf8);
+            }
+            push_merged_span(&mut spans, &line[start..i], macro_style);
+            continue;
+        }
+
+        // 5. Python / TS decorators: `@decorator`
+        if matches!(lang, CodeLang::Python | CodeLang::TypeScript)
+            && b == b'@'
+            && rest[1..].chars().next().is_some_and(is_ident_start)
+        {
+            let dec_len = 1 + rest[1..]
+                .chars()
+                .take_while(|&c| is_ident_continue(c) || c == '.')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            push_merged_span(&mut spans, &rest[..dec_len], macro_style);
+            i += dec_len;
+            continue;
+        }
+
+        // 6. Rust raw strings: `r"..."`, `r#"..."#`, `br"..."`, `cr"..."`
+        if lang == CodeLang::Rust {
+            let raw_prefix_len = if rest.starts_with("br") || rest.starts_with("cr") {
+                Some(2)
+            } else if rest.starts_with('r') {
+                Some(1)
+            } else {
+                None
+            };
+            if let Some(p_len) = raw_prefix_len {
+                let after_r = &rest[p_len..];
+                let hashes = after_r.bytes().take_while(|&c| c == b'#').count();
+                if after_r.as_bytes().get(hashes) == Some(&b'"') {
+                    let start = i;
+                    i += p_len + hashes + 1;
+                    let mut closed = false;
+                    while i < len {
+                        if bytes[i] == b'"' {
+                            let h_count = line[i + 1..].bytes().take_while(|&c| c == b'#').count();
+                            if h_count >= hashes {
+                                i += 1 + hashes;
+                                closed = true;
+                                break;
+                            }
+                        }
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                    if !closed {
+                        *state = CodeHighlightState::MultiLineString {
+                            quote: '"',
+                            count: 1,
+                            raw_hashes: Some(hashes),
+                        };
+                    }
+                    push_merged_span(&mut spans, &line[start..i], str_style);
+                    continue;
+                }
+            }
+        }
+
+        // 7. Rust lifetimes and char literals
+        if lang == CodeLang::Rust && b == b'\'' {
+            let after_quote = &rest[1..];
+            if let Some(first_ch) = after_quote.chars().next() {
+                if first_ch == '\\' {
+                    // Escaped char literal like '\n' or '\''
+                    let start = i;
+                    i += 2;
+                    while i < len {
+                        let ch = line[i..].chars().next().unwrap();
+                        i += ch.len_utf8();
+                        if ch == '\'' {
+                            break;
+                        }
+                    }
+                    push_merged_span(&mut spans, &line[start..i], str_style);
+                    continue;
+                }
+                let after_first = &after_quote[first_ch.len_utf8()..];
+                if after_first.starts_with('\'') {
+                    // Single char literal like 'a'
+                    let end = i + 1 + first_ch.len_utf8() + 1;
+                    push_merged_span(&mut spans, &line[i..end], str_style);
+                    i = end;
+                    continue;
+                }
+                if is_ident_start(first_ch) {
+                    // Lifetime like 'a or 'static
+                    let ident_len: usize = after_quote
+                        .chars()
+                        .take_while(|&c| is_ident_continue(c))
+                        .map(char::len_utf8)
+                        .sum();
+                    push_merged_span(&mut spans, &rest[..1 + ident_len], macro_style);
+                    i += 1 + ident_len;
+                    continue;
+                }
+            }
+        }
+
+        // 8. Triple-quoted strings (TOML, Python)
+        if matches!(lang, CodeLang::Toml | CodeLang::Python)
+            && (rest.starts_with("\"\"\"") || rest.starts_with("'''"))
+        {
+            let quote = b as char;
+            let delim = &rest[..3];
+            let start = i;
+            i += 3;
+            let mut closed = false;
+            while i < len {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    i += 1 + line[i + 1..].chars().next().map_or(1, char::len_utf8);
+                    continue;
+                }
+                if line[i..].starts_with(delim) {
+                    i += 3;
+                    closed = true;
+                    break;
+                }
+                i += line[i..].chars().next().map_or(1, char::len_utf8);
+            }
+            if !closed {
+                *state = CodeHighlightState::MultiLineString {
+                    quote,
+                    count: 3,
+                    raw_hashes: None,
+                };
+            }
+            push_merged_span(&mut spans, &line[start..i], str_style);
+            continue;
+        }
+
+        // 9. Standard quoted strings (`"..."`, `'...'`, `` `...` ``)
+        if b == b'"'
+            || (b == b'\'' && lang != CodeLang::Rust)
+            || (b == b'`' && matches!(lang, CodeLang::TypeScript | CodeLang::Go | CodeLang::Shell))
+        {
+            let quote = b;
+            let start = i;
+            i += 1;
+            let mut closed = false;
+            while i < len {
+                if bytes[i] == b'\\' && quote != b'`' && i + 1 < len {
+                    i += 1 + line[i + 1..].chars().next().map_or(1, char::len_utf8);
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                i += line[i..].chars().next().map_or(1, char::len_utf8);
+            }
+            if !closed
+                && ((lang == CodeLang::Rust && quote == b'"')
+                    || (lang == CodeLang::Go && quote == b'`')
+                    || (lang == CodeLang::TypeScript && quote == b'`'))
+            {
+                *state = CodeHighlightState::MultiLineString {
+                    quote: quote as char,
+                    count: 1,
+                    raw_hashes: None,
+                };
+            }
+            let token_text = &line[start..i];
+            // In JSON, check if this string is followed by `:` (an object key)
+            let after_str = line[i..].trim_start();
+            let style = if lang == CodeLang::Json && after_str.starts_with(':') {
+                key_style
+            } else {
+                str_style
+            };
+            push_merged_span(&mut spans, token_text, style);
+            continue;
+        }
+
+        // 10. Shell variables ($VAR, ${VAR}, $1) and flags (--flag, -f)
+        if lang == CodeLang::Shell {
+            if b == b'$' && i + 1 < len {
+                let start = i;
+                i += 1;
+                if bytes[i] == b'{' {
+                    while i < len && bytes[i] != b'}' {
+                        i += line[i..].chars().next().map_or(1, char::len_utf8);
+                    }
+                    if i < len {
+                        i += 1;
+                    }
+                } else {
+                    while i < len
+                        && (bytes[i].is_ascii_alphanumeric()
+                            || matches!(bytes[i], b'_' | b'?' | b'!' | b'@' | b'*' | b'#'))
+                    {
+                        i += 1;
+                    }
+                }
+                push_merged_span(&mut spans, &line[start..i], macro_style);
+                continue;
+            }
+            if b == b'-'
+                && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                && rest
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'-')
+            {
+                let flag_len = rest
+                    .bytes()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, b'-' | b'_'))
+                    .count();
+                push_merged_span(&mut spans, &rest[..flag_len], key_style);
+                i += flag_len;
+                continue;
+            }
+        }
+
+        // 11. Numbers (integers, floats, hex, binary, octal, TOML dates/times)
+        if b.is_ascii_digit()
+            || (b == b'-'
+                && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+                && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_'))
+        {
+            let start = i;
+            if b == b'-' {
+                i += 1;
+            }
+            while i < len
+                && (bytes[i].is_ascii_alphanumeric()
+                    || matches!(bytes[i], b'_' | b'.' | b'+' | b'-' | b':'))
+            {
+                // Stop before range operator `..` in Rust
+                if bytes[i] == b'.' && line[i..].starts_with("..") {
+                    break;
+                }
+                i += 1;
+            }
+            push_merged_span(&mut spans, &line[start..i], num_style);
+            continue;
+        }
+
+        // 12. Identifiers, keywords, types, functions, macros
+        let first_ch = rest.chars().next().unwrap();
+        if is_ident_start(first_ch) {
+            let start = i;
+            i += first_ch.len_utf8();
+            while i < len {
+                let ch = line[i..].chars().next().unwrap();
+                if is_ident_continue(ch) || (lang == CodeLang::Shell && ch == '-') {
+                    i += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let word = &line[start..i];
+            let after_word = &line[i..];
+
+            if lang == CodeLang::Rust && after_word.starts_with('!') {
+                i += 1;
+                push_merged_span(&mut spans, &line[start..i], macro_style);
+                continue;
+            }
+
+            let style = if is_code_keyword(lang, word) {
+                kw_style
+            } else if let Some(s) = is_code_literal_or_builtin_type(lang, word) {
+                s
+            } else if after_word.trim_start().starts_with('(') {
+                fn_style
+            } else if lang == CodeLang::Rust && after_word.starts_with("::") {
+                type_style
+            } else {
+                text_style
+            };
+            push_merged_span(&mut spans, word, style);
+            continue;
+        }
+
+        // 13. Operators and punctuation
+        i += first_ch.len_utf8();
+        let style = if first_ch.is_ascii_punctuation() {
+            punct_style
+        } else {
+            text_style
+        };
+        push_merged_span(&mut spans, &line[i - first_ch.len_utf8()..i], style);
+    }
+
+    spans
+}
+
 #[derive(Clone)]
 struct MarkdownParserState {
     table_buf: Vec<String>,
@@ -946,6 +2067,8 @@ struct MarkdownParserState {
     in_params_block: bool,
     in_code_block: bool,
     code_fence_width: usize,
+    code_lang: CodeLang,
+    code_hl_state: CodeHighlightState,
 }
 
 impl Default for MarkdownParserState {
@@ -960,6 +2083,8 @@ impl Default for MarkdownParserState {
             in_params_block: false,
             in_code_block: false,
             code_fence_width: 7,
+            code_lang: CodeLang::Plain,
+            code_hl_state: CodeHighlightState::Normal,
         }
     }
 }
@@ -1238,6 +2363,8 @@ impl MarkdownParserState {
                 WrappedLine::CodeFence(lang) => {
                     let spans = if !self.in_code_block {
                         let lang = lang.trim();
+                        self.code_lang = CodeLang::from_fence(lang);
+                        self.code_hl_state = CodeHighlightState::Normal;
                         let copy_badge = Span::styled(
                             "󰆏",
                             Style::default()
@@ -1268,6 +2395,8 @@ impl MarkdownParserState {
                             ]
                         }
                     } else {
+                        self.code_lang = CodeLang::Plain;
+                        self.code_hl_state = CodeHighlightState::Normal;
                         vec![
                             Span::raw("  "),
                             Span::styled(
@@ -1280,10 +2409,13 @@ impl MarkdownParserState {
                     spans
                 }
                 WrappedLine::CodeLine(line) => {
-                    vec![
-                        Span::styled("  │ ", border_style),
-                        Span::styled(line.clone(), Style::default().fg(theme::MD_CODE_TEXT)),
-                    ]
+                    let mut spans = vec![Span::styled("  │ ", border_style)];
+                    spans.extend(highlight_code_line(
+                        line,
+                        self.code_lang,
+                        &mut self.code_hl_state,
+                    ));
+                    spans
                 }
                 WrappedLine::TableBorder(line) => {
                     vec![
@@ -1568,7 +2700,7 @@ pub(super) fn extract_code_block_from(
             .first()
             .is_some_and(|s| s.content.as_ref() == "  │ ")
         {
-            let text = line.spans.get(1).map_or("", |s| s.content.as_ref());
+            let text: String = line.spans[1..].iter().map(|s| s.content.as_ref()).collect();
             code_lines.push(text);
         } else {
             break;
@@ -1647,5 +2779,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn code_block_syntax_highlighting_styles_rust_and_toml_and_preserves_copy_text() {
+        let md = "```rust\n#[derive(Debug)]\npub fn add(x: i32) -> i32 {\n    // comment\n    println!(\"val: {}\", x + 1);\n    x + 1\n}\n```\n\n```toml\n[package]\nname = \"archon\"\nversion = \"0.3.0\"\nenabled = true\ncount = 42 # inline comment\n```";
+        let opts = textwrap::Options::new(80);
+        let lines = render_markdown(md, &opts);
+
+        assert!(is_opening_code_fence(&lines[0]));
+        assert_eq!(
+            extract_code_block_from(&lines, 0),
+            "#[derive(Debug)]\npub fn add(x: i32) -> i32 {\n    // comment\n    println!(\"val: {}\", x + 1);\n    x + 1\n}"
+        );
+
+        // Rust attribute `#[derive(Debug)]` should be styled with MD_CODE_MACRO
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("#[derive(Debug)]")
+                    && s.style.fg == Some(theme::MD_CODE_MACRO))
+        );
+
+        // Rust `pub` and `fn` keywords, `add` function, `i32` type
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|s| s.content.contains("pub") && s.style.fg == Some(theme::MD_CODE_KEYWORD))
+        );
+        assert!(lines[2]
+            .spans
+            .iter()
+            .any(|s| s.content.as_ref() == "add" && s.style.fg == Some(theme::MD_CODE_FUNCTION)));
+        assert!(
+            lines[2]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "i32" && s.style.fg == Some(theme::MD_CODE_TYPE))
+        );
+
+        // Comment line
+        assert!(lines[3].spans.iter().any(
+            |s| s.content.contains("// comment") && s.style.fg == Some(theme::MD_CODE_COMMENT)
+        ));
+
+        // Macro `println!` and string literal
+        assert!(
+            lines[4]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "println!"
+                    && s.style.fg == Some(theme::MD_CODE_MACRO))
+        );
+        assert!(
+            lines[4]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "\"val: {}\""
+                    && s.style.fg == Some(theme::MD_CODE_STRING))
+        );
+
+        // TOML fence at line 8
+        assert!(is_opening_code_fence(&lines[8]));
+        assert_eq!(
+            extract_code_block_from(&lines, 8),
+            "[package]\nname = \"archon\"\nversion = \"0.3.0\"\nenabled = true\ncount = 42 # inline comment"
+        );
+        // `[package]` section header
+        assert!(
+            lines[9]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "[package]"
+                    && s.style.fg == Some(theme::MD_CODE_TYPE))
+        );
+        // `name` key and `"archon"` string value
+        assert!(
+            lines[10]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "name" && s.style.fg == Some(theme::MD_CODE_KEY))
+        );
+        assert!(lines[10].spans.iter().any(
+            |s| s.content.as_ref() == "\"archon\"" && s.style.fg == Some(theme::MD_CODE_STRING)
+        ));
+        // `true` boolean literal
+        assert!(
+            lines[12]
+                .spans
+                .iter()
+                .any(|s| s.content.as_ref() == "true" && s.style.fg == Some(theme::MD_CODE_NUMBER))
+        );
     }
 }
