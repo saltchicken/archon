@@ -387,6 +387,11 @@ impl CliApp {
                         let _ = writeln!(stderr, "\x1b[0m");
                         printed_thoughts = false;
                     }
+                    if printed_text {
+                        writeln!(stdout)?;
+                        stdout.flush()?;
+                        printed_text = false;
+                    }
                     let progress = if total > 1 {
                         format!(" ({index}/{total})")
                     } else {

@@ -65,6 +65,7 @@ struct InFlightState {
     internal_rx: Option<UnboundedReceiver<EngineEvent>>,
     pending_truncated: Option<PendingTruncatedTool>,
     pending_tools: VecDeque<ToolCall>,
+    pending_stream_done: Option<EngineEvent>,
     queued_interjections: Vec<QueuedInterjection>,
     stream_buffer: String,
     thought_stream_buffer: String,
@@ -83,6 +84,7 @@ impl InFlightState {
     fn abort_all(&mut self) {
         self.finish_active_task();
         self.pending_truncated = None;
+        self.pending_stream_done = None;
         self.queued_interjections.clear();
         self.pending_tools.clear();
         self.stream_buffer.clear();
@@ -402,8 +404,8 @@ impl CoreEngine {
                 self.on_hook_completed(tool_name, summary, output, truncated)
                     .await;
             }
-            EngineEvent::HooksFinished => {
-                self.on_hooks_finished().await;
+            EngineEvent::HooksFinished { after_turn } => {
+                self.on_hooks_finished(after_turn).await;
             }
             other => {
                 let _ = self.tx.send(other);

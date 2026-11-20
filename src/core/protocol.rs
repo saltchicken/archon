@@ -150,7 +150,9 @@ pub enum EngineEvent {
         output: String,
         truncated: bool,
     },
-    HooksFinished,
+    HooksFinished {
+        after_turn: bool,
+    },
     ToolApprovalRequested {
         formatted_preview: String,
         index: usize,

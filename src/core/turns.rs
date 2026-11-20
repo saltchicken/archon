@@ -97,22 +97,12 @@ impl CoreEngine {
         true
     }
 
-    pub(super) async fn start_user_turn(&mut self, turn: &TurnConfig) {
-        let hooks = skills::collect_due_hooks(
-            &self.config,
-            turn.active_skill.as_deref(),
-            &mut self.session.executed_skill_hooks,
-            &self.session.messages,
-        );
-        if hooks.is_empty() {
-            self.spawn_model_turn(turn).await;
-            return;
-        }
-
+    fn spawn_hooks(&mut self, hooks: Vec<(String, ToolCall)>, after_turn: bool) {
         let total = hooks.len();
-        info!("Running {total} pre-turn skill hook(s) before model stream");
+        let phase = if after_turn { "after-turn" } else { "pre-turn" };
+        info!("Running {total} {phase} skill hook(s)");
         let cfg = self.config.clone();
-        let active_skill = turn.active_skill.clone();
+        let active_skill = self.turn.active_skill.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
 
@@ -133,8 +123,23 @@ impl CoreEngine {
                     truncated: res.truncated,
                 });
             }
-            let _ = tx.send(EngineEvent::HooksFinished);
+            let _ = tx.send(EngineEvent::HooksFinished { after_turn });
         });
+    }
+
+    pub(super) async fn start_user_turn(&mut self, turn: &TurnConfig) {
+        let hooks = skills::collect_due_hooks(
+            &self.config,
+            turn.active_skill.as_deref(),
+            &mut self.session.executed_skill_hooks,
+            &self.session.messages,
+        );
+        if hooks.is_empty() {
+            self.spawn_model_turn(turn).await;
+            return;
+        }
+
+        self.spawn_hooks(hooks, false);
     }
 
     pub(super) async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
@@ -245,6 +250,7 @@ impl CoreEngine {
         }
 
         info!("User interrupted active turn");
+        self.inflight.pending_stream_done = None;
         let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
         let closed = self.close_unresolved_tool_calls("Cancelled by user.");
 
@@ -394,12 +400,23 @@ impl CoreEngine {
             self.save_and_emit_chat(Vec::new()).await;
         }
 
-        let _ = self.tx.send(ev);
         if !tool_calls.is_empty() {
+            let _ = self.tx.send(ev);
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else {
-            self.flush_queued_interjections().await;
+            let after_hooks =
+                skills::collect_after_turn_hooks(&self.config, self.turn.active_skill.as_deref());
+            if after_hooks.is_empty() {
+                let _ = self.tx.send(ev);
+                self.flush_queued_interjections().await;
+            } else {
+                let _ = self
+                    .tx
+                    .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
+                self.inflight.pending_stream_done = Some(ev);
+                self.spawn_hooks(after_hooks, true);
+            }
         }
     }
 
@@ -428,9 +445,16 @@ impl CoreEngine {
         self.save_and_emit_chat(Vec::new()).await;
     }
 
-    pub(super) async fn on_hooks_finished(&mut self) {
+    pub(super) async fn on_hooks_finished(&mut self, after_turn: bool) {
         self.finish_active_task();
         let _ = self.tx.send(EngineEvent::ToolCompleted);
+        if after_turn {
+            if let Some(done_ev) = self.inflight.pending_stream_done.take() {
+                let _ = self.tx.send(done_ev);
+            }
+            self.flush_queued_interjections().await;
+            return;
+        }
         if self.flush_queued_interjections().await {
             return;
         }

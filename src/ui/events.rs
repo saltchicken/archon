@@ -85,7 +85,7 @@ impl TuiApp {
             EngineEvent::ToolCompleted
             | EngineEvent::ToolExecFinished(..)
             | EngineEvent::HookCompleted { .. }
-            | EngineEvent::HooksFinished => {
+            | EngineEvent::HooksFinished { .. } => {
                 self.active_tool_status = None;
             }
             EngineEvent::ToolApprovalRequested {

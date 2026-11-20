@@ -26,8 +26,11 @@ pub enum HookTrigger {
     #[serde(alias = "once", alias = "activate")]
     OnActivate,
     /// Run before every user turn while this skill is active.
-    #[serde(alias = "always", alias = "turn")]
+    #[serde(alias = "always", alias = "turn", alias = "before_turn")]
     EveryTurn,
+    /// Run after every user turn while this skill is active.
+    #[serde(alias = "after", alias = "post_turn", alias = "on_complete")]
+    AfterTurn,
 }
 
 impl HookTrigger {
@@ -35,13 +38,14 @@ impl HookTrigger {
         match self {
             Self::OnActivate => "on_activate",
             Self::EveryTurn => "every_turn",
+            Self::AfterTurn => "after_turn",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct SkillHook {
-    /// When to execute the hook: `on_activate` (default, once per session) or `every_turn`.
+    /// When to execute the hook: `on_activate` (default, once per session), `every_turn` (before every turn), or `after_turn` (after every turn).
     #[serde(default)]
     pub trigger: HookTrigger,
     /// Built-in tool name to execute (e.g. `"workspace_snapshot"`, `"repo_map"`, `"git"`).
@@ -360,6 +364,7 @@ pub fn collect_due_hooks(
                 !already
             }
             HookTrigger::EveryTurn => true,
+            HookTrigger::AfterTurn => false,
         };
         if due {
             due_hooks.push((
@@ -375,6 +380,32 @@ pub fn collect_due_hooks(
         }
     }
     due_hooks
+}
+
+pub fn collect_after_turn_hooks(
+    config: &Config,
+    active_skill: Option<&str>,
+) -> Vec<(String, ToolCall)> {
+    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
+        return Vec::new();
+    };
+    skill
+        .hooks
+        .iter()
+        .filter(|hook| hook.trigger == HookTrigger::AfterTurn)
+        .map(|hook| {
+            (
+                format_hook_summary(hook),
+                ToolCall {
+                    function: ToolFunction {
+                        name: hook.tool.clone(),
+                        arguments: hook.args.clone(),
+                    },
+                    thought_signature: None,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
@@ -543,5 +574,57 @@ mod tests {
         let local = skills.iter().find(|s| s.name == "local-only").unwrap();
         assert_eq!(local.scope, MemoryScope::Workspace);
         assert!(!local.overrides_global);
+    }
+
+    #[test]
+    fn after_turn_hooks_parsed_and_collected_separately_from_pre_turn_hooks() {
+        let raw = r#"+++
+name = "runner"
+command = "runner"
+tools = ["cargo", "notify"]
+
+[[hooks]]
+trigger = "on_activate"
+tool = "cargo"
+args = { action = "metadata" }
+
+[[hooks]]
+trigger = "every_turn"
+tool = "cargo"
+args = { action = "check" }
+
+[[hooks]]
+trigger = "after_turn"
+tool = "notify"
+args = { summary = "Turn finished" }
++++
+Run checks and notify."#;
+
+        let skill = parse_skill_markdown(raw, Path::new("/tmp/runner")).unwrap();
+        assert_eq!(skill.hooks.len(), 3);
+        assert_eq!(skill.hooks[0].trigger, HookTrigger::OnActivate);
+        assert_eq!(skill.hooks[1].trigger, HookTrigger::EveryTurn);
+        assert_eq!(skill.hooks[2].trigger, HookTrigger::AfterTurn);
+        assert_eq!(skill.hooks[2].trigger.as_str(), "after_turn");
+
+        let cfg = Config {
+            skills: vec![skill],
+            ..Config::default()
+        };
+
+        let mut executed = HashSet::new();
+        let pre_turn_1 = collect_due_hooks(&cfg, Some("runner"), &mut executed, &[]);
+        assert_eq!(pre_turn_1.len(), 2);
+        assert_eq!(pre_turn_1[0].1.function.name, "cargo");
+        assert_eq!(pre_turn_1[1].1.function.name, "cargo");
+
+        let pre_turn_2 = collect_due_hooks(&cfg, Some("runner"), &mut executed, &[]);
+        assert_eq!(pre_turn_2.len(), 1);
+        assert_eq!(pre_turn_2[0].0, "cargo:check");
+
+        let after_turn = collect_after_turn_hooks(&cfg, Some("runner"));
+        assert_eq!(after_turn.len(), 1);
+        assert_eq!(after_turn[0].1.function.name, "notify");
+        assert_eq!(after_turn[0].0, "notify (summary=Turn finished)");
     }
 }
