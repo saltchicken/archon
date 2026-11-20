@@ -1,28 +1,9 @@
 +++
+name = "refactor"
 command = "refactor"
 description = "Advanced refactoring to shrink code footprint, reduce cyclomatic complexity, and eliminate bloaters and dispensables."
-name = "refactor"
-tools = [
-    "repo_map",
-    "search",
-    "workspace_snapshot",
-    "read_file",
-    "edit_file",
-    "create_file",
-    "cargo",
-    "git",
-]
-
-[[hooks]]
-trigger = "on_activate"
-tool = "workspace_snapshot"
-args = { tree_only = false }
-
-[[hooks]]
-trigger = "on_activate"
-tool = "repo_map"
-args = { action = "map", max_tokens = 8000 }
-
+extends = "base-rust"
+tools = ["edit_file", "create_file", "git"]
 +++
 Act as an expert software engineer specializing in advanced refactoring. Review the following code and refactor it to drastically shrink its footprint, reduce cyclomatic complexity, and eliminate "bloaters" and "dispensables."
 

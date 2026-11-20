@@ -3,6 +3,7 @@ use crate::core::{
 };
 use anyhow::{Result, bail};
 use std::{
+    collections::BTreeMap,
     env,
     fs::File,
     io::{self, BufRead, BufReader, IsTerminal, Read, Write},
@@ -32,12 +33,27 @@ pub enum ScheduleCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillCommand {
+    Check {
+        name: Option<String>,
+        dir: Option<PathBuf>,
+        global: bool,
+        strict: bool,
+    },
+    List {
+        dir: Option<PathBuf>,
+        global: bool,
+    },
+}
+
 #[derive(Debug, Default)]
 pub struct CliArgs {
     pub model: Option<String>,
     pub prompt: Option<String>,
     pub system_prompt: Option<String>,
     pub skill: Option<String>,
+    pub skill_args: Vec<(String, String)>,
     pub session_id: Option<String>,
     pub images: Vec<PathBuf>,
     pub allowed_tools: Option<Vec<String>>,
@@ -47,6 +63,7 @@ pub struct CliArgs {
     pub show_thoughts: bool,
     pub headless: bool,
     pub schedule_cmd: Option<ScheduleCommand>,
+    pub skill_cmd: Option<SkillCommand>,
 }
 
 impl CliArgs {
@@ -57,6 +74,12 @@ impl CliArgs {
         if args.peek().is_some_and(|a| a == "schedule") {
             args.next();
             cli.schedule_cmd = Some(Self::parse_schedule_args(args)?);
+            return Ok(cli);
+        }
+
+        if args.peek().is_some_and(|a| a == "skill") {
+            args.next();
+            cli.skill_cmd = Some(Self::parse_skill_args(args)?);
             return Ok(cli);
         }
 
@@ -92,6 +115,19 @@ impl CliArgs {
                         args.next()
                             .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
                     );
+                }
+                "--arg" => {
+                    let raw = args.next().ok_or_else(|| {
+                        anyhow::anyhow!("Missing value for {arg} (expected KEY=VALUE)")
+                    })?;
+                    let Some((k, v)) = raw.split_once('=') else {
+                        bail!("Invalid {arg} value '{raw}': expected KEY=VALUE");
+                    };
+                    let key = k.trim();
+                    if key.is_empty() {
+                        bail!("Invalid {arg} value '{raw}': argument name cannot be empty");
+                    }
+                    cli.skill_args.push((key.to_string(), v.to_string()));
                 }
                 "--session" => {
                     cli.session_id = Some(
@@ -236,6 +272,87 @@ impl CliArgs {
         }
     }
 
+    fn parse_skill_args<I>(mut args: I) -> Result<SkillCommand>
+    where
+        I: Iterator<Item = String>,
+    {
+        let Some(sub) = args.next() else {
+            Self::print_skill_help();
+            std::process::exit(0);
+        };
+
+        if matches!(sub.as_str(), "-h" | "--help") {
+            Self::print_skill_help();
+            std::process::exit(0);
+        }
+
+        let mut dir: Option<PathBuf> = None;
+        let mut global = false;
+        let mut strict = false;
+        let mut positional = Vec::new();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    Self::print_skill_help();
+                    std::process::exit(0);
+                }
+                "-g" | "--global" => global = true,
+                "-d" | "--dir" => {
+                    let val = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    dir = Some(PathBuf::from(val));
+                }
+                "--strict" => strict = true,
+                _ if arg.starts_with('-') => bail!("Unknown skill flag: {arg}"),
+                _ => positional.push(arg),
+            }
+        }
+
+        if dir.is_some() && global {
+            bail!("`--dir` and `--global` cannot be used together.");
+        }
+
+        match sub.as_str() {
+            "check" => {
+                if positional.len() > 1 {
+                    bail!("Usage: archon skill check [NAME] [--dir PATH] [--global] [--strict]");
+                }
+                Ok(SkillCommand::Check {
+                    name: positional.pop(),
+                    dir,
+                    global,
+                    strict,
+                })
+            }
+            "list" => {
+                if strict {
+                    bail!("`--strict` is only valid with `archon skill check`.");
+                }
+                if let Some(extra) = positional.first() {
+                    bail!("Unexpected argument '{extra}' for `archon skill list`.");
+                }
+                Ok(SkillCommand::List { dir, global })
+            }
+            other => bail!("Unknown skill subcommand: '{other}'. Run `archon skill --help`."),
+        }
+    }
+
+    pub fn print_skill_help() {
+        println!(
+            "Usage: archon skill <COMMAND> [OPTIONS]\n\n\
+             Commands:\n  \
+               check [NAME]            Validate SKILL.md frontmatter, extends, tools, hook schemas, args, and references/\n  \
+               list                    List loaded skills with inheritance, typed args, tools, and hooks\n\n\
+             Options:\n  \
+               -d, --dir <PATH>        Validate or list skills from a specific directory\n  \
+               -g, --global            Operate only on global ~/.config/archon/skills\n  \
+               --strict                Treat warnings as errors during `check`\n  \
+               -h, --help              Print help"
+        );
+    }
+
     pub fn print_schedule_help() {
         println!(
             "Usage: archon schedule <COMMAND> [OPTIONS]\n\n\
@@ -254,12 +371,13 @@ impl CliArgs {
 
     pub fn print_help() {
         println!(
-            "Usage: archon [OPTIONS] [MODEL]\n       archon schedule <sync|list|run|logs|clean> [OPTIONS]\n\n\
+            "Usage: archon [OPTIONS] [MODEL]\n       archon schedule <sync|list|run|logs|clean> [OPTIONS]\n       archon skill <check|list> [OPTIONS]\n\n\
              Options:\n  \
                -p, --prompt <TEXT>     Run in headless CLI mode with the given prompt\n  \
                -m, --model <MODEL>     Model name to use\n  \
                -s, --system <PROMPT>   Custom base system prompt\n  \
                --skill <NAME>          Activate a skill for the turn\n  \
+               --arg <KEY=VALUE>       Pass a typed skill argument (repeatable)\n  \
                --session <ID>          Resume an existing session ID\n  \
                -i, --image <PATH>      Attach an image file (repeatable)\n  \
                -y, --yes               Auto-approve all tool executions in headless mode\n  \
@@ -309,18 +427,39 @@ impl CliApp {
             enable_tools,
             active_skill: None,
             skill_args: None,
+            raw_skill_args: None,
+            skill_inputs: BTreeMap::new(),
         };
 
         // Resolve explicit `--skill` or leading `@skill` in the prompt
         let prompt = if let Some(ref explicit_skill) = self.args.skill {
-            let name = skills::check_skill_activation(explicit_skill, enable_tools, &self.config)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            turn.active_skill = Some(name);
-            turn.skill_args = Some(raw_prompt.clone());
-            raw_prompt
+            skills::activate_skill_for_turn(
+                explicit_skill,
+                &raw_prompt,
+                &self.args.skill_args,
+                &mut turn,
+                &self.config,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?
+        } else if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
+            let p = skills::activate_skill_for_turn(
+                cmd_token,
+                args_str,
+                &self.args.skill_args,
+                &mut turn,
+                &self.config,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            if args_str.is_empty() && self.args.skill_args.is_empty() {
+                raw_prompt.trim().to_string()
+            } else {
+                p
+            }
         } else {
-            skills::apply_at_skill_to_turn(&raw_prompt, &mut turn, &self.config)
-                .map_err(|e| anyhow::anyhow!(e))?
+            if !self.args.skill_args.is_empty() {
+                bail!("`--arg` requires `--skill <NAME>` or a leading `@skill` in the prompt.");
+            }
+            raw_prompt
         };
 
         // 1. Load existing session if requested
@@ -574,10 +713,49 @@ async fn prompt_tool_approval_tty(
 
 #[cfg(test)]
 mod tests {
-    use super::{CliArgs, ScheduleCommand};
+    use super::{CliArgs, ScheduleCommand, SkillCommand};
+    use std::path::PathBuf;
 
     fn parse_sched(args: &[&str]) -> anyhow::Result<ScheduleCommand> {
         CliArgs::parse_schedule_args(args.iter().map(|s| (*s).to_string()))
+    }
+
+    fn parse_skill(args: &[&str]) -> anyhow::Result<SkillCommand> {
+        CliArgs::parse_skill_args(args.iter().map(|s| (*s).to_string()))
+    }
+
+    #[test]
+    fn parse_skill_subcommands_and_flags() {
+        assert_eq!(
+            parse_skill(&["check"]).unwrap(),
+            SkillCommand::Check {
+                name: None,
+                dir: None,
+                global: false,
+                strict: false,
+            }
+        );
+        assert_eq!(
+            parse_skill(&["check", "coder", "--strict", "--dir", "./skills"]).unwrap(),
+            SkillCommand::Check {
+                name: Some("coder".to_string()),
+                dir: Some(PathBuf::from("./skills")),
+                global: false,
+                strict: true,
+            }
+        );
+        assert_eq!(
+            parse_skill(&["list", "--global"]).unwrap(),
+            SkillCommand::List {
+                dir: None,
+                global: true,
+            }
+        );
+        assert!(parse_skill(&["check", "a", "b"]).is_err());
+        assert!(parse_skill(&["check", "--dir", "./skills", "--global"]).is_err());
+        assert!(parse_skill(&["list", "--strict"]).is_err());
+        assert!(parse_skill(&["list", "extra"]).is_err());
+        assert!(parse_skill(&["bogus"]).is_err());
     }
 
     #[test]

@@ -10,10 +10,29 @@ tools = [
     "workspace_snapshot",
     "read_file",
 ]
+references = ["references/review-checklist.md"]
+
+[[args]]
+name = "target"
+type = "string"
+required = false
+description = "Diff target, commit/range (e.g. main..HEAD), or file path to review"
+
+[[args]]
+name = "focus"
+type = "enum"
+choices = ["all", "correctness", "safety", "concurrency", "security", "performance"]
+default = "all"
+description = "Optional review axis to prioritize"
 +++
 # Code Review Workflow
 
 Act as a meticulous, senior Rust reviewer. Your job is to **evaluate** code and report findings — do **not** modify, refactor, or "fix" anything unless the user explicitly asks. Be specific and concrete: every finding must name `file:line`, explain *why* it matters, and (where a fix is clear) show a short corrected snippet in your report (still without writing it to disk).
+{{#if target}}
+
+**Requested review target:** `{{target}}`
+{{/if}}
+**Priority focus:** `{{focus}}`
 
 ## 1. Scope the review
 Determine the review target from the user's request:

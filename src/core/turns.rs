@@ -73,11 +73,8 @@ impl CoreEngine {
         }
         let mut new_images = Vec::new();
         let mut has_valid_prompt = false;
-        for item in std::mem::take(&mut self.inflight.queued_interjections) {
-            if let Some(ref skill_name) = item.turn.active_skill
-                && let Err(reason) =
-                    skills::check_skill_activation(skill_name, item.turn.enable_tools, &self.config)
-            {
+        for mut item in std::mem::take(&mut self.inflight.queued_interjections) {
+            if let Err(reason) = skills::validate_turn_skill(&mut item.turn, &self.config) {
                 warn!("{reason}");
                 self.session
                     .messages
@@ -136,6 +133,9 @@ impl CoreEngine {
         let hooks = skills::collect_due_hooks(
             &self.config,
             turn.active_skill.as_deref(),
+            turn.skill_args.as_deref(),
+            turn.raw_skill_args.as_deref(),
+            &turn.skill_inputs,
             &mut self.session.executed_skill_hooks,
             &self.session.messages,
         );
@@ -191,18 +191,10 @@ impl CoreEngine {
         if turn.active_skill.is_some() {
             self.refresh_skills();
         }
-        if let Some(ref skill_name) = turn.active_skill
-            && let Err(reason) =
-                skills::check_skill_activation(skill_name, turn.enable_tools, &self.config)
-        {
+        if let Err(reason) = skills::validate_turn_skill(&mut turn, &self.config) {
             warn!("{reason}");
             self.emit_error(reason).await;
             return;
-        }
-        if let Some(ref skill_name) = turn.active_skill
-            && let Some(skill) = skills::find_skill(&self.config, skill_name)
-        {
-            turn.active_skill = Some(skill.name.clone());
         }
 
         info!(
@@ -346,6 +338,9 @@ impl CoreEngine {
             for summary in skills::preview_due_hooks(
                 &self.config,
                 turn.active_skill.as_deref(),
+                turn.skill_args.as_deref(),
+                turn.raw_skill_args.as_deref(),
+                &turn.skill_inputs,
                 &self.session.executed_skill_hooks,
                 &self.session.messages,
             ) {
@@ -422,6 +417,9 @@ impl CoreEngine {
             let after_hooks = skills::collect_after_turn_hooks(
                 &self.config,
                 self.turn.active_skill.as_deref(),
+                self.turn.skill_args.as_deref(),
+                self.turn.raw_skill_args.as_deref(),
+                &self.turn.skill_inputs,
                 last_response,
             );
             if after_hooks.is_empty() {

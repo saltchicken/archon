@@ -109,6 +109,7 @@ impl Provider {
     ) -> (String, Vec<ChatMessage>, Value) {
         let active_skill = turn.active_skill.as_deref();
         let skill_args = turn.skill_args.as_deref();
+        let raw_skill_args = turn.raw_skill_args.as_deref();
 
         let tools_schema = turn
             .enable_tools
@@ -119,6 +120,8 @@ impl Provider {
             &turn.system_prompt,
             active_skill,
             skill_args,
+            raw_skill_args,
+            &turn.skill_inputs,
             config,
         );
 
@@ -374,6 +377,14 @@ pub fn format_payload_inspection(
     );
     if let Some(args) = turn.skill_args.as_deref().filter(|s| !s.is_empty()) {
         let _ = writeln!(out, "  skill_args: {}", args);
+    }
+    if !turn.skill_inputs.is_empty() {
+        let pairs: Vec<String> = turn
+            .skill_inputs
+            .iter()
+            .map(|(k, v)| format!("{k}={}", crate::core::skills::format_arg_value(v)))
+            .collect();
+        let _ = writeln!(out, "  skill_inputs: {}", pairs.join(", "));
     }
 
     let _ = writeln!(out, "\n--- EFFECTIVE SYSTEM MESSAGE ---");

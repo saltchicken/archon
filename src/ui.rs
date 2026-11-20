@@ -37,7 +37,7 @@ use ratatui::{
     widgets::{Block, Borders, Padding},
 };
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
-use std::{io, time::Duration};
+use std::{collections::BTreeMap, io, time::Duration};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender},
     time::MissedTickBehavior,
@@ -616,6 +616,8 @@ impl TuiApp {
             enable_tools: self.enable_tools,
             active_skill: None,
             skill_args: None,
+            raw_skill_args: None,
+            skill_inputs: BTreeMap::new(),
         }
     }
 

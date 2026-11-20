@@ -38,6 +38,20 @@ async fn main() -> Result<()> {
         std::process::exit(0);
     }
 
+    if let Some(skill_cmd) = cli_args.skill_cmd {
+        let ws_config_dir = workspace_config_dir_for(&cwd);
+        let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+        if let Some(cfg_err) = config_err {
+            eprintln!("{cfg_err}");
+            std::process::exit(1);
+        }
+        if let Err(e) = core::skill_check::handle_command(skill_cmd, &config) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     if !cli_args.headless {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {

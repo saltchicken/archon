@@ -8,6 +8,7 @@ pub mod provider;
 pub mod schedule;
 pub mod session;
 mod session_ops;
+pub mod skill_check;
 pub mod skills;
 mod tool_runner;
 mod turns;
@@ -21,7 +22,7 @@ use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
 };
@@ -138,6 +139,8 @@ impl CoreEngine {
                 enable_tools: true,
                 active_skill: None,
                 skill_args: None,
+                raw_skill_args: None,
+                skill_inputs: BTreeMap::new(),
             },
             active_max_tool_output_size,
             save_session: true,
@@ -204,6 +207,8 @@ impl CoreEngine {
     fn update_turn_preserving_skill(&mut self, new_turn: TurnConfig) {
         let active_skill = self.turn.active_skill.take();
         let skill_args = self.turn.skill_args.take();
+        let raw_skill_args = self.turn.raw_skill_args.take();
+        let skill_inputs = std::mem::take(&mut self.turn.skill_inputs);
         self.turn = new_turn;
         if let Some(skill_name) = active_skill {
             if skills::check_skill_activation(&skill_name, self.turn.enable_tools, &self.config)
@@ -211,12 +216,16 @@ impl CoreEngine {
             {
                 self.turn.active_skill = Some(skill_name);
                 self.turn.skill_args = skill_args;
+                self.turn.raw_skill_args = raw_skill_args;
+                self.turn.skill_inputs = skill_inputs;
             } else if (!self.inflight.pending_tools.is_empty() || self.is_turn_active())
                 && skills::check_skill_activation(&skill_name, true, &self.config).is_ok()
             {
                 self.turn.enable_tools = true;
                 self.turn.active_skill = Some(skill_name);
                 self.turn.skill_args = skill_args;
+                self.turn.raw_skill_args = raw_skill_args;
+                self.turn.skill_inputs = skill_inputs;
             }
         }
     }
@@ -224,6 +233,8 @@ impl CoreEngine {
     fn reset_skill_and_sync_model_limits(&mut self) {
         self.turn.active_skill = None;
         self.turn.skill_args = None;
+        self.turn.raw_skill_args = None;
+        self.turn.skill_inputs.clear();
         self.turn.num_ctx = self.config.context_for_model(&self.model);
         self.active_max_tool_output_size = self.config.max_tool_output_for_model(&self.model);
         self.emit_model_config();

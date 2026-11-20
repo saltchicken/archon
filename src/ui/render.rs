@@ -392,16 +392,23 @@ impl TuiApp {
         } else if let Some(rest) = first_trimmed.strip_prefix('@') {
             if let Some(ws_idx) = rest.find(char::is_whitespace) {
                 let cmd_token = &rest[..ws_idx];
-                crate::core::skills::find_skill(&self.config, cmd_token)
-                    .map(|s| format!(" Prompt — Skill: @{} [+<prompt>] ", s.name))
+                crate::core::skills::find_skill(&self.config, cmd_token).map(|s| {
+                    let args_hint = s.args_usage_hint();
+                    if args_hint.is_empty() {
+                        format!(" Prompt — Skill: @{} [+<prompt>] ", s.name)
+                    } else {
+                        format!(" Prompt — Skill: @{} {args_hint} [+<prompt>] ", s.name)
+                    }
+                })
             } else {
                 let matches: Vec<String> = self
                     .config
                     .skills
                     .iter()
                     .filter(|s| {
-                        (!s.command.is_empty() && s.command.starts_with(rest))
-                            || s.name.starts_with(rest)
+                        !s.is_abstract
+                            && ((!s.command.is_empty() && s.command.starts_with(rest))
+                                || s.name.starts_with(rest))
                     })
                     .map(|s| format!("@{}", s.trigger()))
                     .take(4)
@@ -982,7 +989,29 @@ impl TuiApp {
             let needs_tools = !skill.tools.is_empty() || !skill.hooks.is_empty();
             let is_active = active_skill_name.is_some_and(|a| a.eq_ignore_ascii_case(&skill.name));
 
-            let (glyph, name_style, detail, state_style) = if !missing.is_empty() {
+            let (glyph, name_style, detail, state_style) = if !skill.resolution_errors.is_empty() {
+                (
+                    "✗ ",
+                    Style::default().fg(theme::STATUS_DISABLED),
+                    "ERR extends".to_string(),
+                    Style::default().fg(theme::STATUS_DISABLED),
+                )
+            } else if skill.is_abstract {
+                let t_cnt = skill.tools.len();
+                let h_cnt = skill.hooks.len();
+                let d = match (t_cnt, h_cnt) {
+                    (0, 0) => "BASE".to_string(),
+                    (t, 0) => format!("BASE ({t}t)"),
+                    (0, h) => format!("BASE ({h}h)"),
+                    (t, h) => format!("BASE ({t}t,{h}h)"),
+                };
+                (
+                    "· ",
+                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
+                    d,
+                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
+                )
+            } else if !missing.is_empty() {
                 let d = if missing.len() == 1 && missing[0].len() <= 5 {
                     format!("OFF no:{}", missing[0])
                 } else {

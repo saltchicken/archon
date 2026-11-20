@@ -127,8 +127,9 @@ impl TuiApp {
                 .skills
                 .iter()
                 .find(|s| {
-                    (!s.command.is_empty() && s.command.starts_with(rest))
-                        || s.name.starts_with(rest)
+                    !s.is_abstract
+                        && ((!s.command.is_empty() && s.command.starts_with(rest))
+                            || s.name.starts_with(rest))
                 })
                 .map(|s| format!("@{} ", s.trigger()))
         } else if !line.starts_with("###")
@@ -335,7 +336,7 @@ impl TuiApp {
         }
 
         let mut turn = self.current_turn_config();
-        let prompt = if let Some((cmd_token, _)) = skills::parse_at_command(&raw_prompt) {
+        let prompt = if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
             self.config.skills = skills::discover_skills(
                 &self.config.app.skills_dir,
                 self.config.workspace_skills_dir.as_deref(),
@@ -344,6 +345,7 @@ impl TuiApp {
                 Ok(p) => p,
                 Err(_) => {
                     turn.active_skill = Some(cmd_token.to_string());
+                    turn.skill_args = (!args_str.is_empty()).then(|| args_str.to_string());
                     let _ = self.cmd_tx.send(EngineCommand::SendPrompt {
                         prompt: raw_prompt,
                         turn,

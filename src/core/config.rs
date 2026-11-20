@@ -638,6 +638,7 @@ impl Default for AppSettings {
                 "notify",
                 "skill:list",
                 "skill:read",
+                "skill:check",
             ]
             .map(String::from)
             .into(),

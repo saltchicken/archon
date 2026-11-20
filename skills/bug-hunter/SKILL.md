@@ -2,27 +2,31 @@
 name = "bug-hunter"
 description = "Hunt down latent bugs, race conditions, panics, UTF-8/indexing hazards, path/security flaws, and state desynchronization across the Archon Rust TUI codebase with concrete reproduction scenarios."
 command = "bug-hunter"
-tools = [
-    "repo_map",
-    "search",
-    "read_file",
-    "workspace_snapshot",
-    "cargo",
-    "git",
-    "edit_file",
-]
+extends = "base-rust"
+tools = ["git", "edit_file"]
 
-[[hooks]]
-trigger = "on_activate"
-tool = "repo_map"
-args = { action = "map", max_tokens = 8000 }
+[[args]]
+name = "scope"
+type = "path"
+required = false
+description = "Optional target file, module, or subsystem to focus the bug hunt on"
+
+[[args]]
+name = "mode"
+type = "enum"
+choices = ["audit", "fix"]
+default = "audit"
+description = "Operating mode: audit (report only) or fix (apply verified fixes)"
 +++
 # Archon Bug Hunter Workflow
 
 Act as an adversarial, meticulous systems & security bug hunter for this Rust TUI codebase (`archon`).
 Unlike a general diff review, your mission is to **actively hunt down real, triggerable bugs** in existing code (either across a target module/subsystem specified by the user, or across high-risk hotspots in the repository) and prove each bug with a concrete reproduction path or failing input.
 
-By default, operate in **audit & report mode** (do not modify files unless the user explicitly asks you to fix the bugs you find).
+{{#if scope}}
+**Requested hunting scope:** Focus primarily on `{{scope}}` and its callers/callees.
+{{/if}}
+**Operating mode:** `{{mode}}` — if `audit` (default), operate in **audit & report mode** (do not modify files unless the user explicitly asks you to fix the bugs you find); if `fix`, apply minimal, verified fixes after proving each bug.
 
 ---
 

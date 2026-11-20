@@ -287,16 +287,16 @@ impl ToolContext {
                 .active_skill
                 .as_deref()
                 .and_then(|name| crate::core::skills::find_skill(&self.config, name))
-                .and_then(|s| s.dir_path.as_deref())
-                .filter(|d| d.is_dir())
-                .is_some_and(|dir| {
-                    let abs_dir = if dir.is_absolute() {
-                        dir.to_path_buf()
-                    } else {
-                        self.root.join(dir)
-                    };
-                    let canon_dir = dunce::canonicalize(&abs_dir).unwrap_or(abs_dir);
-                    canon.starts_with(&canon_dir)
+                .is_some_and(|s| {
+                    s.all_dirs().filter(|d| d.is_dir()).any(|dir| {
+                        let abs_dir = if dir.is_absolute() {
+                            dir.to_path_buf()
+                        } else {
+                            self.root.join(dir)
+                        };
+                        let canon_dir = dunce::canonicalize(&abs_dir).unwrap_or(abs_dir);
+                        canon.starts_with(&canon_dir)
+                    })
                 });
 
             if !allowed {
@@ -744,7 +744,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         "memory" => &[
             "list", "read", "add", "remove", "set", "clear", "enable", "disable",
         ],
-        "skill" => &["list", "read", "create", "modify"],
+        "skill" => &["list", "read", "create", "modify", "check"],
         "dotfiles" => &[
             "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore",
             "sync",
@@ -777,7 +777,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
         "notify" => "<summary> [body=...] [urgency=low|normal|critical] [timeout_ms=N]",
-        "skill" => "[list|read|create|modify] [name=...]",
+        "skill" => "[list|read|create|modify|check] [name=...]",
         "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
@@ -1253,6 +1253,23 @@ macro_rules! register_tools {
                 .collect()
         }
 
+        pub fn tool_schema_by_name(name: &str) -> Option<Value> {
+            match name {
+                $( $mod::Tool::NAME => Some(register_tools!(@schema $kind, $mod)), )*
+                _ => None,
+            }
+        }
+
+        pub fn deserialize_tool_args(name: &str, args: &Value) -> Result<()> {
+            match name {
+                $( $mod::Tool::NAME => {
+                    let _: register_tools!(@args_ty $kind, $mod) = parse_args(args, $mod::Tool::NAME)?;
+                    Ok(())
+                } )*
+                _ => bail!("Unknown tool: '{name}'"),
+            }
+        }
+
         async fn dispatch_tool(
             name: &str,
             args: &Value,
@@ -1281,6 +1298,12 @@ macro_rules! register_tools {
     };
     (@schema async, $mod:ident) => {
         auto_schema::<<$mod::Tool as AsyncTool>::Args>($mod::Tool::NAME, $mod::Tool::DESCRIPTION)
+    };
+    (@args_ty blocking, $mod:ident) => {
+        <$mod::Tool as BlockingTool>::Args
+    };
+    (@args_ty async, $mod:ident) => {
+        <$mod::Tool as AsyncTool>::Args
     };
     (@run blocking, $tool:ty, $args:ident, $ctx:ident) => {
         run_blocking::<$tool>($args, $ctx).await

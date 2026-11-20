@@ -11,9 +11,11 @@ use super::{
 };
 use crate::core::{
     config::{expand_tilde, format_tilde_path, workspace_config_dir_for},
+    skill_check,
     skills::{
-        HookTrigger, SkillDefinition, SkillHook, format_hook_summary, list_skill_reference_paths,
-        parse_skill_markdown, scan_skills_dir, split_toml_frontmatter,
+        HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
+        list_skill_reference_paths, parse_skill_markdown, resolve_skills, scan_skills_dir,
+        split_toml_frontmatter,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -36,9 +38,11 @@ pub enum SkillAction {
     Read,
     /// Create a new skill (`SKILL.md` with `+++` TOML frontmatter and markdown prompt) or create a reference file inside a skill directory.
     Create,
-    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `tools`, `hooks`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md` or a reference file.
+    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `extends`, `abstract`, `tools`, `hooks`, `args`, `references`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md` or a reference file.
     #[serde(alias = "edit", alias = "update")]
     Modify,
+    /// Validate skills (`SKILL.md` frontmatter, `extends` chains, tool names, hook argument JSON Schemas, typed `[[args]]`, template variables, and `references/` files).
+    Check,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -55,9 +59,9 @@ pub enum SkillScope {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct SkillArgs {
-    /// The skill operation to perform: `list`, `read`, `create`, or `modify`.
+    /// The skill operation to perform: `list`, `read`, `create`, `modify`, or `check`.
     pub action: SkillAction,
-    /// Skill name or `@command` trigger (required for `read`, `create`, and `modify`; optional filter for `list`).
+    /// Skill name or `@command` trigger (required for `read`, `create`, and `modify`; optional filter for `list` and `check`).
     #[serde(default)]
     pub name: String,
     /// Target skill scope: `auto` (default), `workspace`, or `global`.
@@ -69,12 +73,24 @@ pub struct SkillArgs {
     /// Optional `@command` trigger shorthand without leading `@` (for `create` or `modify` frontmatter; defaults to `name` on `create`).
     #[serde(default)]
     pub command: Option<String>,
-    /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`).
+    /// Optional parent skill name(s) to inherit tools, hooks, typed args, references, and prompt from (e.g. `["base-rust"]`).
+    #[serde(default)]
+    pub extends: Option<Vec<String>>,
+    /// If true, marks this skill as a reusable base skill that can be extended via `extends` but not invoked directly via `@name`.
+    #[serde(default, rename = "abstract")]
+    pub is_abstract: Option<bool>,
+    /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`; prefix with `!` to exclude an inherited tool).
     #[serde(default)]
     pub tools: Option<Vec<String>>,
-    /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}` for the previous assistant response).
+    /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}`, `{{args}}`, or declared `{{arg_name}}` placeholders).
     #[serde(default)]
     pub hooks: Option<Vec<SkillHook>>,
+    /// Optional typed input argument declarations (`[[args]]`) for `create` or `modify` frontmatter.
+    #[serde(default)]
+    pub args: Option<Vec<SkillArgDef>>,
+    /// Optional explicit relative paths to reference files inside the skill directory (e.g. `["references/checklist.md"]`).
+    #[serde(default)]
+    pub references: Option<Vec<String>>,
     /// Optional markdown prompt body for `SKILL.md` (without `+++` frontmatter) when `action` is `create` or `modify`.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -99,8 +115,12 @@ impl SkillArgs {
     fn has_frontmatter_overrides(&self) -> bool {
         self.description.is_some()
             || self.command.is_some()
+            || self.extends.is_some()
+            || self.is_abstract.is_some()
             || self.tools.is_some()
             || self.hooks.is_some()
+            || self.args.is_some()
+            || self.references.is_some()
     }
 }
 
@@ -247,12 +267,17 @@ fn resolve_existing_skill(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_skill_document(
     name: &str,
     description: &str,
     command: &str,
+    extends: &[String],
+    is_abstract: bool,
     tools: &[String],
     hooks: &[SkillHook],
+    skill_args: &[SkillArgDef],
+    references: &[String],
     extra: Option<&toml::Table>,
     prompt: &str,
 ) -> Result<String> {
@@ -263,16 +288,62 @@ fn format_skill_document(
         toml::Value::String(description.trim().to_string()),
     );
     let clean_cmd = clean_skill_query(command);
-    if !clean_cmd.is_empty() {
+    if !clean_cmd.is_empty() && !is_abstract {
         table.insert("command".into(), toml::Value::String(clean_cmd.to_string()));
     }
+    let clean_extends: Vec<String> = extends
+        .iter()
+        .map(|e| clean_skill_query(e).to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    if clean_extends.len() == 1 {
+        table.insert(
+            "extends".into(),
+            toml::Value::String(clean_extends[0].clone()),
+        );
+    } else if clean_extends.len() > 1 {
+        table.insert(
+            "extends".into(),
+            toml::Value::Array(clean_extends.into_iter().map(toml::Value::String).collect()),
+        );
+    }
+    if is_abstract {
+        table.insert("abstract".into(), toml::Value::Boolean(true));
+    }
+
     let clean_tools: Vec<toml::Value> = tools
         .iter()
         .map(|t| t.trim())
         .filter(|t| !t.is_empty())
         .map(|t| toml::Value::String(t.to_string()))
         .collect();
-    table.insert("tools".into(), toml::Value::Array(clean_tools));
+    if !clean_tools.is_empty() || extends.is_empty() {
+        table.insert("tools".into(), toml::Value::Array(clean_tools));
+    }
+
+    let clean_refs: Vec<toml::Value> = references
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty())
+        .map(|r| toml::Value::String(r.to_string()))
+        .collect();
+    if !clean_refs.is_empty() {
+        table.insert("references".into(), toml::Value::Array(clean_refs));
+    }
+
+    let mut clean_args = Vec::new();
+    for a in skill_args.iter().filter(|a| !a.name.trim().is_empty()) {
+        let val = toml::Value::try_from(a).with_context(|| {
+            format!(
+                "Failed to serialize argument '{}' to TOML (TOML does not support null values)",
+                a.name
+            )
+        })?;
+        clean_args.push(val);
+    }
+    if !clean_args.is_empty() {
+        table.insert("args".into(), toml::Value::Array(clean_args));
+    }
 
     let clean_hooks: Vec<toml::Value> = hooks
         .iter()
@@ -305,7 +376,15 @@ fn format_skill_document(
         for (k, v) in ext {
             if !matches!(
                 k.as_str(),
-                "name" | "description" | "command" | "tools" | "hooks"
+                "name"
+                    | "description"
+                    | "command"
+                    | "extends"
+                    | "abstract"
+                    | "tools"
+                    | "hooks"
+                    | "args"
+                    | "references"
             ) {
                 table.insert(k.clone(), v.clone());
             }
@@ -362,11 +441,30 @@ fn table_hooks(table: &toml::Table) -> Option<Vec<SkillHook>> {
     val.try_into::<Vec<SkillHook>>().ok()
 }
 
+fn table_extends(table: &toml::Table) -> Option<Vec<String>> {
+    match table.get("extends")? {
+        toml::Value::String(s) => Some(vec![s.clone()]),
+        toml::Value::Array(arr) => Some(
+            arr.iter()
+                .filter_map(toml::Value::as_str)
+                .map(String::from)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn table_args(table: &toml::Table) -> Option<Vec<SkillArgDef>> {
+    let val = table.get("args")?.clone();
+    val.try_into::<Vec<SkillArgDef>>().ok()
+}
+
 fn check_unknown_tools(tools: &[String]) -> Option<String> {
     let unknown: Vec<&str> = tools
         .iter()
         .map(String::as_str)
         .map(str::trim)
+        .map(|t| t.strip_prefix('!').unwrap_or(t).trim())
         .filter(|&t| !t.is_empty() && t != "*" && !ALL_TOOL_NAMES.contains(&t))
         .collect();
     if unknown.is_empty() {
@@ -395,8 +493,12 @@ fn merge_and_format_skill_doc(
     fallback_name: &str,
     fallback_desc: &str,
     fallback_cmd: &str,
+    fallback_extends: &[String],
+    fallback_abstract: bool,
     fallback_tools: &[String],
     fallback_hooks: &[SkillHook],
+    fallback_args: &[SkillArgDef],
+    fallback_refs: &[String],
     body: &str,
     validate_cmd: bool,
 ) -> Result<String> {
@@ -414,6 +516,15 @@ fn merge_and_format_skill_doc(
     if validate_cmd && !cmd.is_empty() {
         validate_skill_slug(&cmd, "command")?;
     }
+    let extends = args
+        .extends
+        .clone()
+        .or_else(|| table_extends(table))
+        .unwrap_or_else(|| fallback_extends.to_vec());
+    let is_abstract = args
+        .is_abstract
+        .or_else(|| table.get("abstract").and_then(toml::Value::as_bool))
+        .unwrap_or(fallback_abstract);
     let tools = args
         .tools
         .clone()
@@ -424,7 +535,29 @@ fn merge_and_format_skill_doc(
         .clone()
         .or_else(|| table_hooks(table))
         .unwrap_or_else(|| fallback_hooks.to_vec());
-    format_skill_document(&name, &desc, &cmd, &tools, &hooks, Some(table), body)
+    let skill_args = args
+        .args
+        .clone()
+        .or_else(|| table_args(table))
+        .unwrap_or_else(|| fallback_args.to_vec());
+    let references = args
+        .references
+        .clone()
+        .or_else(|| table_string_vec(table, "references"))
+        .unwrap_or_else(|| fallback_refs.to_vec());
+    format_skill_document(
+        &name,
+        &desc,
+        &cmd,
+        &extends,
+        is_abstract,
+        &tools,
+        &hooks,
+        &skill_args,
+        &references,
+        Some(table),
+        body,
+    )
 }
 
 fn append_unknown_tools_note(msg: &mut String, args: &SkillArgs, doc: &str, path: &Path) {
@@ -498,6 +631,10 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
                 "",
                 &slug,
                 &[],
+                false,
+                &[],
+                &[],
+                &[],
                 &[],
                 prompt_body,
                 false,
@@ -512,9 +649,11 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             .or(args.content.as_deref())
             .unwrap_or("")
             .trim();
-        if prompt_body.is_empty() {
+        let has_extends = args.extends.as_ref().is_some_and(|e| !e.is_empty());
+        let is_abstract = args.is_abstract.unwrap_or(false);
+        if prompt_body.is_empty() && !has_extends && !is_abstract {
             bail!(
-                "Creating a skill requires 'prompt' (the markdown instructions) or full 'content'"
+                "Creating a skill requires 'prompt' (the markdown instructions), 'extends', or full 'content'"
             );
         }
         let desc = args
@@ -534,13 +673,28 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             .as_deref()
             .map(clean_skill_query)
             .filter(|s| !s.is_empty())
-            .unwrap_or(&slug);
+            .unwrap_or(if is_abstract { "" } else { &slug });
         if !cmd.is_empty() {
             validate_skill_slug(cmd, "command")?;
         }
+        let extends = args.extends.as_deref().unwrap_or(&[]);
         let tools = args.tools.as_deref().unwrap_or(&[]);
         let hooks = args.hooks.as_deref().unwrap_or(&[]);
-        format_skill_document(&slug, desc, cmd, tools, hooks, None, prompt_body)?
+        let skill_args = args.args.as_deref().unwrap_or(&[]);
+        let references = args.references.as_deref().unwrap_or(&[]);
+        format_skill_document(
+            &slug,
+            desc,
+            cmd,
+            extends,
+            is_abstract,
+            tools,
+            hooks,
+            skill_args,
+            references,
+            None,
+            prompt_body,
+        )?
     };
 
     let display = format_tilde_path(&target_path);
@@ -584,7 +738,7 @@ pub fn preview_modify(
 
     if args.edits.is_empty() && !has_field_updates {
         bail!(
-            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'tools', 'hooks', 'prompt', or 'content'",
+            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'extends', 'abstract', 'tools', 'hooks', 'args', 'references', 'prompt', or 'content'",
             resolved.definition.name
         );
     }
@@ -612,8 +766,12 @@ pub fn preview_modify(
             &def.name,
             &def.description,
             &def.command,
+            &def.extends,
+            def.is_abstract,
             &def.tools,
             &def.hooks,
+            &def.args,
+            &def.references,
             body,
             true,
         )?;
@@ -628,15 +786,38 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let (ws_dir, global_dir) = skill_roots(ctx);
     let filter = clean_skill_query(&args.name);
 
-    let ws_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Workspace) {
+    let raw_global = scan_skills_dir(&global_dir);
+    let raw_ws = if matches!(args.scope, SkillScope::Auto | SkillScope::Workspace) {
         scan_skills_dir(&ws_dir)
     } else {
         Vec::new()
     };
+
+    // Resolve global skills against global only, and workspace skills against merged global+workspace.
     let global_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Global) {
-        scan_skills_dir(&global_dir)
+        resolve_skills(raw_global.clone())
     } else {
         Vec::new()
+    };
+    let ws_skills = if raw_ws.is_empty() {
+        Vec::new()
+    } else {
+        let ws_names: Vec<String> = raw_ws.iter().map(|s| s.name.to_ascii_lowercase()).collect();
+        let mut merged = raw_global;
+        for ws in raw_ws {
+            if let Some(existing) = merged
+                .iter_mut()
+                .find(|s| s.name.eq_ignore_ascii_case(&ws.name))
+            {
+                *existing = ws;
+            } else {
+                merged.push(ws);
+            }
+        }
+        resolve_skills(merged)
+            .into_iter()
+            .filter(|s| ws_names.iter().any(|n| n == &s.name.to_ascii_lowercase()))
+            .collect()
     };
 
     let mut entries: Vec<(&str, &SkillDefinition, bool)> = Vec::new();
@@ -697,13 +878,24 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
             .unwrap_or_default();
         let refs = list_skill_reference_paths(skill);
 
+        let trigger_label = if skill.is_abstract {
+            "abstract base".to_string()
+        } else {
+            format!("@{trigger}")
+        };
         let _ = writeln!(
             out,
-            "\n- {} (@{}) [{}{}]",
-            skill.name, trigger, scope, shadow_note
+            "\n- {} ({}) [{}{}]",
+            skill.name, trigger_label, scope, shadow_note
         );
         let _ = writeln!(out, "  description: {}", skill.description);
+        if !skill.extends.is_empty() {
+            let _ = writeln!(out, "  extends:     {}", skill.extends.join(", "));
+        }
         let _ = writeln!(out, "  tools:       {tools_str}");
+        if !skill.args.is_empty() {
+            let _ = writeln!(out, "  args:        {}", skill.args_usage_hint());
+        }
         if !skill.hooks.is_empty() {
             let hooks_str: Vec<String> = skill
                 .hooks
@@ -717,6 +909,9 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         }
         if !refs.is_empty() {
             let _ = writeln!(out, "  references:  {}", refs.join(", "));
+        }
+        if !skill.resolution_errors.is_empty() {
+            let _ = writeln!(out, "  errors:      {}", skill.resolution_errors.join("; "));
         }
     }
 
@@ -746,11 +941,15 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         ctx.max_output_size,
     )?;
 
-    let trigger = resolved.definition.trigger();
+    let trigger_label = if resolved.definition.is_abstract {
+        "abstract base".to_string()
+    } else {
+        format!("@{}", resolved.definition.trigger())
+    };
     let refs = list_skill_reference_paths(&resolved.definition);
     let mut header = format!(
-        "# Skill: {} (@{}) [{}]\n# Path: {}\n",
-        resolved.definition.name, trigger, resolved.scope_label, display
+        "# Skill: {} ({}) [{}]\n# Path: {}\n",
+        resolved.definition.name, trigger_label, resolved.scope_label, display
     );
     if !refs.is_empty() {
         let _ = writeln!(header, "# References: {}", refs.join(", "));
@@ -760,15 +959,36 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     Ok(header)
 }
 
+fn execute_check(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
+    let filter = clean_skill_query(&args.name);
+    let filter_opt = (!filter.is_empty()).then_some(filter);
+    let (ws_dir, global_dir) = skill_roots(ctx);
+
+    let report = match args.scope {
+        SkillScope::Workspace => {
+            skill_check::check_workspace_skills(&ws_dir, &global_dir, &ctx.config, true, filter_opt)
+        }
+        SkillScope::Global => {
+            skill_check::check_skills_in_dir(&global_dir, "global", &ctx.config, true, filter_opt)
+        }
+        SkillScope::Auto => {
+            skill_check::check_configured_skills(&ctx.config, filter_opt, None, false, true)
+        }
+    };
+
+    Ok(report.format_report(false))
+}
+
 impl BlockingTool for Tool {
     const NAME: &'static str = "skill";
-    const DESCRIPTION: &'static str = "List, read, create, and modify Archon skills (`SKILL.md` definitions and skill reference files) across workspace and global skill directories.";
+    const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions and skill reference files) across workspace and global skill directories.";
     type Args = SkillArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {
             SkillAction::List => execute_list(&args, ctx),
             SkillAction::Read => execute_read(&args, ctx),
+            SkillAction::Check => execute_check(&args, ctx),
             SkillAction::Create => {
                 let (target_path, display, rendered) = preview_create(&args, ctx)?;
                 let root_dir = create_root_dir(args.scope, ctx);

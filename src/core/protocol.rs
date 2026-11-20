@@ -7,7 +7,7 @@ use crate::{
     },
     tools::{ToolCall, ToolExecutionOutput},
 };
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum ToolExecSource {
@@ -47,6 +47,8 @@ pub struct TurnConfig {
     pub enable_tools: bool,
     pub active_skill: Option<String>,
     pub skill_args: Option<String>,
+    pub raw_skill_args: Option<String>,
+    pub skill_inputs: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
