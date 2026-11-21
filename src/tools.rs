@@ -1,3 +1,4 @@
+mod approval;
 mod cargo;
 mod create_file;
 mod dotfiles;
@@ -5,6 +6,7 @@ mod edit_file;
 mod fetch_url;
 mod fs;
 mod git;
+mod manual;
 mod memory;
 mod notify;
 mod read_file;
@@ -15,6 +17,9 @@ mod system;
 pub(crate) mod utils;
 mod workspace_snapshot;
 
+pub use approval::format_approval;
+pub use manual::parse_manual_tool_call;
+
 use crate::core::config::{Config, expand_tilde};
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
@@ -22,8 +27,8 @@ use ignore::{DirEntry, WalkBuilder};
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
-use similar::TextDiff;
+use serde_json::{Value, json};
+
 use std::{
     ffi::OsStr,
     fmt::Write as _,
@@ -808,165 +813,6 @@ pub fn matching_tool_triggers(prefix_mark: &str, query: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_manual_arg_value(raw: &str) -> Value {
-    match raw {
-        "true" => Value::Bool(true),
-        "false" => Value::Bool(false),
-        "null" => Value::Null,
-        _ => {
-            if let Ok(n) = raw.parse::<i64>() {
-                Value::Number(n.into())
-            } else if let Ok(n) = raw.parse::<u64>() {
-                Value::Number(n.into())
-            } else if let Ok(f) = raw.parse::<f64>()
-                && let Some(num) = serde_json::Number::from_f64(f)
-            {
-                Value::Number(num)
-            } else if (raw.starts_with('[') && raw.ends_with(']'))
-                || (raw.starts_with('{') && raw.ends_with('}'))
-            {
-                serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-            } else {
-                Value::String(raw.to_string())
-            }
-        }
-    }
-}
-
-fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<String, Value>) {
-    if tool_name == "read_file" && map.contains_key("file_path") {
-        if let Ok(n) = token.parse::<usize>()
-            && let Some(&k) = ["start_line", "end_line"]
-                .iter()
-                .find(|&&k| !map.contains_key(k))
-        {
-            map.insert(k.into(), Value::Number(n.into()));
-        }
-        return;
-    }
-    if tool_name == "workspace_snapshot" {
-        if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
-            map.insert("tree_only".into(), Value::Bool(true));
-        }
-        return;
-    }
-
-    let keys: &[&str] = match tool_name {
-        "repo_map" if matches!(token, "map" | "definition" | "references") => {
-            &["action", "symbol", "target_path"]
-        }
-        "repo_map" => &["symbol", "target_path"],
-        "cargo" => &["action", "package"],
-        "git" if !map.contains_key("action") => &["action"],
-        "git" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
-            "blame" | "add" | "unstage" => &["path"],
-            "commit" => &["message", "target", "path"],
-            _ => &["target", "path"],
-        },
-        "fs" => &["action", "path", "destination"],
-        "dotfiles" if map.get("action").and_then(Value::as_str) == Some("sync") => &["content"],
-        "dotfiles" => &["action", "path", "pattern"],
-        "skill" => &["action", "name"],
-        "memory" if !map.contains_key("action") => &["action"],
-        "memory" if matches!(token, "global" | "workspace") => &["scope", "item"],
-        "memory" => &["item"],
-        "notify" if matches!(token, "low" | "normal" | "critical") => {
-            &["urgency", "summary", "body"]
-        }
-        "notify" => &["summary", "body"],
-        "system" => &["action", "query", "target"],
-        "read_file" => &["file_path"],
-        "search" => &["pattern", "path"],
-        "fetch_url" => &["url"],
-        "create_file" => &["file_path", "content"],
-        _ => &[],
-    };
-
-    if let Some(&k) = keys.iter().find(|&&k| !map.contains_key(k)) {
-        map.insert(k.into(), Value::String(token.to_string()));
-    }
-}
-
-pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)> {
-    let trimmed = raw_after_hash.trim();
-    if trimmed.is_empty() {
-        bail!("Manual tool invocation cannot be empty");
-    }
-
-    let (tool_token, args_str) = match trimmed.find(char::is_whitespace) {
-        Some(idx) => (&trimmed[..idx], trimmed[idx..].trim()),
-        None => (trimmed, ""),
-    };
-
-    let (raw_name, colon_action) = match tool_token.split_once(':') {
-        Some((n, a)) => (n.trim(), Some(a.trim()).filter(|s| !s.is_empty())),
-        None => (tool_token.trim(), None),
-    };
-
-    let Some(&tool_name) = ALL_TOOL_NAMES
-        .iter()
-        .find(|&&name| name.eq_ignore_ascii_case(raw_name))
-    else {
-        bail!(
-            "Unknown tool '{}'. Available tools: {}",
-            raw_name,
-            ALL_TOOL_NAMES.join(", ")
-        );
-    };
-
-    let mut map = if args_str.starts_with('{') {
-        serde_json::from_str::<Map<String, Value>>(args_str)
-            .with_context(|| format!("Invalid JSON arguments for #{tool_name}"))?
-    } else {
-        let mut m = Map::new();
-        if let Some(act) = colon_action {
-            m.insert("action".into(), Value::String(act.to_string()));
-        }
-        if !args_str.is_empty() {
-            let tokens = shlex::split(args_str)
-                .ok_or_else(|| anyhow::anyhow!("Unmatched quotes in arguments for #{tool_name}"))?;
-            for token in tokens {
-                if let Some((k, v)) = token.split_once('=')
-                    && !k.is_empty()
-                    && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
-                    m.insert(k.to_string(), parse_manual_arg_value(v));
-                } else {
-                    apply_positional_manual_arg(tool_name, &token, &mut m);
-                }
-            }
-        }
-        m
-    };
-
-    if let Some(act) = colon_action {
-        map.entry("action".to_string())
-            .or_insert_with(|| Value::String(act.to_string()));
-    }
-
-    if !map.contains_key("action") {
-        let default_action = match tool_name {
-            "git" => Some("status"),
-            "cargo" => Some("check"),
-            "fs" | "memory" | "skill" | "dotfiles" => Some("list"),
-            "system" => Some("overview"),
-            _ => None,
-        };
-        if let Some(act) = default_action {
-            map.insert("action".into(), Value::String(act.into()));
-        }
-    }
-
-    let call = ToolCall {
-        function: ToolFunction {
-            name: tool_name.to_string(),
-            arguments: Value::Object(map),
-        },
-        thought_signature: None,
-    };
-    let summary = format_call_summary(&call);
-    Ok((call, summary))
-}
 
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
@@ -988,231 +834,6 @@ where
         })
 }
 
-fn format_kv(k: &str, v: &Value) -> String {
-    match v.as_str() {
-        Some(s) => format!("  {k}: {s}\n"),
-        None => format!("  {k}: {v}\n"),
-    }
-}
-
-fn append_filtered_kvs(out: &mut String, obj: &Map<String, Value>, skip: &[&str]) {
-    for (k, v) in obj.iter().filter(|(k, _)| !skip.contains(&k.as_str())) {
-        out.push_str(&format_kv(k, v));
-    }
-}
-
-fn append_warning(out: &mut String, err: &anyhow::Error) {
-    let _ = write!(out, "\n--- WARNING ---\n{err}! Execution will fail.\n");
-}
-
-fn append_unified_diff(out: &mut String, file_path: &str, old: &str, new: &str) {
-    let diff = TextDiff::from_lines(old, new)
-        .unified_diff()
-        .context_radius(3)
-        .header(&format!("a/{file_path}"), &format!("b/{file_path}"))
-        .to_string();
-
-    out.push_str("\n--- UNIFIED DIFF ---\n");
-    out.push_str(if diff.trim().is_empty() {
-        "(No differences)\n"
-    } else {
-        &diff
-    });
-}
-
-fn append_diff_result(out: &mut String, res: Result<(String, String, String, Option<usize>)>) {
-    match res {
-        Ok((display, original, updated, hunk_count)) => {
-            if let Some(n) = hunk_count.filter(|&n| n > 0) {
-                let _ = writeln!(out, "  hunks: {n}");
-            }
-            append_unified_diff(out, &display, &original, &updated);
-        }
-        Err(e) => append_warning(out, &e),
-    }
-}
-
-fn format_edit_approval(
-    out: &mut String,
-    args: &Value,
-    obj: &Map<String, Value>,
-    config: &Config,
-    active_skill: Option<&str>,
-) {
-    let file_path = obj.get("file_path").and_then(Value::as_str).unwrap_or("");
-    let _ = writeln!(out, "  file_path: {file_path}");
-    append_filtered_kvs(out, obj, &["file_path", "edits"]);
-
-    let preview =
-        parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME).and_then(|parsed| {
-            edit_file::preview_edits(&parsed, &ToolContext::new(config, active_skill, 0)?)
-        });
-
-    match preview {
-        Ok((_, original, updated, hunk_count)) => {
-            let _ = writeln!(out, "  hunks: {hunk_count}");
-            append_unified_diff(out, file_path, &original, &updated);
-        }
-        Err(e) => {
-            append_warning(out, &e);
-            let (raw_search, raw_replace) =
-                parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME)
-                    .map(|parsed| edit_file::fallback_hunk_preview(&parsed))
-                    .unwrap_or_default();
-            append_unified_diff(out, file_path, &raw_search, &raw_replace);
-        }
-    }
-}
-
-fn format_fs_approval(
-    out: &mut String,
-    args: &Value,
-    obj: &Map<String, Value>,
-    config: &Config,
-    active_skill: Option<&str>,
-) {
-    append_filtered_kvs(out, obj, &[]);
-    let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME).and_then(|parsed| {
-        fs::preview_action(&parsed, &ToolContext::new(config, active_skill, 0)?)
-    });
-    match preview {
-        Ok((summary, maybe_diff)) => {
-            let _ = write!(out, "\n--- OPERATION ---\n{summary}\n");
-            if let Some((file_path, deleted_content)) = maybe_diff {
-                append_unified_diff(out, &file_path, &deleted_content, "");
-            }
-        }
-        Err(e) => append_warning(out, &e),
-    }
-}
-
-fn format_dotfiles_approval(
-    out: &mut String,
-    args: &Value,
-    obj: &Map<String, Value>,
-    config: &Config,
-) {
-    append_filtered_kvs(out, obj, &["edits", "content"]);
-
-    if let Ok(parsed) = parse_args::<dotfiles::DotfilesArgs>(args, dotfiles::Tool::NAME) {
-        match parsed.action {
-            dotfiles::DotfilesAction::Edit => append_diff_result(
-                out,
-                dotfiles::preview_edit(&parsed, config)
-                    .map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
-            ),
-            dotfiles::DotfilesAction::Create => append_diff_result(
-                out,
-                dotfiles::preview_create(&parsed, config)
-                    .map(|(_, d)| (d, String::new(), parsed.content, None)),
-            ),
-            dotfiles::DotfilesAction::Restore => match dotfiles::preview_restore(&parsed, config) {
-                Ok((file_count, diff)) => {
-                    let _ = writeln!(out, "  files: {file_count}");
-                    out.push_str("\n--- UNIFIED DIFF ---\n");
-                    out.push_str(if diff.trim().is_empty() {
-                        "(No differences)\n"
-                    } else {
-                        &diff
-                    });
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                }
-                Err(e) => append_warning(out, &e),
-            },
-            _ => {}
-        }
-    }
-}
-
-fn format_skill_approval(
-    out: &mut String,
-    args: &Value,
-    obj: &Map<String, Value>,
-    config: &Config,
-    active_skill: Option<&str>,
-) {
-    append_filtered_kvs(out, obj, &["edits", "content", "prompt"]);
-
-    if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
-        && let Ok(ctx) = ToolContext::new(config, active_skill, 0)
-    {
-        match parsed.action {
-            skill::SkillAction::Modify => append_diff_result(
-                out,
-                skill::preview_modify(&parsed, &ctx).map(|(_, d, o, u, n)| (d, o, u, Some(n))),
-            ),
-            skill::SkillAction::Create => append_diff_result(
-                out,
-                skill::preview_create(&parsed, &ctx).map(|(_, d, r)| (d, String::new(), r, None)),
-            ),
-            _ => {}
-        }
-    }
-}
-
-fn format_memory_approval(
-    out: &mut String,
-    args: &Value,
-    obj: &Map<String, Value>,
-    config: &Config,
-    active_skill: Option<&str>,
-) {
-    append_filtered_kvs(out, obj, &[]);
-
-    if let Ok(parsed) = parse_args::<memory::MemoryArgs>(args, memory::Tool::NAME)
-        && let Ok(ctx) = ToolContext::new(config, active_skill, 0)
-        && !matches!(
-            parsed.action,
-            memory::MemoryAction::List | memory::MemoryAction::Read
-        )
-    {
-        append_diff_result(
-            out,
-            memory::preview_mutation(&parsed, &ctx).map(|(_, d, o, u, _)| (d, o, u, None)),
-        );
-    }
-}
-
-pub fn format_approval(call: &ToolCall, config: &Config, active_skill: Option<&str>) -> String {
-    let name = &call.function.name;
-    let args = &call.function.arguments;
-    let sig = call_signature(call);
-
-    let Some(obj) = args.as_object() else {
-        return format!(
-            "Tool: {name} [{sig}]\n{}",
-            serde_json::to_string_pretty(args).unwrap_or_default()
-        );
-    };
-
-    let mut out = format!("Tool: {name} (Rule: {sig})\n");
-    match name.as_str() {
-        "edit_file" => format_edit_approval(&mut out, args, obj, config, active_skill),
-        "fs" => format_fs_approval(&mut out, args, obj, config, active_skill),
-        "dotfiles" => format_dotfiles_approval(&mut out, args, obj, config),
-        "skill" => format_skill_approval(&mut out, args, obj, config, active_skill),
-        "memory" => format_memory_approval(&mut out, args, obj, config, active_skill),
-        _ => {
-            let mut multiline_blocks = Vec::new();
-            for (k, v) in obj {
-                match v.as_str() {
-                    Some(s) if s.contains('\n') || matches!(k.as_str(), "content" | "message") => {
-                        multiline_blocks.push((k, s));
-                    }
-                    _ => out.push_str(&format_kv(k, v)),
-                }
-            }
-            multiline_blocks.sort_by(|a, b| b.0.cmp(a.0));
-            for (k, s) in multiline_blocks {
-                out.push_str(&format!("\n--- {} ---\n{s}\n", k.to_uppercase()));
-            }
-        }
-    }
-
-    out.trim_end().to_string()
-}
 
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
     config
