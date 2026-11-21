@@ -261,10 +261,19 @@ impl TuiApp {
             Some(SlashCommand::Compact) => {
                 self.record_prompt_and_clear(raw_prompt);
                 self.scroll_to_bottom();
-                let instructions = (!args.is_empty()).then(|| args.to_string());
-                let _ = self
-                    .cmd_tx
-                    .send(EngineCommand::CompactChat { instructions });
+                // `/compact @name [focus]` uses a compaction-guide skill; `/compact [focus]`
+                // falls back to the `[app] compact_skill` default (if configured).
+                let (skill, instructions) = match skills::parse_at_command(args) {
+                    Some((tok, rest)) => (
+                        Some(tok.to_string()),
+                        (!rest.is_empty()).then(|| rest.to_string()),
+                    ),
+                    None => (None, (!args.is_empty()).then(|| args.to_string())),
+                };
+                let _ = self.cmd_tx.send(EngineCommand::CompactChat {
+                    skill,
+                    instructions,
+                });
                 false
             }
             Some(SlashCommand::Rename) => {

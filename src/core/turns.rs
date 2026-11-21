@@ -5,7 +5,10 @@ use super::{
     skills,
 };
 use crate::tools::{self, ToolCall};
-use std::{collections::VecDeque, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+};
 use tracing::{debug, error, info, warn};
 
 pub(super) struct QueuedInterjection {
@@ -485,7 +488,11 @@ impl CoreEngine {
         self.spawn_model_turn(&turn).await;
     }
 
-    pub(super) async fn handle_compact_chat(&mut self, instructions: Option<String>) {
+    pub(super) async fn handle_compact_chat(
+        &mut self,
+        skill: Option<String>,
+        instructions: Option<String>,
+    ) {
         if self.is_turn_active()
             || self.inflight.pending_truncated.is_some()
             || !self.inflight.pending_tools.is_empty()
@@ -506,6 +513,39 @@ impl CoreEngine {
                 .await;
             return;
         }
+
+        // Resolve the effective compaction-guide skill: an explicit `@name`
+        // (from `/compact @name`) wins over the `[app] compact_skill` default.
+        let effective_skill: Option<String> = skill
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                self.config
+                    .app
+                    .compact_skill
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+
+        let instructions = match effective_skill {
+            Some(name) => {
+                // Re-discover skills from disk so freshly added/edited guide
+                // skills are available before we render the instructions.
+                self.refresh_skills();
+                match self.render_compact_skill(&name, instructions.as_deref()) {
+                    Ok(combined) => Some(combined),
+                    Err(e) => {
+                        self.emit_error(e).await;
+                        return;
+                    }
+                }
+            }
+            None => instructions,
+        };
 
         info!(
             "Compacting conversation history ({} messages)",
@@ -552,6 +592,54 @@ impl CoreEngine {
                 }
             }
         });
+    }
+
+    /// Renders a compaction-guide skill's prompt body into the compaction
+    /// instructions. Only the skill's **prompt body** is used - tools and hooks
+    /// are irrelevant to the one-shot, tool-less compaction call. Free text
+    /// passed alongside the skill is exposed to the template as `{{args}}` and
+    /// also appended verbatim so the user can add a one-off focus.
+    fn render_compact_skill(
+        &self,
+        name: &str,
+        free_instructions: Option<&str>,
+    ) -> Result<String, String> {
+        let clean = name.trim().trim_start_matches('@');
+        let skill = skills::find_skill(&self.config, clean)
+            .ok_or_else(|| format!("Compaction skill '@{clean}' not found."))?;
+
+        // The guide provides static instructions; the user's one-off focus (if
+        // any) is exposed to the template as {{args}} and also appended
+        // verbatim below so it is never dropped even when the skill body
+        // does not reference it.
+        let focus = free_instructions
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        let inputs: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let ctx = skills::TemplateContext {
+            skill_name: &skill.name,
+            args: focus,
+            raw_args: focus,
+            last_response: None,
+            inputs: &inputs,
+        };
+        let body = skills::render_template(&skill.prompt, &ctx)
+            .trim()
+            .to_string();
+        if body.is_empty() {
+            return Err(format!(
+                "Compaction skill '@{}' has an empty prompt body.",
+                skill.name
+            ));
+        }
+
+        let mut out = body;
+        if !focus.is_empty() {
+            out.push_str("\n\nOne-off focus for this compaction: ");
+            out.push_str(focus);
+        }
+        Ok(out)
     }
 
     pub(super) async fn on_chat_compacted(

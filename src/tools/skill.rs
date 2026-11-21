@@ -3,7 +3,7 @@ use super::{
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
-        path::{ensure_parent_dir},
+        path::ensure_parent_dir,
     },
 };
 use crate::core::{
@@ -11,8 +11,7 @@ use crate::core::{
     skill_check,
     skills::{
         HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
-        parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
-        split_toml_frontmatter,
+        parse_skill_markdown_detailed, resolve_skills, scan_skills_dir, split_toml_frontmatter,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -498,8 +497,7 @@ fn merge_and_format_skill_doc(
 }
 
 fn append_unknown_tools_note(msg: &mut String, doc: &str, path: &Path) {
-    if let Ok((table, _)) = validate_and_parse_skill_doc(doc, path)
-    {
+    if let Ok((table, _)) = validate_and_parse_skill_doc(doc, path) {
         let mut all_tools = table_string_vec(&table, "tools").unwrap_or_default();
         if let Some(hooks) = table_hooks(&table) {
             all_tools.extend(hooks.into_iter().map(|h| h.tool));

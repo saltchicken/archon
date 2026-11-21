@@ -533,6 +533,9 @@ pub struct AppSettings {
     pub max_msg_lines: usize,
     pub history_dir: String,
     pub skills_dir: String,
+    /// Optional default compaction-guide skill name used by `/compact` when no
+    /// explicit `@name` is given (e.g. `compact_skill = "compact"`).
+    pub compact_skill: Option<String>,
     #[serde(alias = "include_hidden")]
     pub allow_hidden: bool,
     pub enabled_tools: Vec<String>,
@@ -606,6 +609,7 @@ impl Default for AppSettings {
             max_msg_lines: 25,
             history_dir: "~/.local/share/archon/sessions".into(),
             skills_dir: "~/.config/archon/skills".into(),
+            compact_skill: None,
             allow_hidden: false,
             enabled_tools: crate::tools::ALL_TOOL_NAMES
                 .iter()

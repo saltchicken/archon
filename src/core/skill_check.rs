@@ -5,8 +5,8 @@ use crate::{
         skills::{
             DetailedSkillParse, HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType,
             SkillDefinition, SkillHook, TemplateContext, inspect_template, interpolate_hook_args,
-            parse_skill_markdown_detailed, resolve_skills,
-            scan_skills_dir, validate_arg_json_value,
+            parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
+            validate_arg_json_value,
         },
     },
     tools::{self, ALL_TOOL_NAMES},

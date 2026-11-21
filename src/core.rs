@@ -326,8 +326,11 @@ impl CoreEngine {
             EngineCommand::ResetChat => {
                 self.handle_reset_chat().await;
             }
-            EngineCommand::CompactChat { instructions } => {
-                self.handle_compact_chat(instructions).await;
+            EngineCommand::CompactChat {
+                skill,
+                instructions,
+            } => {
+                self.handle_compact_chat(skill, instructions).await;
             }
             EngineCommand::SwitchModel {
                 model,

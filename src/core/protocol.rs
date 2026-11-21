@@ -89,6 +89,7 @@ pub enum EngineCommand {
     RefreshSessions,
     ResetChat,
     CompactChat {
+        skill: Option<String>,
         instructions: Option<String>,
     },
     SwitchModel {
