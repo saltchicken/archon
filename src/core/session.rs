@@ -30,6 +30,8 @@ pub struct ChatMessage {
     #[serde(default)]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_in_context: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
@@ -49,6 +51,7 @@ impl ChatMessage {
             role: role.into(),
             content: content.into(),
             truncated: false,
+            is_error: false,
             include_in_context: false,
             tool_name: None,
             images: None,
@@ -62,11 +65,13 @@ impl ChatMessage {
         tool_name: impl Into<String>,
         content: impl Into<String>,
         truncated: bool,
+        is_error: bool,
     ) -> Self {
         Self {
             role: "tool".into(),
             content: content.into(),
             truncated,
+            is_error,
             include_in_context: false,
             tool_name: Some(tool_name.into()),
             images: None,
@@ -85,6 +90,7 @@ impl ChatMessage {
             role: "hook".into(),
             content: content.into(),
             truncated,
+            is_error: false,
             include_in_context: true,
             tool_name: Some(summary.into()),
             images: None,

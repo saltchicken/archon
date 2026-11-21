@@ -1330,6 +1330,7 @@ pub struct ToolExecutionOutput {
     pub full_output: String,
     pub raw_bytes: usize,
     pub truncated: bool,
+    pub is_error: bool,
 }
 
 impl ToolExecutionOutput {
@@ -1340,6 +1341,7 @@ impl ToolExecutionOutput {
             full_output: msg,
             raw_bytes,
             truncated: false,
+            is_error: true,
         }
     }
 }
@@ -1367,6 +1369,7 @@ fn package_tool_output(raw: String, max_size: usize, full_cap: usize) -> ToolExe
         full_output,
         raw_bytes,
         truncated,
+        is_error: false,
     }
 }
 

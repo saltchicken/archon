@@ -49,7 +49,7 @@ impl CoreEngine {
         for name in unresolved_names {
             self.session
                 .messages
-                .push(ChatMessage::new_tool(name, message, false));
+                .push(ChatMessage::new_tool(name, message, false, false));
         }
         count
     }
@@ -121,14 +121,15 @@ impl CoreEngine {
         source: ToolExecSource,
         output: String,
         truncated: bool,
+        is_error: bool,
     ) {
         let is_model_tool = matches!(source, ToolExecSource::Model { .. });
         match source {
             ToolExecSource::Model { tool_name, .. } => {
                 self.sync_tool_side_effects(&tool_name);
-                self.session
-                    .messages
-                    .push(ChatMessage::new_tool(tool_name, output, truncated));
+                self.session.messages.push(ChatMessage::new_tool(
+                    tool_name, output, truncated, is_error,
+                ));
                 info!("Tool execution completed and recorded to chat history.");
             }
             ToolExecSource::ManualShell {
@@ -286,6 +287,7 @@ impl CoreEngine {
                     call.function.name,
                     err_msg,
                     false,
+                    true,
                 ));
                 modified = true;
                 continue;
@@ -363,6 +365,7 @@ impl CoreEngine {
                 call.function.name,
                 internal_out,
                 false,
+                false,
             ));
             self.save_and_emit_chat(Vec::new()).await;
             info!("Tool declination recorded to chat history.");
@@ -389,13 +392,18 @@ impl CoreEngine {
 
         match action {
             TruncatedToolAction::ProceedTruncated => {
-                self.complete_tool_exec(pending.source, pending.truncated_output, true)
+                self.complete_tool_exec(pending.source, pending.truncated_output, true, false)
                     .await;
             }
             TruncatedToolAction::ProceedFull => {
                 let still_truncated = pending.raw_bytes > pending.full_cap_bytes;
-                self.complete_tool_exec(pending.source, pending.full_output, still_truncated)
-                    .await;
+                self.complete_tool_exec(
+                    pending.source,
+                    pending.full_output,
+                    still_truncated,
+                    false,
+                )
+                .await;
             }
             TruncatedToolAction::Discard => match pending.source {
                 ToolExecSource::Model { .. } => {
@@ -406,7 +414,8 @@ impl CoreEngine {
                     if let Some(ref note) = guide_opt {
                         msg.push_str(&format!("\n\n[User attached a message]: {note}"));
                     }
-                    self.complete_tool_exec(pending.source, msg, false).await;
+                    self.complete_tool_exec(pending.source, msg, false, false)
+                        .await;
                 }
                 ToolExecSource::ManualShell { .. } | ToolExecSource::ManualTool { .. } => {
                     info!(
@@ -562,7 +571,7 @@ impl CoreEngine {
             return;
         }
 
-        self.complete_tool_exec(source, res.truncated_output, res.truncated)
+        self.complete_tool_exec(source, res.truncated_output, res.truncated, res.is_error)
             .await;
     }
 
@@ -581,7 +590,7 @@ impl CoreEngine {
                     self.active_max_tool_output_size,
                     condensed.trim()
                 );
-                self.complete_tool_exec(pending.source, final_out, false)
+                self.complete_tool_exec(pending.source, final_out, false, false)
                     .await;
             }
             Err(err) => {
@@ -593,7 +602,7 @@ impl CoreEngine {
                     "Failed to condense truncated tool output: {err}. Proceeding with truncated output."
                 ))
                 .await;
-                self.complete_tool_exec(pending.source, pending.truncated_output, true)
+                self.complete_tool_exec(pending.source, pending.truncated_output, true, false)
                     .await;
             }
         }

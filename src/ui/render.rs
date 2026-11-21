@@ -223,7 +223,11 @@ impl TuiApp {
                     .map(tools::call_signature)
                     .or_else(|| m.tool_name.clone())
                     .unwrap_or_else(|| "tool".to_string());
-                (sanitize_line(&format!("⚙ {summary}")), theme::HEADER_TOOL)
+                if m.is_error {
+                    (sanitize_line(&format!("⚠ {summary}")), theme::HEADER_ERROR)
+                } else {
+                    (sanitize_line(&format!("⚙ {summary}")), theme::HEADER_TOOL)
+                }
             }
             "hook" => {
                 let summary = m.tool_name.as_deref().unwrap_or("hook");
