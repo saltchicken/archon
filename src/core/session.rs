@@ -23,7 +23,7 @@ pub struct ThoughtPart {
     pub thought_signature: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -50,14 +50,7 @@ impl ChatMessage {
         Self {
             role: role.into(),
             content: content.into(),
-            truncated: false,
-            is_error: false,
-            include_in_context: false,
-            tool_name: None,
-            images: None,
-            image_names: None,
-            tool_calls: None,
-            thoughts: None,
+            ..Self::default()
         }
     }
 
@@ -72,12 +65,8 @@ impl ChatMessage {
             content: content.into(),
             truncated,
             is_error,
-            include_in_context: false,
             tool_name: Some(tool_name.into()),
-            images: None,
-            image_names: None,
-            tool_calls: None,
-            thoughts: None,
+            ..Self::default()
         }
     }
 
@@ -90,13 +79,9 @@ impl ChatMessage {
             role: "hook".into(),
             content: content.into(),
             truncated,
-            is_error: false,
             include_in_context: true,
             tool_name: Some(summary.into()),
-            images: None,
-            image_names: None,
-            tool_calls: None,
-            thoughts: None,
+            ..Self::default()
         }
     }
 

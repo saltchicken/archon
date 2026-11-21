@@ -170,7 +170,6 @@ impl CoreEngine {
                 self.abort_active_state();
                 self.session.auto_approve.clear();
                 self.session.executed_skill_hooks.clear();
-                self.session.sent_images.clear();
                 self.session.sent_images.extend(restored_staging_paths);
                 let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
@@ -247,7 +246,6 @@ impl CoreEngine {
         self.abort_active_state();
         self.session.auto_approve.clear();
         self.session.executed_skill_hooks.clear();
-        self.session.sent_images.clear();
 
         self.session.messages.truncate(msg_idx + 1);
         if let Some(last) = self.session.messages.last_mut() {

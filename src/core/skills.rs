@@ -1747,6 +1747,33 @@ pub fn interpolate_hook_args(args: &Value, ctx: &TemplateContext<'_>) -> Value {
     interpolate_hook_value(args, ctx).unwrap_or(Value::Null)
 }
 
+fn build_hook_ctx<'a>(
+    config: &'a Config,
+    active_skill: Option<&str>,
+    skill_args: Option<&'a str>,
+    raw_skill_args: Option<&'a str>,
+    skill_inputs: &'a BTreeMap<String, Value>,
+    last_response: &'a str,
+) -> Option<(
+    &'a SkillDefinition,
+    TemplateContext<'a>,
+    TemplateContext<'a>,
+)> {
+    let skill = active_skill.and_then(|name| find_skill(config, name))?;
+    let tmpl = TemplateContext {
+        skill_name: &skill.name,
+        args: skill_args.unwrap_or(""),
+        raw_args: raw_skill_args.or(skill_args).unwrap_or(""),
+        last_response: Some(last_response),
+        inputs: skill_inputs,
+    };
+    let summary = TemplateContext {
+        last_response: Some("{{last_response}}"),
+        ..tmpl
+    };
+    Some((skill, tmpl, summary))
+}
+
 pub fn collect_due_hooks(
     config: &Config,
     active_skill: Option<&str>,
@@ -1756,31 +1783,26 @@ pub fn collect_due_hooks(
     executed_hooks: &mut HashSet<String>,
     messages: &[ChatMessage],
 ) -> Vec<(String, ToolCall)> {
-    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
+    let Some((skill, tmpl_ctx, summary_ctx)) = build_hook_ctx(
+        config,
+        active_skill,
+        skill_args,
+        raw_skill_args,
+        skill_inputs,
+        last_assistant_response(messages),
+    ) else {
         return Vec::new();
-    };
-    let last_response = last_assistant_response(messages);
-    let args_str = skill_args.unwrap_or("");
-    let raw_args_str = raw_skill_args.or(skill_args).unwrap_or("");
-    let tmpl_ctx = TemplateContext {
-        skill_name: &skill.name,
-        args: args_str,
-        raw_args: raw_args_str,
-        last_response: Some(last_response),
-        inputs: skill_inputs,
-    };
-    let summary_ctx = TemplateContext {
-        last_response: Some("{{last_response}}"),
-        ..tmpl_ctx
     };
 
     let mut due_hooks = Vec::new();
     for (idx, hook) in skill.hooks.iter().enumerate() {
         let resolved_args = interpolate_hook_args(&hook.args, &tmpl_ctx);
-        let summary_args = interpolate_hook_args(&hook.args, &summary_ctx);
-        let summary = format_hook_summary_with_args(&hook.tool, summary_args);
+        let summary = format_hook_summary_with_args(
+            &hook.tool,
+            interpolate_hook_args(&hook.args, &summary_ctx),
+        );
         let key = hook_execution_key(&skill.name, idx, hook, &resolved_args);
-        let due = match hook.trigger {
+        let is_due = match hook.trigger {
             HookTrigger::OnActivate => {
                 let already = is_hook_already_in_session(&key, &summary, executed_hooks, messages);
                 executed_hooks.insert(key);
@@ -1789,7 +1811,7 @@ pub fn collect_due_hooks(
             HookTrigger::EveryTurn => true,
             HookTrigger::AfterTurn => false,
         };
-        if due {
+        if is_due {
             due_hooks.push((
                 summary,
                 ToolCall {
@@ -1813,22 +1835,15 @@ pub fn collect_after_turn_hooks(
     skill_inputs: &BTreeMap<String, Value>,
     last_response: &str,
 ) -> Vec<(String, ToolCall)> {
-    let Some(skill) = active_skill.and_then(|name| find_skill(config, name)) else {
+    let Some((skill, tmpl_ctx, summary_ctx)) = build_hook_ctx(
+        config,
+        active_skill,
+        skill_args,
+        raw_skill_args,
+        skill_inputs,
+        last_response.trim(),
+    ) else {
         return Vec::new();
-    };
-    let trimmed_response = last_response.trim();
-    let args_str = skill_args.unwrap_or("");
-    let raw_args_str = raw_skill_args.or(skill_args).unwrap_or("");
-    let tmpl_ctx = TemplateContext {
-        skill_name: &skill.name,
-        args: args_str,
-        raw_args: raw_args_str,
-        last_response: Some(trimmed_response),
-        inputs: skill_inputs,
-    };
-    let summary_ctx = TemplateContext {
-        last_response: Some("{{last_response}}"),
-        ..tmpl_ctx
     };
 
     skill
@@ -1836,9 +1851,11 @@ pub fn collect_after_turn_hooks(
         .iter()
         .filter(|hook| hook.trigger == HookTrigger::AfterTurn)
         .map(|hook| {
-            let summary_args = interpolate_hook_args(&hook.args, &summary_ctx);
             (
-                format_hook_summary_with_args(&hook.tool, summary_args),
+                format_hook_summary_with_args(
+                    &hook.tool,
+                    interpolate_hook_args(&hook.args, &summary_ctx),
+                ),
                 ToolCall {
                     function: ToolFunction {
                         name: hook.tool.clone(),

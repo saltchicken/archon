@@ -205,24 +205,19 @@ impl CoreEngine {
     }
 
     fn update_turn_preserving_skill(&mut self, new_turn: TurnConfig) {
-        let active_skill = self.turn.active_skill.take();
-        let skill_args = self.turn.skill_args.take();
-        let raw_skill_args = self.turn.raw_skill_args.take();
-        let skill_inputs = std::mem::take(&mut self.turn.skill_inputs);
+        let (active_skill, skill_args, raw_skill_args, skill_inputs) = (
+            self.turn.active_skill.take(),
+            self.turn.skill_args.take(),
+            self.turn.raw_skill_args.take(),
+            std::mem::take(&mut self.turn.skill_inputs),
+        );
         self.turn = new_turn;
-        if let Some(skill_name) = active_skill {
-            if skills::check_skill_activation(&skill_name, self.turn.enable_tools, &self.config)
-                .is_ok()
-            {
-                self.turn.active_skill = Some(skill_name);
-                self.turn.skill_args = skill_args;
-                self.turn.raw_skill_args = raw_skill_args;
-                self.turn.skill_inputs = skill_inputs;
-            } else if (!self.inflight.pending_tools.is_empty() || self.is_turn_active())
-                && skills::check_skill_activation(&skill_name, true, &self.config).is_ok()
-            {
-                self.turn.enable_tools = true;
-                self.turn.active_skill = Some(skill_name);
+        if let Some(name) = active_skill {
+            let tools_ok = self.turn.enable_tools
+                || (!self.inflight.pending_tools.is_empty() || self.is_turn_active());
+            if skills::check_skill_activation(&name, tools_ok, &self.config).is_ok() {
+                self.turn.enable_tools = tools_ok;
+                self.turn.active_skill = Some(name);
                 self.turn.skill_args = skill_args;
                 self.turn.raw_skill_args = raw_skill_args;
                 self.turn.skill_inputs = skill_inputs;
