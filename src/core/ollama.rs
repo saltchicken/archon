@@ -166,7 +166,7 @@ pub fn build_payload(
         "model": model,
         "messages": api_msgs,
         "stream": true,
-        "options": { "num_ctx": num_ctx, "num_predict": -1 }
+        "options": { "num_ctx": num_ctx, "num_predict": -1, "num_batch": 256 }
     });
     if let Some(t) = tools {
         payload["tools"] = json!(t);
