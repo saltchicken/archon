@@ -1,12 +1,9 @@
 //! Skill hook collection, interpolation, and execution key management.
 
 use super::template::TemplateContext;
-use super::types::{HookTrigger, SkillHook, SkillDefinition};
+use super::types::{HookTrigger, SkillDefinition, SkillHook};
 use crate::{
-    core::{
-        config::Config,
-        session::ChatMessage,
-    },
+    core::{config::Config, session::ChatMessage},
     tools::{ToolCall, ToolFunction},
 };
 use serde_json::Value;
@@ -94,8 +91,10 @@ fn single_template_ident(s: &str) -> Option<&str> {
         .strip_prefix("{{")
         .and_then(|r| r.strip_suffix("}}"))
         .map(str::trim)?;
-    (!inner.contains("{{") && !inner.contains("}}") && super::template::is_valid_template_ident(inner))
-        .then_some(inner)
+    (!inner.contains("{{")
+        && !inner.contains("}}")
+        && super::template::is_valid_template_ident(inner))
+    .then_some(inner)
 }
 
 fn interpolate_hook_value(args: &Value, ctx: &TemplateContext<'_>) -> Option<Value> {

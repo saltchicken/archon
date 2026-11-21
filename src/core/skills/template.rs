@@ -2,7 +2,6 @@
 //! interpolation. Supports `{{var}}`, `{{#if var}}…{{else}}…{{/if}}`, and
 //! `{{#unless var}}…{{/unless}}` blocks.
 
-
 use serde_json::Value;
 use std::collections::BTreeMap;
 

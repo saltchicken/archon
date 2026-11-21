@@ -813,7 +813,6 @@ pub fn matching_tool_triggers(prefix_mark: &str, query: &str) -> Vec<String> {
         .collect()
 }
 
-
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
@@ -833,7 +832,6 @@ where
                     .is_some_and(|p| name == p || sig.starts_with(&format!("{p}:")))
         })
 }
-
 
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
     config

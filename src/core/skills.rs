@@ -9,24 +9,22 @@ mod template;
 mod types;
 
 pub use args::{
-    activate_skill_for_turn, apply_at_skill_to_turn, format_arg_value,
-    validate_arg_json_value, validate_turn_skill,
+    activate_skill_for_turn, apply_at_skill_to_turn, format_arg_value, validate_arg_json_value,
+    validate_turn_skill,
 };
 pub use hooks::{
-    collect_after_turn_hooks, collect_due_hooks, format_hook_summary,
-    interpolate_hook_args, preview_due_hooks,
+    collect_after_turn_hooks, collect_due_hooks, format_hook_summary, interpolate_hook_args,
+    preview_due_hooks,
 };
 pub use parse::{
-    discover_skills, find_skill, parse_at_command,
-    parse_skill_markdown_detailed, scan_skills_dir, split_toml_frontmatter, DetailedSkillParse,
+    DetailedSkillParse, discover_skills, find_skill, parse_at_command,
+    parse_skill_markdown_detailed, scan_skills_dir, split_toml_frontmatter,
 };
-pub use resolve::{
-    check_skill_activation, missing_skill_tools, resolve_skills,
-};
-pub use template::{inspect_template, render_template, TemplateContext};
+pub use resolve::{check_skill_activation, missing_skill_tools, resolve_skills};
+pub use template::{TemplateContext, inspect_template, render_template};
 pub use types::{
-    HookTrigger, SkillArgDef, SkillArgType, SkillDefinition, SkillHook,
-    KNOWN_FRONTMATTER_KEYS, RESERVED_ARG_NAMES,
+    HookTrigger, KNOWN_FRONTMATTER_KEYS, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType,
+    SkillDefinition, SkillHook,
 };
 
 use crate::core::config::Config;

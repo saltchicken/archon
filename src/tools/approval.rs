@@ -2,12 +2,12 @@
 //! for tool calls that require user approval.
 
 use super::{
-    dotfiles, edit_file, fs, memory, parse_args, skill, BlockingTool, ToolCall, ToolContext,
+    BlockingTool, ToolCall, ToolContext, dotfiles, edit_file, fs, memory, parse_args, skill,
 };
 use crate::core::config::Config;
 use anyhow::Result;
-use similar::TextDiff;
 use serde_json::{Map, Value};
+use similar::TextDiff;
 use std::fmt::Write as _;
 
 fn format_kv(k: &str, v: &Value) -> String {

@@ -1,8 +1,8 @@
 //! Manual tool invocation parsing: converts `#tool args` user input into a
 //! `ToolCall` with positional argument mapping.
 
-use super::{format_call_summary, ToolCall, ToolFunction, ALL_TOOL_NAMES};
-use anyhow::{bail, Context};
+use super::{ALL_TOOL_NAMES, ToolCall, ToolFunction, format_call_summary};
+use anyhow::{Context, bail};
 use serde_json::{Map, Value};
 
 fn parse_manual_arg_value(raw: &str) -> Value {

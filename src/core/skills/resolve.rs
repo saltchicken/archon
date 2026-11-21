@@ -3,10 +3,7 @@
 
 use super::types::{SkillArgDef, SkillDefinition};
 use crate::core::config::Config;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-};
+use std::{collections::HashMap, path::PathBuf};
 use tracing;
 
 fn push_unique_string(vec: &mut Vec<String>, item: &str) {

@@ -433,7 +433,8 @@ pub fn activate_skill_for_turn(
     turn: &mut crate::core::TurnConfig,
     config: &Config,
 ) -> Result<String, String> {
-    let canonical_name = super::resolve::check_skill_activation(skill_name, turn.enable_tools, config)?;
+    let canonical_name =
+        super::resolve::check_skill_activation(skill_name, turn.enable_tools, config)?;
     let skill = super::parse::find_skill(config, &canonical_name)
         .ok_or_else(|| format!("Skill '@{canonical_name}' not found."))?;
     let invocation = resolve_skill_inputs(skill, raw_args, explicit_overrides)?;
@@ -476,7 +477,8 @@ pub fn validate_turn_skill(
     let Some(skill_name) = turn.active_skill.clone() else {
         return Ok(());
     };
-    let canonical_name = super::resolve::check_skill_activation(&skill_name, turn.enable_tools, config)?;
+    let canonical_name =
+        super::resolve::check_skill_activation(&skill_name, turn.enable_tools, config)?;
     let skill = super::parse::find_skill(config, &canonical_name)
         .ok_or_else(|| format!("Skill '@{canonical_name}' not found."))?;
     turn.active_skill = Some(canonical_name);

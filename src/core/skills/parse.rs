@@ -1,6 +1,6 @@
 //! Parsing, scanning, and discovery of `SKILL.md` files.
 
-use super::types::{SkillArgDef, SkillDefinition, SkillHook, KNOWN_FRONTMATTER_KEYS};
+use super::types::{KNOWN_FRONTMATTER_KEYS, SkillArgDef, SkillDefinition, SkillHook};
 use crate::core::config::{Config, MemoryScope, expand_tilde};
 use serde::{Deserialize, Deserializer};
 use std::{
