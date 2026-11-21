@@ -4,6 +4,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 const CARGO_TIMEOUT_SECS: u64 = 120;
+/// `cargo test` compiles test harnesses (and their dependencies) before running,
+/// so it is given a more generous timeout than the other diagnostics.
+const CARGO_TEST_TIMEOUT_SECS: u64 = 300;
 
 pub struct Tool;
 
@@ -14,6 +17,8 @@ enum CargoAction {
     Check,
     /// Run Clippy lints without modifying code (`cargo clippy --all-targets`).
     Clippy,
+    /// Run all tests for the package and its targets (`cargo test --color never`).
+    Test,
     /// Verify code formatting without modifying files (`cargo fmt --all --check`).
     FmtCheck,
     /// Format all workspace Rust code in-place (`cargo fmt --all`).
@@ -56,7 +61,7 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
-    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
+    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
     type Args = CargoArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -73,6 +78,12 @@ impl AsyncTool for Tool {
                     true,
                     true,
                     "cargo clippy passed with no warnings or errors.",
+                ),
+                CargoAction::Test => (
+                    &["test", "--color", "never"],
+                    true,
+                    true,
+                    "All cargo tests passed.",
                 ),
                 CargoAction::FmtCheck => (
                     &["fmt", "--all", "--check"],
@@ -129,7 +140,12 @@ impl AsyncTool for Tool {
             cmd_args.push(pkg.into());
         }
 
-        ctx.run_command_with_timeout("cargo", &cmd_args, empty_msg, CARGO_TIMEOUT_SECS)
+        let timeout_secs = match args.action {
+            CargoAction::Test => CARGO_TEST_TIMEOUT_SECS,
+            _ => CARGO_TIMEOUT_SECS,
+        };
+
+        ctx.run_command_with_timeout("cargo", &cmd_args, empty_msg, timeout_secs)
             .await
     }
 }

@@ -721,6 +721,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         "cargo" => &[
             "check",
             "clippy",
+            "test",
             "fmt_check",
             "fmt",
             "doc",
@@ -774,7 +775,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "read_file" => "<file_path> [start_line=N] [end_line=N]",
         "search" => "<pattern> [path=...] [files_with_matches=true]",
         "repo_map" => "[map|definition|references] [symbol=...] [max_tokens=N]",
-        "cargo" => "[check|clippy|fmt_check|fmt|doc|metadata|info|tree] [package=...]",
+        "cargo" => {
+            "[check|clippy|test|fmt_check|fmt|doc|metadata|info|tree] [package=...] [bin=...]"
+        }
         "git" => "[status|diff|log|show|blame|branch|add|...] [target=...] [path=...]",
         "fs" => "[list|rename|copy|remove] [path=...] [destination=...]",
         "fetch_url" => "<url> [raw=true|false]",

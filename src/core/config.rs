@@ -264,6 +264,7 @@ impl Default for AppSettings {
                 "git:blame",
                 "cargo:check",
                 "cargo:clippy",
+                "cargo:test",
                 "cargo:fmt_check",
                 "cargo:metadata",
                 "system:*",
