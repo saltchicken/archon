@@ -393,11 +393,18 @@ impl TuiApp {
             if let Some(ws_idx) = rest.find(char::is_whitespace) {
                 let cmd_token = &rest[..ws_idx];
                 crate::core::skills::find_skill(&self.config, cmd_token).map(|s| {
-                    let args_hint = s.args_usage_hint();
-                    if args_hint.is_empty() {
-                        format!(" Prompt — Skill: @{} [+<prompt>] ", s.name)
+                    if s.is_abstract {
+                        format!(
+                            " Prompt — Skill: {} (abstract base — cannot be invoked directly) ",
+                            s.name
+                        )
                     } else {
-                        format!(" Prompt — Skill: @{} {args_hint} [+<prompt>] ", s.name)
+                        let args_hint = s.args_usage_hint();
+                        if args_hint.is_empty() {
+                            format!(" Prompt — Skill: @{} [+<prompt>] ", s.name)
+                        } else {
+                            format!(" Prompt — Skill: @{} {args_hint} [+<prompt>] ", s.name)
+                        }
                     }
                 })
             } else {
@@ -982,9 +989,13 @@ impl TuiApp {
 
         let active_skill_name = self.effective_sidebar_skill().map(|s| s.name.as_str());
         let mut ready_count = 0usize;
+        let mut invocable_count = 0usize;
         let mut lines = Vec::with_capacity(self.config.skills.len());
 
         for skill in &self.config.skills {
+            if !skill.is_abstract {
+                invocable_count += 1;
+            }
             let missing = skills::missing_skill_tools(skill, &self.config);
             let needs_tools = !skill.tools.is_empty() || !skill.hooks.is_empty();
             let is_active = active_skill_name.is_some_and(|a| a.eq_ignore_ascii_case(&skill.name));
@@ -1066,7 +1077,12 @@ impl TuiApp {
                 }
             };
 
-            let trigger = truncate_str(&format!("@{}", skill.trigger()), 12);
+            let display_name = if skill.is_abstract {
+                skill.name.clone()
+            } else {
+                format!("@{}", skill.trigger())
+            };
+            let trigger = truncate_str(&display_name, 12);
             lines.push(Line::from(vec![
                 Span::styled(format!("{glyph}{trigger:<12} "), name_style),
                 Span::styled(format!("{detail:<12} "), state_style),
@@ -1074,10 +1090,7 @@ impl TuiApp {
             ]));
         }
 
-        let title = format!(
-            " Skills ({ready_count}/{} ready) ",
-            self.config.skills.len()
-        );
+        let title = format!(" Skills ({ready_count}/{invocable_count} ready) ");
         (title, lines)
     }
 

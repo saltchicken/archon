@@ -534,8 +534,16 @@ fn collect_template_vars_in_json(
     }
 }
 
-fn is_known_template_var(var: &str, args: &[SkillArgDef], allow_last_response: bool) -> bool {
-    if matches!(var, "args" | "raw_args" | "skill.name" | "super") {
+fn is_known_template_var(
+    var: &str,
+    args: &[SkillArgDef],
+    allow_last_response: bool,
+    allow_super: bool,
+) -> bool {
+    if matches!(var, "args" | "raw_args" | "skill.name") {
+        return true;
+    }
+    if allow_super && var == "super" {
         return true;
     }
     if allow_last_response && var == "last_response" {
@@ -674,7 +682,7 @@ fn validate_hooks(
                 diagnostics.push(SkillDiagnostic::warning(format!(
                     "Hook #{h_num} (`{tool}`): `{{{{last_response}}}}` is typically empty on `on_activate`"
                 )));
-            } else if !is_known_template_var(var, resolved_args, true) {
+            } else if !is_known_template_var(var, resolved_args, true, false) {
                 diagnostics.push(SkillDiagnostic::error(format!(
                     "Hook #{h_num} (`{tool}`): references undeclared template variable `{{{{{var}}}}}`"
                 )));
@@ -1035,7 +1043,7 @@ fn check_scanned_registry(
     let resolved_global = resolve_skills(global_defs.clone());
 
     // Build merged raw definitions (workspace overrides global by name for workspace `extends` resolution).
-    let mut merged_defs: Vec<SkillDefinition> = global_defs;
+    let mut merged_defs: Vec<SkillDefinition> = global_defs.clone();
     for item in &scanned {
         if item.scope == MemoryScope::Global {
             continue;
@@ -1059,7 +1067,7 @@ fn check_scanned_registry(
         }
     }
 
-    let resolved_merged = resolve_skills(merged_defs);
+    let resolved_merged = resolve_skills(merged_defs.clone());
     let clean_filter = name_filter
         .map(|f| f.trim().trim_start_matches('@'))
         .filter(|f| !f.is_empty());
@@ -1113,14 +1121,39 @@ fn check_scanned_registry(
         } else {
             &resolved_merged
         };
-        let resolved = raw_def.as_ref().and_then(|d| {
-            pool.iter()
-                .find(|r| {
-                    r.name.eq_ignore_ascii_case(&d.name)
-                        && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
-                })
-                .or_else(|| pool.iter().find(|r| r.name.eq_ignore_ascii_case(&d.name)))
-        });
+        let owned_resolved;
+        let resolved = match raw_def.as_ref() {
+            Some(d) => match pool.iter().find(|r| {
+                r.name.eq_ignore_ascii_case(&d.name)
+                    && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
+            }) {
+                Some(r) => Some(r),
+                None if !d.extends.is_empty() => {
+                    let mut tmp_defs = if item.scope == MemoryScope::Global {
+                        global_defs.clone()
+                    } else {
+                        merged_defs.clone()
+                    };
+                    let mut single = d.clone();
+                    single.scope = item.scope;
+                    if let Some(existing) = tmp_defs
+                        .iter_mut()
+                        .find(|s| s.name.eq_ignore_ascii_case(&single.name))
+                    {
+                        *existing = single;
+                    } else {
+                        tmp_defs.push(single);
+                    }
+                    owned_resolved = resolve_skills(tmp_defs).into_iter().find(|r| {
+                        r.name.eq_ignore_ascii_case(&d.name)
+                            && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
+                    });
+                    owned_resolved.as_ref()
+                }
+                None => None,
+            },
+            None => None,
+        };
 
         if let Some(filter) = clean_filter {
             let matches_name = display_name.eq_ignore_ascii_case(filter);
@@ -1210,6 +1243,7 @@ fn check_scanned_registry(
         }
 
         // 4. Tools verification (both raw declarations including `!negations`, and resolved)
+        let mut warned_disabled_tools = HashSet::new();
         for raw_tool in &parsed.raw_tools {
             let trimmed = raw_tool.trim();
             if trimmed.is_empty() || trimmed == "*" {
@@ -1233,10 +1267,27 @@ fn check_scanned_registry(
                     "Unknown tool '{trimmed}' in `tools` (valid tools: {})",
                     ALL_TOOL_NAMES.join(", ")
                 )));
-            } else if check_enabled && !tools::is_tool_enabled(trimmed, config) {
+            } else if check_enabled
+                && !tools::is_tool_enabled(trimmed, config)
+                && warned_disabled_tools.insert(trimmed.to_string())
+            {
                 diagnostics.push(SkillDiagnostic::warning(format!(
                     "Tool '{trimmed}' is not enabled in current config (`app.enabled_tools`)"
                 )));
+            }
+        }
+        if check_enabled && !raw_skill.extends.is_empty() {
+            for tool in &effective.tools {
+                let t = tool.trim();
+                if t.is_empty() || t == "*" || !ALL_TOOL_NAMES.contains(&t) {
+                    continue;
+                }
+                if !tools::is_tool_enabled(t, config) && warned_disabled_tools.insert(t.to_string())
+                {
+                    diagnostics.push(SkillDiagnostic::warning(format!(
+                        "Inherited tool '{t}' is not enabled in current config (`app.enabled_tools`)"
+                    )));
+                }
             }
         }
 
@@ -1276,7 +1327,7 @@ fn check_scanned_registry(
             )));
         }
         for var in prompt_vars {
-            if !is_known_template_var(&var, &effective.args, false) {
+            if !is_known_template_var(&var, &effective.args, false, !raw_skill.extends.is_empty()) {
                 diagnostics.push(SkillDiagnostic::error(format!(
                     "Prompt references undeclared template variable `{{{{{var}}}}}`"
                 )));
@@ -1403,6 +1454,7 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
             global,
             strict,
         } => {
+            let dir = dir.map(|d| expand_tilde(&d.to_string_lossy()));
             if let Some(ref d) = dir
                 && !d.exists()
             {
@@ -1421,6 +1473,7 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
             Ok(())
         }
         SkillCommand::List { dir, global } => {
+            let dir = dir.map(|d| expand_tilde(&d.to_string_lossy()));
             let is_dir_override = dir.is_some();
             let skills = if let Some(ref d) = dir {
                 if !d.exists() {
@@ -1807,6 +1860,111 @@ Read optional file."#,
                 .any(|d| d.message.contains("Cyclic symlink")),
             "{:?}",
             res.diagnostics
+        );
+    }
+
+    #[test]
+    fn skill_check_flags_super_in_hooks_and_root_disabled_inherited_tools_and_duplicate_shadowing()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Duplicate name in same scope: `a_dup` has broken `extends`, `b_dup` is valid.
+        fs::create_dir_all(dir.join("a_dup")).unwrap();
+        fs::write(
+            dir.join("a_dup/SKILL.md"),
+            "+++\nname = \"dup\"\nextends = \"missing-parent\"\n+++\nBroken dup.",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("b_dup")).unwrap();
+        fs::write(
+            dir.join("b_dup/SKILL.md"),
+            "+++\nname = \"dup\"\n+++\nValid dup.",
+        )
+        .unwrap();
+
+        // Root skill using `{{super}}` in prompt and hook.
+        fs::create_dir_all(dir.join("bad-super")).unwrap();
+        fs::write(
+            dir.join("bad-super/SKILL.md"),
+            r#"+++
+name = "bad-super"
+tools = ["repo_map"]
+
+[[hooks]]
+trigger = "on_activate"
+tool = "repo_map"
+args = { action = "map", target_path = "{{super}}" }
++++
+Use {{super}} without extends."#,
+        )
+        .unwrap();
+
+        // Parent with a tool disabled in config; child inherits it.
+        fs::create_dir_all(dir.join("base-edit")).unwrap();
+        fs::write(
+            dir.join("base-edit/SKILL.md"),
+            "+++\nname = \"base-edit\"\nabstract = true\ntools = [\"edit_file\"]\n+++\nBase.",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("child-edit")).unwrap();
+        fs::write(
+            dir.join("child-edit/SKILL.md"),
+            "+++\nname = \"child-edit\"\nextends = \"base-edit\"\ntools = [\"read_file\"]\n+++\nChild.",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools.retain(|t| t != "edit_file");
+
+        let report = check_skills_in_dir(dir, "test", &cfg, true, None);
+
+        // `a_dup` must retain its own `unknown parent skill 'missing-parent'` error rather than inheriting `b_dup`.
+        let a_dup = report
+            .results
+            .iter()
+            .find(|r| r.file_path.ends_with("a_dup/SKILL.md"))
+            .unwrap();
+        assert!(
+            a_dup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("unknown parent skill 'missing-parent'")),
+            "{:?}",
+            a_dup.diagnostics
+        );
+
+        // `bad-super` must flag `{{super}}` in both hook and prompt.
+        let bad_super = report
+            .results
+            .iter()
+            .find(|r| r.name == "bad-super")
+            .unwrap();
+        assert!(
+            bad_super
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("Hook #1") && d.message.contains("{{super}}")),
+            "{:?}",
+            bad_super.diagnostics
+        );
+        assert!(
+            bad_super.diagnostics.iter().any(|d| d
+                .message
+                .contains("Prompt references undeclared template variable `{{super}}`")),
+            "{:?}",
+            bad_super.diagnostics
+        );
+
+        // `child-edit` must warn that inherited `edit_file` is disabled even when filtered to `child-edit`.
+        let child_only = check_skills_in_dir(dir, "test", &cfg, true, Some("child-edit"));
+        assert_eq!(child_only.results.len(), 1);
+        assert!(
+            child_only.results[0].diagnostics.iter().any(|d| d
+                .message
+                .contains("Inherited tool 'edit_file' is not enabled")),
+            "{:?}",
+            child_only.results[0].diagnostics
         );
     }
 

@@ -210,6 +210,8 @@ pub struct SkillDefinition {
     pub extends: Vec<String>,
     pub is_abstract: bool,
     pub tools: Vec<String>,
+    pub excluded_tools: Vec<String>,
+    pub tools_restricted: bool,
     pub hooks: Vec<SkillHook>,
     pub args: Vec<SkillArgDef>,
     pub references: Vec<String>,
@@ -228,6 +230,24 @@ impl SkillDefinition {
         } else {
             &self.command
         }
+    }
+
+    pub fn allows_tool(&self, name: &str) -> bool {
+        if self
+            .excluded_tools
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        if self.tools.is_empty() {
+            return !self.tools_restricted;
+        }
+        self.tools
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .any(|t| t == "*" || t == name)
     }
 
     pub fn all_dirs(&self) -> impl Iterator<Item = &Path> {
@@ -429,6 +449,8 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
             extends,
             is_abstract: fm.is_abstract,
             tools: fm.tools,
+            excluded_tools: Vec::new(),
+            tools_restricted: false,
             hooks,
             args,
             references,
@@ -534,6 +556,9 @@ fn resolve_skill_at(
             .filter(|t| !t.is_empty() && !t.starts_with('!'))
             .map(String::from)
             .collect();
+        resolved.excluded_tools.clear();
+        resolved.tools_restricted =
+            !resolved.tools.is_empty() && !resolved.tools.iter().any(|t| t == "*");
         memo[idx] = Some(resolved.clone());
         return resolved;
     }
@@ -541,6 +566,8 @@ fn resolve_skill_at(
     visiting.push(idx);
 
     let mut merged_tools: Vec<String> = Vec::new();
+    let mut excluded_tools: Vec<String> = Vec::new();
+    let mut tools_restricted = false;
     let mut merged_hooks: Vec<SkillHook> = Vec::new();
     let mut merged_args: Vec<SkillArgDef> = Vec::new();
     let mut merged_refs: Vec<String> = Vec::new();
@@ -583,8 +610,20 @@ fn resolve_skill_at(
         for err in &parent.resolution_errors {
             push_unique_string(&mut errors, err);
         }
+        if parent.tools_restricted {
+            tools_restricted = true;
+        }
         for tool in &parent.tools {
-            push_unique_string(&mut merged_tools, tool.trim());
+            let t = tool.trim();
+            if !t.is_empty() {
+                push_unique_string(&mut merged_tools, t);
+                excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(t));
+            }
+        }
+        for ex in &parent.excluded_tools {
+            if !merged_tools.iter().any(|t| t.eq_ignore_ascii_case(ex)) {
+                push_unique_string(&mut excluded_tools, ex);
+            }
         }
         for hook in &parent.hooks {
             if !merged_hooks.contains(hook) {
@@ -609,20 +648,25 @@ fn resolve_skill_at(
 
     visiting.pop();
 
-    // Apply child's tools (supporting `!tool` removal of inherited tools, including expanding `*`).
+    // Apply child's tools (supporting `!tool` removal without expanding `*` into hard requirements).
     for raw_tool in &child.tools {
         let trimmed = raw_tool.trim();
         if let Some(neg) = trimmed.strip_prefix('!') {
             let neg = neg.trim();
-            if merged_tools.iter().any(|t| t == "*") {
-                merged_tools.retain(|t| t != "*");
-                for &tool_name in crate::tools::ALL_TOOL_NAMES {
-                    push_unique_string(&mut merged_tools, tool_name);
-                }
+            if neg.is_empty() {
+                continue;
             }
             merged_tools.retain(|t| !t.eq_ignore_ascii_case(neg));
+            if !tools_restricted || merged_tools.iter().any(|t| t == "*") {
+                push_unique_string(&mut excluded_tools, neg);
+            }
+        } else if trimmed == "*" {
+            push_unique_string(&mut merged_tools, "*");
+            excluded_tools.clear();
         } else if !trimmed.is_empty() {
+            tools_restricted = true;
             push_unique_string(&mut merged_tools, trimmed);
+            excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(trimmed));
         }
     }
 
@@ -669,6 +713,8 @@ fn resolve_skill_at(
         extends: child.extends.clone(),
         is_abstract: child.is_abstract,
         tools: merged_tools,
+        excluded_tools,
+        tools_restricted,
         hooks: merged_hooks,
         args: merged_args,
         references: merged_refs,
@@ -703,8 +749,8 @@ fn replace_super_placeholder(prompt: &str, base: &str) -> Option<String> {
             pos = close + 2;
             found = true;
         } else {
-            out.push_str(&prompt[pos..open + 2]);
-            pos = open + 2;
+            out.push_str(&prompt[pos..open + 1]);
+            pos = open + 1;
         }
     }
     if !found {
@@ -1160,7 +1206,12 @@ pub fn resolve_skill_inputs(
             .iter()
             .find(|d| d.required && !inputs.contains_key(&d.name))
         {
-            let coerced = coerce_arg_value(def, &tok.value)?;
+            let positional_raw = if tok.key.is_some() {
+                &raw_args[tok.start..tok.end]
+            } else {
+                &tok.value
+            };
+            let coerced = coerce_arg_value(def, positional_raw)?;
             inputs.insert(def.name.clone(), coerced);
             consumed_indices.insert(idx);
         } else {
@@ -1278,8 +1329,8 @@ fn tokenize_template(src: &str) -> Vec<TemplateToken<'_>> {
             out.push(tok);
             pos = close + 2;
         } else {
-            out.push(TemplateToken::Literal(&src[pos..open + 2]));
-            pos = open + 2;
+            out.push(TemplateToken::Literal(&src[pos..open + 1]));
+            pos = open + 1;
         }
     }
 
@@ -2425,12 +2476,62 @@ Child intro.
 
         let resolved = resolve_skills(vec![base, child]);
         let sc = resolved.iter().find(|s| s.name == "safe-child").unwrap();
-        assert!(!sc.tools.iter().any(|t| t == "*" || t == "edit_file"));
-        assert!(sc.tools.iter().any(|t| t == "read_file"));
+        assert!(!sc.allows_tool("edit_file"));
+        assert!(sc.allows_tool("read_file"));
         assert_eq!(sc.prompt, "Child intro.\nBase prompt.");
 
+        // Disabling an unrelated tool in config must not block activating a `*` + `!tool` child.
+        let mut cfg = Config {
+            skills: resolved,
+            ..Config::default()
+        };
+        cfg.app.enabled_tools.retain(|t| t != "dotfiles");
+        assert!(check_skill_activation("safe-child", true, &cfg).is_ok());
+
+        let sc = cfg.skills.iter().find(|s| s.name == "safe-child").unwrap();
         let err = resolve_skill_inputs(sc, "", &[]).unwrap_err();
         assert!(err.contains("missing required argument"));
+    }
+
+    #[test]
+    fn negating_all_inherited_tools_denies_all_tools() {
+        let base = parse_skill_markdown(
+            "+++\nname = \"base-cargo\"\nabstract = true\ntools = [\"cargo\"]\n+++\nBase.",
+            Path::new("/tmp/base-cargo"),
+        )
+        .unwrap();
+        let child = parse_skill_markdown(
+            "+++\nname = \"no-tools\"\nextends = \"base-cargo\"\ntools = [\"!cargo\"]\n+++\nChild.",
+            Path::new("/tmp/no-tools"),
+        )
+        .unwrap();
+
+        let resolved = resolve_skills(vec![base, child]);
+        let nt = resolved.iter().find(|s| s.name == "no-tools").unwrap();
+        assert!(nt.tools.is_empty());
+        assert!(nt.tools_restricted);
+        assert!(!nt.allows_tool("cargo"));
+        assert!(!nt.allows_tool("read_file"));
+    }
+
+    #[test]
+    fn positional_required_arg_preserves_undeclared_key_equals_value() {
+        let skill = parse_skill_markdown(
+            r#"+++
+name = "filter"
+[[args]]
+name = "query"
+type = "string"
+required = true
++++
+Filter by {{query}}."#,
+            Path::new("/tmp/filter"),
+        )
+        .unwrap();
+
+        let inv = resolve_skill_inputs(&skill, "RUST_LOG=debug check startup", &[]).unwrap();
+        assert_eq!(inv.inputs["query"], json!("RUST_LOG=debug"));
+        assert_eq!(inv.remaining_prompt, "check startup");
     }
 
     #[test]
@@ -2443,16 +2544,21 @@ Child intro.
             last_response: None,
             inputs: &inputs,
         };
-        let src =
-            r#"Rust format!("{{}}") and JSON {{"a": 1}} and {{#if_not_directive}} and {{args}}."#;
+        let src = r#"Rust format!("{{}}") and JSON {{"a": 1}} and {{#if_not_directive}} and {{args}} and {{{args}}}."#;
         let rendered = render_template(src, &ctx);
         assert_eq!(
             rendered,
-            r#"Rust format!("{{}}") and JSON {{"a": 1}} and {{#if_not_directive}} and hi."#
+            r#"Rust format!("{{}}") and JSON {{"a": 1}} and {{#if_not_directive}} and hi and {hi}."#
         );
         let (vars, errs) = inspect_template(src);
         assert_eq!(vars, vec!["args"]);
         assert!(errs.is_empty());
+
+        // `{{{super}}}` should also resolve the inner `{{super}}` while keeping surrounding braces.
+        assert_eq!(
+            replace_super_placeholder("Wrap {{{super}}}", "BASE"),
+            Some("Wrap {BASE}".to_string())
+        );
     }
 
     #[test]

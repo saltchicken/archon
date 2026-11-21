@@ -1230,14 +1230,7 @@ pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skill: Optio
     let Some(skill) = active_skill.and_then(|s| crate::core::skills::find_skill(config, s)) else {
         return true;
     };
-    if skill.tools.is_empty() {
-        return true;
-    }
-    skill
-        .tools
-        .iter()
-        .map(|t| t.trim())
-        .any(|t| t == "*" || t == name)
+    skill.allows_tool(name)
 }
 
 macro_rules! register_tools {

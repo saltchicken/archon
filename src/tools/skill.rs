@@ -14,7 +14,7 @@ use crate::core::{
     skill_check,
     skills::{
         HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
-        list_skill_reference_paths, parse_skill_markdown, resolve_skills, scan_skills_dir,
+        list_skill_reference_paths, parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
         split_toml_frontmatter,
     },
 };
@@ -189,24 +189,32 @@ fn resolve_existing_reference(
     create_hint: bool,
 ) -> Result<(PathBuf, String)> {
     let rel = validate_reference_subpath(raw_file)?;
-    let candidate = resolved.skill_dir.join(rel);
-    if !candidate.exists() {
-        let hint = if create_hint {
-            ". Use action: \"create\" to create it."
-        } else {
-            ""
-        };
-        bail!(
-            "Reference file '{}' does not exist in skill '{}'{hint}",
-            rel.display(),
-            resolved.definition.name
-        );
+    let search_dirs: Vec<&Path> = if create_hint {
+        vec![resolved.skill_dir.as_path()]
+    } else {
+        resolved.definition.all_dirs().collect()
+    };
+
+    for dir in search_dirs {
+        let candidate = dir.join(rel);
+        if candidate.exists() {
+            let canon_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            let canon = ensure_within_root(&candidate, &canon_dir, &rel.display().to_string())?;
+            let display = format_tilde_path(&canon);
+            return Ok((canon, display));
+        }
     }
-    let canon_skill_dir =
-        dunce::canonicalize(&resolved.skill_dir).unwrap_or_else(|_| resolved.skill_dir.clone());
-    let canon = ensure_within_root(&candidate, &canon_skill_dir, &rel.display().to_string())?;
-    let display = format_tilde_path(&canon);
-    Ok((canon, display))
+
+    let hint = if create_hint {
+        ". Use action: \"create\" to create it."
+    } else {
+        ""
+    };
+    bail!(
+        "Reference file '{}' does not exist in skill '{}'{hint}",
+        rel.display(),
+        resolved.definition.name
+    );
 }
 
 fn locate_skill_in_dir(
@@ -410,7 +418,11 @@ fn validate_and_parse_skill_doc(raw: &str, fallback_dir: &Path) -> Result<(toml:
         };
         let table: toml::Table =
             toml::from_str(fm_str).context("Invalid TOML in skill '+++' frontmatter")?;
-        if parse_skill_markdown(trimmed, fallback_dir).is_none() {
+        let detailed = parse_skill_markdown_detailed(trimmed, fallback_dir);
+        if let Some(err) = detailed.frontmatter_error {
+            bail!("Invalid skill frontmatter: {err}");
+        }
+        if detailed.definition.is_none() {
             bail!("Invalid skill definition: skill 'name' could not be resolved");
         }
         Ok((table, body.to_string()))
@@ -864,9 +876,22 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
             ""
         };
         let tools_str = if skill.tools.is_empty() {
-            "(none)".to_string()
-        } else {
+            if skill.tools_restricted || skill.excluded_tools.is_empty() {
+                "(none)".to_string()
+            } else {
+                let excl: Vec<String> = skill
+                    .excluded_tools
+                    .iter()
+                    .map(|t| format!("!{t}"))
+                    .collect();
+                format!("*, {}", excl.join(", "))
+            }
+        } else if skill.excluded_tools.is_empty() {
             skill.tools.join(", ")
+        } else {
+            let mut parts = skill.tools.clone();
+            parts.extend(skill.excluded_tools.iter().map(|t| format!("!{t}")));
+            parts.join(", ")
         };
         let path_str = skill
             .dir_path
@@ -918,8 +943,41 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
+fn resolve_skill_for_read(
+    raw_name: &str,
+    scope: SkillScope,
+    ctx: &ToolContext,
+) -> Result<ResolvedSkill> {
+    let mut resolved = resolve_existing_skill(raw_name, scope, ctx)?;
+    if resolved.definition.extends.is_empty() {
+        return Ok(resolved);
+    }
+
+    let (ws_dir, global_dir) = skill_roots(ctx);
+    let mut defs = scan_skills_dir(&global_dir);
+    if resolved.scope_label == "workspace" {
+        for ws in scan_skills_dir(&ws_dir) {
+            if let Some(existing) = defs
+                .iter_mut()
+                .find(|s| s.name.eq_ignore_ascii_case(&ws.name))
+            {
+                *existing = ws;
+            } else {
+                defs.push(ws);
+            }
+        }
+    }
+    if let Some(effective) = resolve_skills(defs).into_iter().find(|s| {
+        s.name.eq_ignore_ascii_case(&resolved.definition.name)
+            && s.dir_path.as_deref() == Some(resolved.skill_dir.as_path())
+    }) {
+        resolved.definition = effective;
+    }
+    Ok(resolved)
+}
+
 fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
-    let resolved = resolve_existing_skill(&args.name, args.scope, ctx)?;
+    let resolved = resolve_skill_for_read(&args.name, args.scope, ctx)?;
 
     if !is_skill_md_target(&args.file) {
         let (canon, display) = resolve_existing_reference(&resolved, &args.file, false)?;
@@ -1015,5 +1073,103 @@ impl BlockingTool for Tool {
                 Ok(msg)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::Config;
+
+    #[test]
+    fn skill_read_resolves_inherited_references_and_rejects_invalid_frontmatter_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global_dir = tmp.path().join("global");
+        let ws_dir = tmp.path().join("workspace");
+
+        fs::create_dir_all(global_dir.join("base/references")).unwrap();
+        fs::write(
+            global_dir.join("base/references/guide.md"),
+            "# Base Guide\n",
+        )
+        .unwrap();
+        fs::write(
+            global_dir.join("base/SKILL.md"),
+            "+++\nname = \"base\"\nabstract = true\ntools = [\"read_file\"]\n+++\nBase.",
+        )
+        .unwrap();
+
+        fs::create_dir_all(ws_dir.join("child")).unwrap();
+        fs::write(
+            ws_dir.join("child/SKILL.md"),
+            "+++\nname = \"child\"\nextends = \"base\"\n+++\nChild.",
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.app.skills_dir = global_dir.to_string_lossy().into_owned();
+        cfg.workspace_skills_dir = Some(ws_dir.clone());
+        let ctx = ToolContext {
+            root: tmp.path().to_path_buf(),
+            max_output_size: 16_384,
+            active_skill: None,
+            config: cfg,
+        };
+
+        // `skill:read` on `child` lists inherited references and can read them directly.
+        let read_doc = execute_read(
+            &SkillArgs {
+                action: SkillAction::Read,
+                name: "child".into(),
+                scope: SkillScope::Auto,
+                description: None,
+                command: None,
+                extends: None,
+                is_abstract: None,
+                tools: None,
+                hooks: None,
+                args: None,
+                references: None,
+                prompt: None,
+                content: None,
+                edits: Vec::new(),
+                file: String::new(),
+                start_line: None,
+                end_line: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(read_doc.contains("# References:") && read_doc.contains("guide.md"));
+
+        let read_ref = execute_read(
+            &SkillArgs {
+                action: SkillAction::Read,
+                name: "child".into(),
+                scope: SkillScope::Auto,
+                description: None,
+                command: None,
+                extends: None,
+                is_abstract: None,
+                tools: None,
+                hooks: None,
+                args: None,
+                references: None,
+                prompt: None,
+                content: None,
+                edits: Vec::new(),
+                file: "references/guide.md".into(),
+                start_line: None,
+                end_line: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(read_ref.contains("# Base Guide"));
+
+        // `validate_and_parse_skill_doc` rejects malformed frontmatter field types.
+        let bad = "+++\nname = \"bad\"\nextends = 123\n+++\nBody.";
+        let err = validate_and_parse_skill_doc(bad, Path::new("/tmp/bad")).unwrap_err();
+        assert!(err.to_string().contains("Invalid skill frontmatter"));
     }
 }
