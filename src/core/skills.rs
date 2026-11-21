@@ -1349,22 +1349,24 @@ pub struct TemplateContext<'a> {
 }
 
 impl<'a> TemplateContext<'a> {
+    /// Resolves `var` against the typed skill inputs, falling back to a
+    /// case-insensitive key match.
+    fn input_value(&self, var: &str) -> Option<&Value> {
+        self.inputs.get(var).or_else(|| {
+            self.inputs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(var))
+                .map(|(_, v)| v)
+        })
+    }
+
     fn lookup_str(&self, var: &str) -> Option<String> {
         match var {
             "args" => Some(self.args.to_string()),
             "raw_args" => Some(self.raw_args.to_string()),
             "skill.name" => Some(self.skill_name.to_string()),
             "last_response" => self.last_response.map(str::to_string),
-            _ => self
-                .inputs
-                .get(var)
-                .or_else(|| {
-                    self.inputs
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(var))
-                        .map(|(_, v)| v)
-                })
-                .map(format_arg_value),
+            _ => self.input_value(var).map(format_arg_value),
         }
     }
 
@@ -1374,12 +1376,7 @@ impl<'a> TemplateContext<'a> {
             "raw_args" => !self.raw_args.trim().is_empty(),
             "skill.name" => !self.skill_name.trim().is_empty(),
             "last_response" => self.last_response.is_some_and(|s| !s.trim().is_empty()),
-            _ => match self.inputs.get(var).or_else(|| {
-                self.inputs
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(var))
-                    .map(|(_, v)| v)
-            }) {
+            _ => match self.input_value(var) {
                 Some(Value::Bool(b)) => *b,
                 Some(Value::String(s)) => !s.trim().is_empty(),
                 Some(Value::Null) | None => false,
@@ -1389,12 +1386,63 @@ impl<'a> TemplateContext<'a> {
     }
 }
 
+/// Which block a rendered branch belongs to; determines the `else`/terminator
+/// boundary that ends the branch body.
+#[derive(Clone, Copy)]
+enum Block {
+    /// Top level: no boundary; stray `else`/`/if`/`/unless` tokens are skipped.
+    Top,
+    /// Inside a `{{#if ...}}` block (bounded by `else` / `{{/if}}`).
+    If,
+    /// Inside a `{{#unless ...}}` block (bounded by `else` / `{{/unless}}`).
+    Unless,
+}
+
+impl Block {
+    fn in_block(self) -> bool {
+        matches!(self, Self::If | Self::Unless)
+    }
+
+    fn is_terminator(self, tok: &TemplateToken) -> bool {
+        matches!(
+            (self, tok),
+            (Self::If, TemplateToken::EndIf) | (Self::Unless, TemplateToken::EndUnless)
+        )
+    }
+}
+
+/// Renders a `{{#if ...}}` / `{{#unless ...}}` block (primary branch, optional
+/// `else` branch, then the closing terminator) starting at its opening token.
+fn render_block(
+    tokens: &[TemplateToken<'_>],
+    idx: &mut usize,
+    ctx: &TemplateContext<'_>,
+    emit: bool,
+    cond: bool,
+    block: Block,
+    out: &mut String,
+) {
+    // `idx` points at the `#if`/`#unless` token; advance past it.
+    *idx += 1;
+    // Render the primary branch up to the `else` or the block terminator.
+    render_tokens(tokens, idx, ctx, emit && cond, block, out);
+    // Render the `else` branch when one is present.
+    if matches!(tokens.get(*idx), Some(TemplateToken::Else)) {
+        *idx += 1;
+        render_tokens(tokens, idx, ctx, emit && !cond, block, out);
+    }
+    // Consume the block terminator.
+    if tokens.get(*idx).is_some_and(|t| block.is_terminator(t)) {
+        *idx += 1;
+    }
+}
+
 fn render_tokens(
     tokens: &[TemplateToken<'_>],
     idx: &mut usize,
     ctx: &TemplateContext<'_>,
     emit: bool,
-    stop_at_else_or_end: Option<bool>,
+    block: Block,
     out: &mut String,
 ) {
     while *idx < tokens.len() {
@@ -1412,43 +1460,25 @@ fn render_tokens(
                 *idx += 1;
             }
             TemplateToken::If(var) => {
-                *idx += 1;
-                let cond = ctx.is_truthy(var);
-                render_tokens(tokens, idx, ctx, emit && cond, Some(true), out);
-                if matches!(tokens.get(*idx), Some(TemplateToken::Else)) {
-                    *idx += 1;
-                    render_tokens(tokens, idx, ctx, emit && !cond, Some(true), out);
-                }
-                if matches!(tokens.get(*idx), Some(TemplateToken::EndIf)) {
-                    *idx += 1;
-                }
+                render_block(tokens, idx, ctx, emit, ctx.is_truthy(var), Block::If, out)
             }
-            TemplateToken::Unless(var) => {
-                *idx += 1;
-                let cond = !ctx.is_truthy(var);
-                render_tokens(tokens, idx, ctx, emit && cond, Some(false), out);
-                if matches!(tokens.get(*idx), Some(TemplateToken::Else)) {
-                    *idx += 1;
-                    render_tokens(tokens, idx, ctx, emit && !cond, Some(false), out);
-                }
-                if matches!(tokens.get(*idx), Some(TemplateToken::EndUnless)) {
-                    *idx += 1;
-                }
-            }
+            TemplateToken::Unless(var) => render_block(
+                tokens,
+                idx,
+                ctx,
+                emit,
+                !ctx.is_truthy(var),
+                Block::Unless,
+                out,
+            ),
             TemplateToken::Else => {
-                if stop_at_else_or_end.is_some() {
+                if block.in_block() {
                     return;
                 }
                 *idx += 1;
             }
-            TemplateToken::EndIf => {
-                if stop_at_else_or_end == Some(true) {
-                    return;
-                }
-                *idx += 1;
-            }
-            TemplateToken::EndUnless => {
-                if stop_at_else_or_end == Some(false) {
+            TemplateToken::EndIf | TemplateToken::EndUnless => {
+                if block.is_terminator(&tokens[*idx]) {
                     return;
                 }
                 *idx += 1;
@@ -1464,7 +1494,7 @@ pub fn render_template(src: &str, ctx: &TemplateContext<'_>) -> String {
     let tokens = tokenize_template(src);
     let mut out = String::with_capacity(src.len());
     let mut idx = 0usize;
-    render_tokens(&tokens, &mut idx, ctx, true, None, &mut out);
+    render_tokens(&tokens, &mut idx, ctx, true, Block::Top, &mut out);
     out
 }
 
@@ -2575,6 +2605,48 @@ Filter by {{query}}."#,
         assert_eq!(
             replace_super_placeholder("Wrap {{{super}}}", "BASE"),
             Some("Wrap {BASE}".to_string())
+        );
+    }
+
+    #[test]
+    fn template_conditionals_render_branches_and_nesting() {
+        let inputs: BTreeMap<String, Value> = [("on".into(), json!(true))].into_iter().collect();
+        let ctx = TemplateContext {
+            skill_name: "t",
+            args: "x",
+            raw_args: "x",
+            last_response: None,
+            inputs: &inputs,
+        };
+        // `#if` truthy: primary branch, `else` skipped.
+        assert_eq!(
+            render_template("{{#if on}}yes{{else}}no{{/if}}", &ctx),
+            "yes"
+        );
+        // `#unless` over a truthy input: `else` branch wins.
+        assert_eq!(
+            render_template("{{#unless on}}a{{else}}b{{/unless}}", &ctx),
+            "b"
+        );
+        // Absent input is falsy: `#if` falls through to `else`.
+        assert_eq!(render_template("{{#if off}}a{{else}}b{{/if}}", &ctx), "b");
+        // Nested same-direction block: both primary branches emit, outer `else` skipped.
+        assert_eq!(
+            render_template("{{#if on}}A{{#if on}}B{{/if}}C{{else}}D{{/if}}", &ctx),
+            "ABC"
+        );
+        // Nested block inside an `else` branch still resolves its own condition.
+        assert_eq!(
+            render_template(
+                "{{#if off}}a{{else}}E{{#if on}}F{{else}}G{{/if}}{{/if}}",
+                &ctx
+            ),
+            "EF"
+        );
+        // Stray cross-terminator tokens are skipped, not treated as boundaries.
+        assert_eq!(
+            render_template("{{#if on}}1{{/unless}}2{{/if}}", &ctx),
+            "12"
         );
     }
 
