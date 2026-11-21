@@ -3,10 +3,7 @@ use super::{
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
-        path::{
-            ensure_ancestor_within_root, ensure_parent_dir, ensure_within_root,
-            has_git_dir_component, validate_relative_path,
-        },
+        path::{ensure_parent_dir},
     },
 };
 use crate::core::{
@@ -14,7 +11,7 @@ use crate::core::{
     skill_check,
     skills::{
         HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
-        list_skill_reference_paths, parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
+        parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
         split_toml_frontmatter,
     },
 };
@@ -32,16 +29,16 @@ pub struct Tool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillAction {
-    /// List available skills (across workspace and global skill directories) with their trigger commands, scopes, tools, descriptions, and reference files.
+    /// List available skills (across workspace and global skill directories) with their trigger commands, scopes, tools, and descriptions.
     List,
-    /// Read a skill's `SKILL.md` definition (or a reference file inside the skill directory) with optional 1-based `[start_line, end_line]`.
+    /// Read a skill's `SKILL.md` definition with optional 1-based `[start_line, end_line]`.
     Read,
-    /// Create a new skill (`SKILL.md` with `+++` TOML frontmatter and markdown prompt) or create a reference file inside a skill directory.
+    /// Create a new skill (`SKILL.md` with `+++` TOML frontmatter and markdown prompt).
     Create,
-    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `extends`, `abstract`, `tools`, `hooks`, `args`, `references`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md` or a reference file.
+    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `extends`, `abstract`, `tools`, `hooks`, `args`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md`.
     #[serde(alias = "edit", alias = "update")]
     Modify,
-    /// Validate skills (`SKILL.md` frontmatter, `extends` chains, tool names, hook argument JSON Schemas, typed `[[args]]`, template variables, and `references/` files).
+    /// Validate skills (`SKILL.md` frontmatter, `extends` chains, tool names, hook argument JSON Schemas, typed `[[args]]`, and template variables).
     Check,
 }
 
@@ -73,7 +70,7 @@ pub struct SkillArgs {
     /// Optional `@command` trigger shorthand without leading `@` (for `create` or `modify` frontmatter; defaults to `name` on `create`).
     #[serde(default)]
     pub command: Option<String>,
-    /// Optional parent skill name(s) to inherit tools, hooks, typed args, references, and prompt from (e.g. `["base-rust"]`).
+    /// Optional parent skill name(s) to inherit tools, hooks, typed args, and prompt from (e.g. `["base-rust"]`).
     #[serde(default)]
     pub extends: Option<Vec<String>>,
     /// If true, marks this skill as a reusable base skill that can be extended via `extends` but not invoked directly via `@name`.
@@ -88,19 +85,17 @@ pub struct SkillArgs {
     /// Optional typed input argument declarations (`[[args]]`) for `create` or `modify` frontmatter.
     #[serde(default)]
     pub args: Option<Vec<SkillArgDef>>,
-    /// Optional explicit relative paths to reference files inside the skill directory (e.g. `["references/checklist.md"]`).
-    #[serde(default)]
-    pub references: Option<Vec<String>>,
+
     /// Optional markdown prompt body for `SKILL.md` (without `+++` frontmatter) when `action` is `create` or `modify`.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// Optional full file content when `action` is `create` or `modify` (can be a complete `SKILL.md` with `+++` frontmatter or content for a reference `file`).
+    /// Optional full file content when `action` is `create` or `modify` (can be a complete `SKILL.md` with `+++` frontmatter).
     #[serde(default)]
     pub content: Option<String>,
-    /// Disjoint search/replace hunks when `action` is `modify` (applied to `SKILL.md` or `file`).
+    /// Disjoint search/replace hunks when `action` is `modify` (applied to `SKILL.md`).
     #[serde(default)]
     pub edits: Vec<EditHunk>,
-    /// Optional relative file path inside the skill's directory (defaults to `"SKILL.md"`; e.g. `"references/playbook.md"` to read, create, or modify a skill reference file).
+    /// Optional relative file path inside the skill's directory (defaults to `"SKILL.md"`).
     #[serde(default)]
     pub file: String,
     /// Optional 1-based starting line number (inclusive) when `action` is `read`.
@@ -120,7 +115,6 @@ impl SkillArgs {
             || self.tools.is_some()
             || self.hooks.is_some()
             || self.args.is_some()
-            || self.references.is_some()
     }
 }
 
@@ -173,48 +167,6 @@ fn validate_skill_slug(raw: &str, field: &str) -> Result<String> {
 fn is_skill_md_target(raw_file: &str) -> bool {
     let trimmed = raw_file.trim();
     trimmed.is_empty() || trimmed.eq_ignore_ascii_case("SKILL.md")
-}
-
-fn validate_reference_subpath(raw_file: &str) -> Result<&Path> {
-    let rel = validate_relative_path(raw_file)?;
-    if has_git_dir_component(rel) {
-        bail!("Security violation: skill reference file path cannot contain '.git'");
-    }
-    Ok(rel)
-}
-
-fn resolve_existing_reference(
-    resolved: &ResolvedSkill,
-    raw_file: &str,
-    create_hint: bool,
-) -> Result<(PathBuf, String)> {
-    let rel = validate_reference_subpath(raw_file)?;
-    let search_dirs: Vec<&Path> = if create_hint {
-        vec![resolved.skill_dir.as_path()]
-    } else {
-        resolved.definition.all_dirs().collect()
-    };
-
-    for dir in search_dirs {
-        let candidate = dir.join(rel);
-        if candidate.exists() {
-            let canon_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-            let canon = ensure_within_root(&candidate, &canon_dir, &rel.display().to_string())?;
-            let display = format_tilde_path(&canon);
-            return Ok((canon, display));
-        }
-    }
-
-    let hint = if create_hint {
-        ". Use action: \"create\" to create it."
-    } else {
-        ""
-    };
-    bail!(
-        "Reference file '{}' does not exist in skill '{}'{hint}",
-        rel.display(),
-        resolved.definition.name
-    );
 }
 
 fn locate_skill_in_dir(
@@ -285,7 +237,6 @@ fn format_skill_document(
     tools: &[String],
     hooks: &[SkillHook],
     skill_args: &[SkillArgDef],
-    references: &[String],
     extra: Option<&toml::Table>,
     prompt: &str,
 ) -> Result<String> {
@@ -327,16 +278,6 @@ fn format_skill_document(
         .collect();
     if !clean_tools.is_empty() || extends.is_empty() {
         table.insert("tools".into(), toml::Value::Array(clean_tools));
-    }
-
-    let clean_refs: Vec<toml::Value> = references
-        .iter()
-        .map(|r| r.trim())
-        .filter(|r| !r.is_empty())
-        .map(|r| toml::Value::String(r.to_string()))
-        .collect();
-    if !clean_refs.is_empty() {
-        table.insert("references".into(), toml::Value::Array(clean_refs));
     }
 
     let mut clean_args = Vec::new();
@@ -392,7 +333,6 @@ fn format_skill_document(
                     | "tools"
                     | "hooks"
                     | "args"
-                    | "references"
             ) {
                 table.insert(k.clone(), v.clone());
             }
@@ -510,7 +450,6 @@ fn merge_and_format_skill_doc(
     fallback_tools: &[String],
     fallback_hooks: &[SkillHook],
     fallback_args: &[SkillArgDef],
-    fallback_refs: &[String],
     body: &str,
     validate_cmd: bool,
 ) -> Result<String> {
@@ -552,11 +491,6 @@ fn merge_and_format_skill_doc(
         .clone()
         .or_else(|| table_args(table))
         .unwrap_or_else(|| fallback_args.to_vec());
-    let references = args
-        .references
-        .clone()
-        .or_else(|| table_string_vec(table, "references"))
-        .unwrap_or_else(|| fallback_refs.to_vec());
     format_skill_document(
         &name,
         &desc,
@@ -566,7 +500,6 @@ fn merge_and_format_skill_doc(
         &tools,
         &hooks,
         &skill_args,
-        &references,
         Some(table),
         body,
     )
@@ -590,29 +523,6 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
     let slug = validate_skill_slug(&args.name, "name")?;
     let root_dir = create_root_dir(args.scope, ctx);
     let skill_dir = root_dir.join(&slug);
-
-    if !is_skill_md_target(&args.file) {
-        let rel = validate_reference_subpath(&args.file)?;
-        let target_path = skill_dir.join(rel);
-        let display = format_tilde_path(&target_path);
-        if target_path.exists() {
-            bail!("File already exists: {display}. Use action: \"modify\" instead.");
-        }
-        if let Some(existing_root) = root_dir.ancestors().find(|p| p.exists())
-            && let Ok(canon_root) = dunce::canonicalize(existing_root)
-        {
-            ensure_ancestor_within_root(&target_path, &canon_root, &display)?;
-        }
-        let body = args
-            .content
-            .as_deref()
-            .or(args.prompt.as_deref())
-            .unwrap_or("");
-        if body.trim().is_empty() {
-            bail!("'content' (or 'prompt') is required when creating a reference file");
-        }
-        return Ok((target_path, display, body.to_string()));
-    }
 
     let target_path = skill_dir.join("SKILL.md");
     let flat_path = root_dir.join(format!("{slug}.md"));
@@ -644,7 +554,6 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
                 &slug,
                 &[],
                 false,
-                &[],
                 &[],
                 &[],
                 &[],
@@ -693,7 +602,6 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         let tools = args.tools.as_deref().unwrap_or(&[]);
         let hooks = args.hooks.as_deref().unwrap_or(&[]);
         let skill_args = args.args.as_deref().unwrap_or(&[]);
-        let references = args.references.as_deref().unwrap_or(&[]);
         format_skill_document(
             &slug,
             desc,
@@ -703,7 +611,6 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             tools,
             hooks,
             skill_args,
-            references,
             None,
             prompt_body,
         )?
@@ -718,22 +625,6 @@ pub fn preview_modify(
     ctx: &ToolContext,
 ) -> Result<(PathBuf, String, String, String, usize)> {
     let resolved = resolve_existing_skill(&args.name, args.scope, ctx)?;
-
-    if !is_skill_md_target(&args.file) {
-        let (canon, display) = resolve_existing_reference(&resolved, &args.file, true)?;
-        let original = fs::read_to_string(&canon).context("Error reading skill reference file")?;
-
-        if !args.edits.is_empty() {
-            let updated = apply_hunks_to_str(&original, &display, &args.edits)?;
-            return Ok((canon, display, original, updated, args.edits.len()));
-        }
-        if let Some(new_body) = args.content.as_deref().or(args.prompt.as_deref()) {
-            return Ok((canon, display, original, new_body.to_string(), 0));
-        }
-        bail!(
-            "Nothing to modify for reference file '{display}': provide 'edits' hunks or 'content'"
-        );
-    }
 
     let target_path = resolved.skill_md_path;
     let display = format_tilde_path(&target_path);
@@ -750,7 +641,7 @@ pub fn preview_modify(
 
     if args.edits.is_empty() && !has_field_updates {
         bail!(
-            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'extends', 'abstract', 'tools', 'hooks', 'args', 'references', 'prompt', or 'content'",
+            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'extends', 'abstract', 'tools', 'hooks', 'args', 'prompt', or 'content'",
             resolved.definition.name
         );
     }
@@ -783,7 +674,6 @@ pub fn preview_modify(
             &def.tools,
             &def.hooks,
             &def.args,
-            &def.references,
             body,
             true,
         )?;
@@ -901,7 +791,6 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
                 format_tilde_path(if md.is_file() { &md } else { d })
             })
             .unwrap_or_default();
-        let refs = list_skill_reference_paths(skill);
 
         let trigger_label = if skill.is_abstract {
             "abstract base".to_string()
@@ -931,9 +820,6 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         }
         if !path_str.is_empty() {
             let _ = writeln!(out, "  path:        {path_str}");
-        }
-        if !refs.is_empty() {
-            let _ = writeln!(out, "  references:  {}", refs.join(", "));
         }
         if !skill.resolution_errors.is_empty() {
             let _ = writeln!(out, "  errors:      {}", skill.resolution_errors.join("; "));
@@ -979,17 +865,6 @@ fn resolve_skill_for_read(
 fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let resolved = resolve_skill_for_read(&args.name, args.scope, ctx)?;
 
-    if !is_skill_md_target(&args.file) {
-        let (canon, display) = resolve_existing_reference(&resolved, &args.file, false)?;
-        return read_file_contents(
-            &canon,
-            &display,
-            args.start_line,
-            args.end_line,
-            ctx.max_output_size,
-        );
-    }
-
     let display = format_tilde_path(&resolved.skill_md_path);
     let content = read_file_contents(
         &resolved.skill_md_path,
@@ -1004,16 +879,10 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     } else {
         format!("@{}", resolved.definition.trigger())
     };
-    let refs = list_skill_reference_paths(&resolved.definition);
-    let mut header = format!(
-        "# Skill: {} ({}) [{}]\n# Path: {}\n",
-        resolved.definition.name, trigger_label, resolved.scope_label, display
+    let header = format!(
+        "# Skill: {} ({}) [{}]\n# Path: {}\n\n{}",
+        resolved.definition.name, trigger_label, resolved.scope_label, display, content
     );
-    if !refs.is_empty() {
-        let _ = writeln!(header, "# References: {}", refs.join(", "));
-    }
-    header.push('\n');
-    header.push_str(&content);
     Ok(header)
 }
 
@@ -1039,7 +908,7 @@ fn execute_check(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "skill";
-    const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions and skill reference files) across workspace and global skill directories.";
+    const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions) across workspace and global skill directories.";
     type Args = SkillArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1082,17 +951,11 @@ mod tests {
     use crate::core::config::Config;
 
     #[test]
-    fn skill_read_resolves_inherited_references_and_rejects_invalid_frontmatter_types() {
+    fn skill_read_resolves_inherited_and_rejects_invalid_frontmatter_types() {
         let tmp = tempfile::tempdir().unwrap();
         let global_dir = tmp.path().join("global");
         let ws_dir = tmp.path().join("workspace");
 
-        fs::create_dir_all(global_dir.join("base/references")).unwrap();
-        fs::write(
-            global_dir.join("base/references/guide.md"),
-            "# Base Guide\n",
-        )
-        .unwrap();
         fs::write(
             global_dir.join("base/SKILL.md"),
             "+++\nname = \"base\"\nabstract = true\ntools = [\"read_file\"]\n+++\nBase.",
@@ -1116,7 +979,7 @@ mod tests {
             config: cfg,
         };
 
-        // `skill:read` on `child` lists inherited references and can read them directly.
+        // `skill:read` on `child` resolves the skill definition.
         let read_doc = execute_read(
             &SkillArgs {
                 action: SkillAction::Read,
@@ -1129,7 +992,6 @@ mod tests {
                 tools: None,
                 hooks: None,
                 args: None,
-                references: None,
                 prompt: None,
                 content: None,
                 edits: Vec::new(),
@@ -1140,32 +1002,7 @@ mod tests {
             &ctx,
         )
         .unwrap();
-        assert!(read_doc.contains("# References:") && read_doc.contains("guide.md"));
-
-        let read_ref = execute_read(
-            &SkillArgs {
-                action: SkillAction::Read,
-                name: "child".into(),
-                scope: SkillScope::Auto,
-                description: None,
-                command: None,
-                extends: None,
-                is_abstract: None,
-                tools: None,
-                hooks: None,
-                args: None,
-                references: None,
-                prompt: None,
-                content: None,
-                edits: Vec::new(),
-                file: "references/guide.md".into(),
-                start_line: None,
-                end_line: None,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert!(read_ref.contains("# Base Guide"));
+        assert!(read_doc.contains("# Skill: child"));
 
         // `validate_and_parse_skill_doc` rejects malformed frontmatter field types.
         let bad = "+++\nname = \"bad\"\nextends = 123\n+++\nBody.";

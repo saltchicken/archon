@@ -5,21 +5,19 @@ use crate::{
         skills::{
             DetailedSkillParse, HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType,
             SkillDefinition, SkillHook, TemplateContext, inspect_template, interpolate_hook_args,
-            list_skill_reference_paths, parse_skill_markdown_detailed, resolve_skills,
+            parse_skill_markdown_detailed, resolve_skills,
             scan_skills_dir, validate_arg_json_value,
         },
     },
-    tools::{self, ALL_TOOL_NAMES, utils::path::validate_relative_path},
+    tools::{self, ALL_TOOL_NAMES},
 };
 use anyhow::{Result, bail};
-use regex::Regex;
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, HashSet},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +58,6 @@ pub struct SkillCheckResult {
     pub tool_count: usize,
     pub hook_count: usize,
     pub arg_count: usize,
-    pub ref_count: usize,
     pub diagnostics: Vec<SkillDiagnostic>,
 }
 
@@ -147,10 +144,6 @@ impl SkillCheckReport {
             if res.arg_count > 0 {
                 let s = if res.arg_count == 1 { "" } else { "s" };
                 meta.push(format!("{} arg{s}", res.arg_count));
-            }
-            if res.ref_count > 0 {
-                let s = if res.ref_count == 1 { "" } else { "s" };
-                meta.push(format!("{} ref{s}", res.ref_count));
             }
             let meta_str = if meta.is_empty() {
                 String::new()
@@ -712,246 +705,6 @@ fn validate_hooks(
     }
 }
 
-fn prompt_reference_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(
-            r#"(?:^|[\s`"'(\[<])((?:(?:~|/)?[^\s`"'()\[\]<>]*?/)?(references/[A-Za-z0-9._/\-]+))"#,
-        )
-        .expect("valid prompt reference regex")
-    })
-}
-
-fn extract_prompt_reference_paths(prompt: &str) -> Vec<(String, String)> {
-    let mut found = Vec::new();
-    for cap in prompt_reference_regex().captures_iter(prompt) {
-        let Some(full) = cap.get(1).map(|m| m.as_str()) else {
-            continue;
-        };
-        let Some(rel) = cap.get(2).map(|m| m.as_str()) else {
-            continue;
-        };
-        let clean_full = full
-            .trim_end_matches(['.', ',', ';', ':', ')', ']', '`', '"', '\''])
-            .to_string();
-        let clean_rel = rel
-            .trim_end_matches(['.', ',', ';', ':', ')', ']', '`', '"', '\''])
-            .to_string();
-        if clean_rel == "references/" || clean_rel.ends_with('/') {
-            continue;
-        }
-        if !found
-            .iter()
-            .any(|(f, r)| f == &clean_full && r == &clean_rel)
-        {
-            found.push((clean_full, clean_rel));
-        }
-    }
-    found
-}
-
-enum ReferenceLookup {
-    Found,
-    EscapesDir,
-    Missing,
-}
-
-fn lookup_reference_in_skill_dirs(rel_ref: &str, skill: &SkillDefinition) -> ReferenceLookup {
-    let Ok(rel) = validate_relative_path(rel_ref) else {
-        return ReferenceLookup::Missing;
-    };
-    let mut escaped = false;
-    for dir in skill.all_dirs() {
-        let candidate = dir.join(rel);
-        if candidate.is_file() {
-            let canon_dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-            match dunce::canonicalize(&candidate) {
-                Ok(canon) if canon.starts_with(&canon_dir) => return ReferenceLookup::Found,
-                Ok(_) => escaped = true,
-                Err(_) => {}
-            }
-        }
-    }
-    if escaped {
-        ReferenceLookup::EscapesDir
-    } else {
-        ReferenceLookup::Missing
-    }
-}
-
-fn validate_references(
-    skill: &SkillDefinition,
-    skill_dir: &Path,
-    diagnostics: &mut Vec<SkillDiagnostic>,
-) {
-    // 1. Validate explicit frontmatter `references = [...]`
-    for raw_ref in &skill.references {
-        match validate_relative_path(raw_ref) {
-            Err(e) => {
-                diagnostics.push(SkillDiagnostic::error(format!(
-                    "Invalid reference path '{raw_ref}' in frontmatter `references`: {e}"
-                )));
-            }
-            Ok(_) => match lookup_reference_in_skill_dirs(raw_ref, skill) {
-                ReferenceLookup::Found => {}
-                ReferenceLookup::EscapesDir => {
-                    diagnostics.push(SkillDiagnostic::error(format!(
-                        "Declared reference file '{raw_ref}' resolves outside the skill directory"
-                    )));
-                }
-                ReferenceLookup::Missing => {
-                    diagnostics.push(SkillDiagnostic::error(format!(
-                        "Declared reference file '{raw_ref}' does not exist in skill directory"
-                    )));
-                }
-            },
-        }
-    }
-
-    // 2. Validate any `references/...` files mentioned in the prompt body
-    for (full_match, rel_ref) in extract_prompt_reference_paths(&skill.prompt) {
-        match lookup_reference_in_skill_dirs(&rel_ref, skill) {
-            ReferenceLookup::Found => continue,
-            ReferenceLookup::EscapesDir => {
-                diagnostics.push(SkillDiagnostic::error(format!(
-                    "Prompt reference '{full_match}' resolves outside the skill directory"
-                )));
-                continue;
-            }
-            ReferenceLookup::Missing => {}
-        }
-        // If the prompt gave an explicit `~/` or `/` path, also check whether that exact path exists.
-        if (full_match.starts_with("~/") || full_match.starts_with('/'))
-            && expand_tilde(&full_match).is_file()
-        {
-            continue;
-        }
-        diagnostics.push(SkillDiagnostic::error(format!(
-            "Prompt references missing file '{full_match}' (expected '{rel_ref}' in skill directory)"
-        )));
-    }
-
-    // 3. Walk `<skill_dir>/references` if present and verify files/symlinks are healthy
-    let refs_dir = skill_dir.join("references");
-    if refs_dir.symlink_metadata().is_ok() {
-        if !refs_dir.is_dir() {
-            diagnostics.push(SkillDiagnostic::error(
-                "'references' exists in skill directory but is not a directory",
-            ));
-            return;
-        }
-        let canon_skill_dir =
-            dunce::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
-        let mut file_count = 0usize;
-        let mut visited_dirs = HashSet::new();
-        fn walk_refs(
-            cur: &Path,
-            canon_skill_dir: &Path,
-            depth: usize,
-            visited_dirs: &mut HashSet<PathBuf>,
-            file_count: &mut usize,
-            diagnostics: &mut Vec<SkillDiagnostic>,
-        ) {
-            const MAX_REF_WALK_DEPTH: usize = 16;
-            if depth > MAX_REF_WALK_DEPTH {
-                diagnostics.push(SkillDiagnostic::warning(format!(
-                    "Skipping deeply nested references directory '{}' (depth > {MAX_REF_WALK_DEPTH})",
-                    format_tilde_path(cur)
-                )));
-                return;
-            }
-            let canon_cur = match dunce::canonicalize(cur) {
-                Ok(c) => c,
-                Err(e) => {
-                    diagnostics.push(SkillDiagnostic::error(format!(
-                        "Cannot canonicalize references directory '{}': {e}",
-                        format_tilde_path(cur)
-                    )));
-                    return;
-                }
-            };
-            if !canon_cur.starts_with(canon_skill_dir) {
-                diagnostics.push(SkillDiagnostic::error(format!(
-                    "Reference directory '{}' resolves outside the skill directory",
-                    format_tilde_path(cur)
-                )));
-                return;
-            }
-            if !visited_dirs.insert(canon_cur) {
-                diagnostics.push(SkillDiagnostic::error(format!(
-                    "Cyclic symlink detected in references directory '{}'",
-                    format_tilde_path(cur)
-                )));
-                return;
-            }
-            let Ok(rd) = fs::read_dir(cur) else {
-                diagnostics.push(SkillDiagnostic::error(format!(
-                    "Cannot read references directory '{}'",
-                    format_tilde_path(cur)
-                )));
-                return;
-            };
-            for entry in rd.flatten() {
-                let p = entry.path();
-                match fs::metadata(&p) {
-                    Err(e) => {
-                        diagnostics.push(SkillDiagnostic::error(format!(
-                            "Broken or unreadable reference entry '{}': {e}",
-                            format_tilde_path(&p)
-                        )));
-                    }
-                    Ok(meta) if meta.is_dir() => walk_refs(
-                        &p,
-                        canon_skill_dir,
-                        depth + 1,
-                        visited_dirs,
-                        file_count,
-                        diagnostics,
-                    ),
-                    Ok(_) => {
-                        *file_count += 1;
-                        match dunce::canonicalize(&p) {
-                            Ok(canon_p) if !canon_p.starts_with(canon_skill_dir) => {
-                                diagnostics.push(SkillDiagnostic::error(format!(
-                                    "Reference file '{}' resolves outside the skill directory",
-                                    format_tilde_path(&p)
-                                )));
-                            }
-                            Err(e) => {
-                                diagnostics.push(SkillDiagnostic::error(format!(
-                                    "Cannot resolve reference file '{}': {e}",
-                                    format_tilde_path(&p)
-                                )));
-                            }
-                            Ok(_) => {
-                                if let Err(e) = fs::File::open(&p) {
-                                    diagnostics.push(SkillDiagnostic::error(format!(
-                                        "Unreadable reference file '{}': {e}",
-                                        format_tilde_path(&p)
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        walk_refs(
-            &refs_dir,
-            &canon_skill_dir,
-            0,
-            &mut visited_dirs,
-            &mut file_count,
-            diagnostics,
-        );
-        if file_count == 0 {
-            diagnostics.push(SkillDiagnostic::warning(
-                "'references/' directory exists but contains no files",
-            ));
-        }
-    }
-}
-
 struct ScannedRawSkill {
     scope_label: String,
     scope: MemoryScope,
@@ -1098,7 +851,6 @@ fn check_scanned_registry(
                 tool_count: 0,
                 hook_count: 0,
                 arg_count: 0,
-                ref_count: 0,
                 diagnostics: vec![SkillDiagnostic::error(format!(
                     "Failed to read SKILL.md: {read_err}"
                 ))],
@@ -1198,7 +950,6 @@ fn check_scanned_registry(
                 tool_count: 0,
                 hook_count: 0,
                 arg_count: 0,
-                ref_count: 0,
                 diagnostics,
             });
             continue;
@@ -1334,10 +1085,8 @@ fn check_scanned_registry(
             }
         }
 
-        // 8. Reference files verification
-        validate_references(effective, &item.skill_dir, &mut diagnostics);
+        // 8. Reference files verification (removed)
 
-        let ref_count = list_skill_reference_paths(effective).len();
         results.push(SkillCheckResult {
             name: effective.name.clone(),
             scope_label: item.scope_label,
@@ -1347,7 +1096,6 @@ fn check_scanned_registry(
             tool_count: effective.tools.len(),
             hook_count: effective.hooks.len(),
             arg_count: effective.args.len(),
-            ref_count,
             diagnostics,
         });
     }
@@ -1539,20 +1287,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_check_catches_bad_tools_hook_schemas_refs_templates_and_inheritance() {
+    fn skill_check_catches_bad_tools_hooks_schemas_templates_and_inheritance() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
 
         // 1. Valid base skill
-        fs::create_dir_all(dir.join("base-rust/references")).unwrap();
-        fs::write(dir.join("base-rust/references/guide.md"), "# Guide\n").unwrap();
         fs::write(
             dir.join("base-rust/SKILL.md"),
             r#"+++
 name = "base-rust"
 abstract = true
 tools = ["repo_map", "read_file", "workspace_snapshot", "cargo"]
-references = ["references/guide.md"]
 
 [[hooks]]
 trigger = "on_activate"
@@ -1564,7 +1309,7 @@ trigger = "on_activate"
 tool = "repo_map"
 args = { action = "map", max_tokens = 8000 }
 +++
-Read `references/guide.md`."#,
+Read the guide."#,
         )
         .unwrap();
 
@@ -1606,7 +1351,6 @@ Work on `{{target}}`.
 name = "broken"
 extends = "does-not-exist"
 tools = ["fake_tool"]
-references = ["references/missing.md"]
 typo_key = 123
 
 [[args]]
@@ -1624,7 +1368,7 @@ trigger = "on_activate"
 tool = "cargo"
 args = {}
 +++
-Check `references/also-missing.md` and {{undeclared_var}}.
+{{undeclared_var}}.
 {{#if mode}}Unclosed block"#,
         )
         .unwrap();
@@ -1693,15 +1437,6 @@ Check `references/also-missing.md` and {{undeclared_var}}.
         assert!(
             msgs.iter()
                 .any(|m| m.contains("missing required argument 'action'")),
-            "{msgs:?}"
-        );
-        assert!(
-            msgs.iter().any(|m| m.contains("references/missing.md")),
-            "{msgs:?}"
-        );
-        assert!(
-            msgs.iter()
-                .any(|m| m.contains("references/also-missing.md")),
             "{msgs:?}"
         );
         assert!(
@@ -1820,46 +1555,6 @@ Read optional file."#,
                 .any(|d| d.message.contains("when optional argument(s) are omitted")),
             "{:?}",
             opt_hook.diagnostics
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn skill_check_rejects_escaping_and_cyclic_reference_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let outside = tmp.path().join("secret.txt");
-        fs::write(&outside, "secret").unwrap();
-
-        let skills_dir = tmp.path().join("skills");
-        let refs_dir = skills_dir.join("sym-skill/references");
-        fs::create_dir_all(&refs_dir).unwrap();
-        symlink(&outside, refs_dir.join("leak.md")).unwrap();
-        symlink(&refs_dir, refs_dir.join("loop")).unwrap();
-        fs::write(
-            skills_dir.join("sym-skill/SKILL.md"),
-            "+++\nname = \"sym-skill\"\nreferences = [\"references/leak.md\"]\n+++\nUse references/leak.md.",
-        )
-        .unwrap();
-
-        let cfg = Config::default();
-        let report = check_skills_in_dir(&skills_dir, "test", &cfg, false, None);
-        let res = &report.results[0];
-        assert!(!res.is_ok(false));
-        assert!(
-            res.diagnostics
-                .iter()
-                .any(|d| d.message.contains("resolves outside the skill directory")),
-            "{:?}",
-            res.diagnostics
-        );
-        assert!(
-            res.diagnostics
-                .iter()
-                .any(|d| d.message.contains("Cyclic symlink")),
-            "{:?}",
-            res.diagnostics
         );
     }
 

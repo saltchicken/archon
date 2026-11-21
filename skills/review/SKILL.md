@@ -10,8 +10,6 @@ tools = [
     "workspace_snapshot",
     "read_file",
 ]
-references = ["references/review-checklist.md"]
-
 [[args]]
 name = "target"
 type = "string"
@@ -50,7 +48,7 @@ Keep a short list of the files/symbols you intend to assess so you can confirm c
 - If behavior is subtle (error propagation, lifetimes, async), confirm the actual types and signatures before judging.
 
 ## 3. Evaluate against the checklist
-Work through the review checklist in `~/.config/archon/workspaces/archon/skills/review/references/review-checklist.md` (read it via `read_file` while this skill is active) across these axes, in priority order:
+Work through these review axes in priority order:
 1. **Correctness** — logic errors, off-by-ones, wrong assumptions, untested edge cases, broken invariants.
 2. **Safety & error handling** — `unwrap`/`expect`/`?` misuse, swallowed errors, indexing, integer overflow, `unsafe` blocks (justification + invariants), panics on user input.
 3. **Concurrency & async** — data races, lock ordering/deadlocks, `Send`/`Sync` holes, blocking calls inside `async`, missing `await`, unbounded tasks/channels.

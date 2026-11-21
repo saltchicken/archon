@@ -1,6 +1,6 @@
 use crate::{
     core::{
-        config::{Config, MemoryScope, expand_tilde, format_tilde_path},
+        config::{Config, MemoryScope, expand_tilde},
         session::ChatMessage,
     },
     tools::{ToolCall, ToolFunction},
@@ -26,7 +26,6 @@ pub const KNOWN_FRONTMATTER_KEYS: &[&str] = &[
     "tools",
     "hooks",
     "args",
-    "references",
 ];
 
 fn default_hook_args() -> Value {
@@ -214,7 +213,6 @@ pub struct SkillDefinition {
     pub tools_restricted: bool,
     pub hooks: Vec<SkillHook>,
     pub args: Vec<SkillArgDef>,
-    pub references: Vec<String>,
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
     pub inherited_dirs: Vec<PathBuf>,
@@ -279,7 +277,6 @@ struct SkillFrontmatter {
     tools: Vec<String>,
     hooks: Vec<SkillHook>,
     args: Vec<SkillArgDef>,
-    references: Vec<String>,
 }
 
 /// Detailed parse outcome for `archon skill check` and strict validation.
@@ -427,13 +424,6 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
         })
         .collect();
 
-    let references = fm
-        .references
-        .into_iter()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .collect();
-
     let extends = fm
         .extends
         .into_iter()
@@ -453,7 +443,6 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
             tools_restricted: false,
             hooks,
             args,
-            references,
             prompt,
             dir_path: Some(dir_path.to_path_buf()),
             inherited_dirs: Vec::new(),
@@ -570,7 +559,6 @@ fn resolve_skill_at(
     let mut tools_restricted = false;
     let mut merged_hooks: Vec<SkillHook> = Vec::new();
     let mut merged_args: Vec<SkillArgDef> = Vec::new();
-    let mut merged_refs: Vec<String> = Vec::new();
     let mut inherited_dirs: Vec<PathBuf> = Vec::new();
     let mut base_prompts: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -633,9 +621,6 @@ fn resolve_skill_at(
         for arg in &parent.args {
             merge_arg_def(&mut merged_args, arg.clone());
         }
-        for r in &parent.references {
-            push_unique_string(&mut merged_refs, r);
-        }
         for dir in parent.all_dirs() {
             if !inherited_dirs.iter().any(|d| d == dir) {
                 inherited_dirs.push(dir.to_path_buf());
@@ -682,11 +667,6 @@ fn resolve_skill_at(
         merge_arg_def(&mut merged_args, arg.clone());
     }
 
-    // Apply child's references.
-    for r in &child.references {
-        push_unique_string(&mut merged_refs, r);
-    }
-
     // Compose prompt: child can place parent prompt via `{{super}}`, otherwise base precedes child.
     let combined_base = base_prompts.join("\n\n");
     let child_prompt = child.prompt.trim();
@@ -717,7 +697,6 @@ fn resolve_skill_at(
         tools_restricted,
         hooks: merged_hooks,
         args: merged_args,
-        references: merged_refs,
         prompt: final_prompt,
         dir_path: child.dir_path.clone(),
         inherited_dirs,
@@ -1956,52 +1935,6 @@ pub fn check_skill_activation(
     Ok(skill.name.clone())
 }
 
-pub fn list_skill_reference_paths(skill: &SkillDefinition) -> Vec<String> {
-    let mut out = Vec::new();
-    fn walk(
-        cur: &Path,
-        canon_root: &Path,
-        depth: usize,
-        visited: &mut HashSet<PathBuf>,
-        out: &mut Vec<String>,
-    ) {
-        const MAX_DEPTH: usize = 16;
-        if depth > MAX_DEPTH {
-            return;
-        }
-        let Ok(canon_cur) = dunce::canonicalize(cur) else {
-            return;
-        };
-        if !canon_cur.starts_with(canon_root) || !visited.insert(canon_cur) {
-            return;
-        }
-        let Ok(rd) = fs::read_dir(cur) else {
-            return;
-        };
-        for entry in rd.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                walk(&p, canon_root, depth + 1, visited, out);
-            } else if p.file_name().and_then(|n| n.to_str()) != Some("SKILL.md")
-                && let Ok(canon_p) = dunce::canonicalize(&p)
-                && canon_p.starts_with(canon_root)
-            {
-                let formatted = format_tilde_path(&p);
-                if !out.contains(&formatted) {
-                    out.push(formatted);
-                }
-            }
-        }
-    }
-    for dir in skill.all_dirs().filter(|d| d.is_dir()) {
-        let canon_root = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let mut visited = HashSet::new();
-        walk(dir, &canon_root, 0, &mut visited, &mut out);
-    }
-    out.sort();
-    out
-}
-
 pub fn compose_system_prompt(
     base_system_prompt: &str,
     active_skill: Option<&str>,
@@ -2022,7 +1955,6 @@ pub fn compose_system_prompt(
     if let Some(skill_name) = active_skill
         && let Some(skill) = find_skill(config, skill_name)
     {
-        let refs = list_skill_reference_paths(skill);
         let args = skill_args.unwrap_or("").trim();
         let raw_args = raw_skill_args.or(skill_args).unwrap_or("").trim();
         let tmpl_ctx = TemplateContext {
@@ -2036,13 +1968,6 @@ pub fn compose_system_prompt(
         let prompt_body = render_template(&skill.prompt, &tmpl_ctx).trim().to_string();
 
         let mut block = String::new();
-        if !refs.is_empty() {
-            let _ = writeln!(
-                block,
-                "Reference files (read via `read_file`): {}",
-                refs.join(", ")
-            );
-        }
 
         let unreferenced_inputs: Vec<String> = skill_inputs
             .iter()
@@ -2055,7 +1980,7 @@ pub fn compose_system_prompt(
 
         if !prompt_body.is_empty() {
             let _ = writeln!(block, "{prompt_body}");
-        } else if refs.is_empty() && args.is_empty() && unreferenced_inputs.is_empty() {
+        } else if args.is_empty() && unreferenced_inputs.is_empty() {
             let _ = writeln!(block, "Active skill: {}", skill.description);
         }
 
@@ -2130,22 +2055,19 @@ mod tests {
     }
 
     #[test]
-    fn skill_composition_extends_merges_tools_hooks_args_refs_and_prompts() {
+    fn skill_composition_extends_merges_tools_hooks_args_and_prompts() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
 
-        fs::create_dir_all(dir.join("base-rust/references")).unwrap();
         fs::create_dir_all(dir.join("coder")).unwrap();
         fs::create_dir_all(dir.join("readonly-rust")).unwrap();
 
-        fs::write(dir.join("base-rust/references/rust-rules.md"), "# Rules").unwrap();
         fs::write(
             dir.join("base-rust/SKILL.md"),
             r#"+++
 name = "base-rust"
 abstract = true
 tools = ["repo_map", "search", "read_file", "workspace_snapshot", "cargo"]
-references = ["references/rust-rules.md"]
 
 [[hooks]]
 trigger = "on_activate"
@@ -2217,7 +2139,6 @@ Review only.
             coder.prompt,
             "Always follow idiomatic Rust conventions.\n\nFocus on clean changes."
         );
-        assert_eq!(list_skill_reference_paths(coder).len(), 1);
 
         let ro = skills.iter().find(|s| s.name == "readonly-rust").unwrap();
         assert!(!ro.tools.iter().any(|t| t == "cargo"));

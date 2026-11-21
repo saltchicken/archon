@@ -343,7 +343,7 @@ impl CliArgs {
         println!(
             "Usage: archon skill <COMMAND> [OPTIONS]\n\n\
              Commands:\n  \
-               check [NAME]            Validate SKILL.md frontmatter, extends, tools, hook schemas, args, and references/\n  \
+               check [NAME]            Validate SKILL.md frontmatter, extends, tools, hook schemas, and args\n  \
                list                    List loaded skills with inheritance, typed args, tools, and hooks\n\n\
              Options:\n  \
                -d, --dir <PATH>        Validate or list skills from a specific directory\n  \
