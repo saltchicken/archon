@@ -19,7 +19,7 @@ pub struct ReadFileArgs {
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "read_file";
-    const DESCRIPTION: &'static str = "Read the contents of a file in the workspace or a skill reference file, optionally restricted to a 1-based line range [start_line, end_line].";
+    const DESCRIPTION: &'static str = "Read the contents of a file in the workspace or inside a skill directory (e.g. SKILL.md), optionally restricted to a 1-based line range [start_line, end_line].";
     type Args = ReadFileArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
