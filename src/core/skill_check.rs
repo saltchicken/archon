@@ -1085,8 +1085,6 @@ fn check_scanned_registry(
             }
         }
 
-        // 8. Reference files verification (removed)
-
         results.push(SkillCheckResult {
             name: effective.name.clone(),
             scope_label: item.scope_label,

@@ -866,7 +866,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "fs" => &["action", "path", "destination"],
         "dotfiles" if map.get("action").and_then(Value::as_str) == Some("sync") => &["content"],
         "dotfiles" => &["action", "path", "pattern"],
-        "skill" => &["action", "name", "file"],
+        "skill" => &["action", "name"],
         "memory" if !map.contains_key("action") => &["action"],
         "memory" if matches!(token, "global" | "workspace") => &["scope", "item"],
         "memory" => &["item"],

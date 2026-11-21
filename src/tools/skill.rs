@@ -95,9 +95,6 @@ pub struct SkillArgs {
     /// Disjoint search/replace hunks when `action` is `modify` (applied to `SKILL.md`).
     #[serde(default)]
     pub edits: Vec<EditHunk>,
-    /// Optional relative file path inside the skill's directory (defaults to `"SKILL.md"`).
-    #[serde(default)]
-    pub file: String,
     /// Optional 1-based starting line number (inclusive) when `action` is `read`.
     #[serde(default)]
     pub start_line: Option<usize>,
@@ -162,11 +159,6 @@ fn validate_skill_slug(raw: &str, field: &str) -> Result<String> {
         bail!("Invalid {field} '{cleaned}': only ASCII letters, digits, '-', and '_' are allowed");
     }
     Ok(cleaned.to_string())
-}
-
-fn is_skill_md_target(raw_file: &str) -> bool {
-    let trimmed = raw_file.trim();
-    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("SKILL.md")
 }
 
 fn locate_skill_in_dir(
@@ -505,9 +497,8 @@ fn merge_and_format_skill_doc(
     )
 }
 
-fn append_unknown_tools_note(msg: &mut String, args: &SkillArgs, doc: &str, path: &Path) {
-    if is_skill_md_target(&args.file)
-        && let Ok((table, _)) = validate_and_parse_skill_doc(doc, path)
+fn append_unknown_tools_note(msg: &mut String, doc: &str, path: &Path) {
+    if let Ok((table, _)) = validate_and_parse_skill_doc(doc, path)
     {
         let mut all_tools = table_string_vec(&table, "tools").unwrap_or_default();
         if let Some(hooks) = table_hooks(&table) {
@@ -926,7 +917,7 @@ impl BlockingTool for Tool {
                 atomic_write_file(&target_path, &rendered).context("Error writing skill file")?;
 
                 let mut msg = format!("Successfully created {display}");
-                append_unknown_tools_note(&mut msg, &args, &rendered, &target_path);
+                append_unknown_tools_note(&mut msg, &rendered, &target_path);
                 Ok(msg)
             }
             SkillAction::Modify => {
@@ -938,7 +929,7 @@ impl BlockingTool for Tool {
                 } else {
                     format!("Successfully modified {display}")
                 };
-                append_unknown_tools_note(&mut msg, &args, &updated, &target_path);
+                append_unknown_tools_note(&mut msg, &updated, &target_path);
                 Ok(msg)
             }
         }
@@ -995,7 +986,6 @@ mod tests {
                 prompt: None,
                 content: None,
                 edits: Vec::new(),
-                file: String::new(),
                 start_line: None,
                 end_line: None,
             },
