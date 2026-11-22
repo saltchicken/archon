@@ -304,7 +304,7 @@ impl Default for WorkspaceSnapshotSettings {
             git_root: true,
             tree_only: false,
             include: vec!["**/*".into()],
-            exclude: ["target/**", "node_modules/**", "Cargo.lock"]
+            exclude: ["target/**", "node_modules/**", "Cargo.lock", "!.gitignore"]
                 .map(String::from)
                 .into(),
             include_in_tree: vec!["Cargo.lock".into()],
@@ -451,7 +451,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
             "# allow_hidden = false\n",
-            "# enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
+            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",
@@ -460,7 +460,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# git_root = true\n",
             "# tree_only = false\n",
             "# include = [\"**/*\"]\n",
-            "# exclude = [\"target/**\", \"node_modules/**\", \"Cargo.lock\"]\n",
+            "# exclude = [\"target/**\", \"node_modules/**\", \"Cargo.lock\", \"!.gitignore\"]\n",
         ),
         escaped_ws = escaped_ws
     );
