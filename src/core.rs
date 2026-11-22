@@ -1,8 +1,6 @@
 pub mod attachments;
 pub mod config;
-pub mod gemini;
 pub mod logger;
-pub mod ollama;
 pub mod protocol;
 pub mod provider;
 pub mod schedule;

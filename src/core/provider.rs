@@ -1,8 +1,10 @@
+pub mod gemini;
+pub mod ollama;
+
 use crate::{
     core::{
         EngineEvent, TurnConfig,
         config::{Config, EndpointSettings},
-        gemini, ollama,
         session::ChatMessage,
     },
     tools,
