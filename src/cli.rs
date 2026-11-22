@@ -92,29 +92,17 @@ impl CliArgs {
                     std::process::exit(0);
                 }
                 "-m" | "--model" => {
-                    cli.model = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
-                    );
+                    cli.model = Some(Self::require_value(&mut args, arg)?);
                 }
                 "-p" | "--prompt" => {
-                    cli.prompt = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
-                    );
+                    cli.prompt = Some(Self::require_value(&mut args, arg)?);
                     cli.headless = true;
                 }
                 "-s" | "--system" => {
-                    cli.system_prompt = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
-                    );
+                    cli.system_prompt = Some(Self::require_value(&mut args, arg)?);
                 }
                 "--skill" => {
-                    cli.skill = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
-                    );
+                    cli.skill = Some(Self::require_value(&mut args, arg)?);
                 }
                 "--arg" => {
                     let raw = args.next().ok_or_else(|| {
@@ -130,21 +118,14 @@ impl CliArgs {
                     cli.skill_args.push((key.to_string(), v.to_string()));
                 }
                 "--session" => {
-                    cli.session_id = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?,
-                    );
+                    cli.session_id = Some(Self::require_value(&mut args, arg)?);
                 }
                 "-i" | "--image" => {
-                    let p = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
-                    cli.images.push(PathBuf::from(p));
+                    cli.images
+                        .push(PathBuf::from(Self::require_value(&mut args, arg)?));
                 }
                 "--allowed-tools" | "--tools" => {
-                    let raw = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    let raw = Self::require_value(&mut args, arg.as_str())?;
                     let list = cli.allowed_tools.get_or_insert_with(Vec::new);
                     for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                         if item != "*" && !crate::tools::ALL_TOOL_NAMES.contains(&item) {
@@ -200,6 +181,15 @@ impl CliArgs {
         Ok(cli)
     }
 
+    fn require_value<I, F>(args: &mut I, flag: F) -> Result<String>
+    where
+        I: Iterator<Item = String>,
+        F: AsRef<str>,
+    {
+        args.next()
+            .ok_or_else(|| anyhow::anyhow!("Missing value for {}", flag.as_ref()))
+    }
+
     pub fn parse_schedule_args<I>(mut args: I) -> Result<ScheduleCommand>
     where
         I: Iterator<Item = String>,
@@ -226,9 +216,7 @@ impl CliArgs {
                 }
                 "-g" | "--global" => global = true,
                 "-n" | "--lines" => {
-                    let val = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    let val = Self::require_value(&mut args, arg.as_str())?;
                     lines = val
                         .parse()
                         .map_err(|_| anyhow::anyhow!("Invalid line count for {arg}: {val}"))?;
@@ -299,9 +287,7 @@ impl CliArgs {
                 }
                 "-g" | "--global" => global = true,
                 "-d" | "--dir" => {
-                    let val = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("Missing value for {arg}"))?;
+                    let val = Self::require_value(&mut args, arg)?;
                     dir = Some(PathBuf::from(val));
                 }
                 "--strict" => strict = true,
@@ -497,6 +483,13 @@ impl CliApp {
         let mut printed_thoughts = false;
         let mut printed_text = false;
 
+        let close_thoughts = |err: &mut io::Stderr, flag: &mut bool| {
+            if *flag {
+                let _ = writeln!(err, "\x1b[0m");
+                *flag = false;
+            }
+        };
+
         // 4. Process engine events until the final StreamDone (with no pending tool calls)
         while let Some(ev) = ev_rx.recv().await {
             match ev {
@@ -509,10 +502,7 @@ impl CliApp {
                     let _ = stderr.flush();
                 }
                 EngineEvent::StreamChunk(chunk) => {
-                    if printed_thoughts {
-                        let _ = writeln!(stderr, "\x1b[0m");
-                        printed_thoughts = false;
-                    }
+                    close_thoughts(&mut stderr, &mut printed_thoughts);
                     printed_text = true;
                     write!(stdout, "{chunk}")?;
                     stdout.flush()?;
@@ -522,10 +512,7 @@ impl CliApp {
                     index,
                     total,
                 } => {
-                    if printed_thoughts {
-                        let _ = writeln!(stderr, "\x1b[0m");
-                        printed_thoughts = false;
-                    }
+                    close_thoughts(&mut stderr, &mut printed_thoughts);
                     if printed_text {
                         writeln!(stdout)?;
                         stdout.flush()?;
@@ -543,10 +530,7 @@ impl CliApp {
                     index,
                     total,
                 } => {
-                    if printed_thoughts {
-                        let _ = writeln!(stderr, "\x1b[0m");
-                        printed_thoughts = false;
-                    }
+                    close_thoughts(&mut stderr, &mut printed_thoughts);
 
                     if self.args.auto_approve_all {
                         let _ = writeln!(
@@ -599,10 +583,7 @@ impl CliApp {
                     })?;
                 }
                 EngineEvent::StreamDone { tool_calls, .. } => {
-                    if printed_thoughts {
-                        let _ = writeln!(stderr, "\x1b[0m");
-                        printed_thoughts = false;
-                    }
+                    close_thoughts(&mut stderr, &mut printed_thoughts);
                     if printed_text {
                         writeln!(stdout)?;
                         stdout.flush()?;
@@ -615,9 +596,7 @@ impl CliApp {
                     }
                 }
                 EngineEvent::StreamError(err) | EngineEvent::Error(err) => {
-                    if printed_thoughts {
-                        let _ = writeln!(stderr, "\x1b[0m");
-                    }
+                    close_thoughts(&mut stderr, &mut printed_thoughts);
                     bail!("{err}");
                 }
                 _ => {}

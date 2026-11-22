@@ -73,25 +73,13 @@ pub fn split_toml_frontmatter(raw: &str) -> (Option<&str>, &str) {
         return (None, trimmed);
     };
 
-    for (idx, line) in rest.lines().scan(0usize, |pos, l| {
-        let start = *pos;
-        *pos += l.len()
-            + if rest[start + l.len()..].starts_with("\r\n") {
-                2
-            } else {
-                usize::from(rest[start + l.len()..].starts_with('\n'))
-            };
-        Some((start, l))
-    }) {
-        if line.trim() == "+++" {
-            let fm = &rest[..idx];
-            let after = &rest[idx + line.len()..];
-            let body = after
-                .strip_prefix("\r\n")
-                .or_else(|| after.strip_prefix('\n'))
-                .unwrap_or(after);
-            return (Some(fm), body);
+    let mut offset = 0usize;
+    for chunk in rest.split_inclusive('\n') {
+        if chunk.trim() == "+++" {
+            let body = &rest[offset + chunk.len()..];
+            return (Some(&rest[..offset]), body);
         }
+        offset += chunk.len();
     }
     (None, trimmed)
 }
