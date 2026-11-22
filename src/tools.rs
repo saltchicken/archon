@@ -9,6 +9,7 @@ mod git;
 mod manual;
 mod memory;
 mod notify;
+mod process;
 mod read_file;
 mod repo_map;
 mod search;
@@ -650,7 +651,15 @@ pub fn call_signature(call: &ToolCall) -> String {
     let name = call.function.name.as_str();
     let sub = if matches!(
         name,
-        "git" | "cargo" | "fs" | "repo_map" | "dotfiles" | "system" | "skill" | "memory"
+        "git"
+            | "cargo"
+            | "fs"
+            | "repo_map"
+            | "dotfiles"
+            | "system"
+            | "skill"
+            | "memory"
+            | "process"
     ) {
         let raw = call
             .function
@@ -768,6 +777,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "btrfs",
             "packages",
         ],
+        "process" => &["start", "list", "output", "poll", "kill", "clean"],
         _ => &[],
     }
 }
@@ -792,6 +802,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
+        }
+        "process" => {
+            "[start|list|output|poll|kill|clean] [command=... args=...] [id=...] [tail_lines=N | wait_ms=N]"
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
@@ -941,6 +954,7 @@ register_tools! {
     async: git,
     blocking: memory,
     async: notify,
+    async: process,
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
