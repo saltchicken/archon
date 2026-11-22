@@ -1,21 +1,16 @@
-mod cli;
-mod core;
-pub mod tools;
-mod ui;
-
 use anyhow::Result;
-use cli::{CliApp, CliArgs};
-use core::{
+use archon::cli::{CliApp, CliArgs};
+use archon::core::{
     CoreEngine,
     config::{
         Config, archon_config_root, ensure_workspace_config, load_dotenv, workspace_config_dir_for,
     },
     provider::Provider,
 };
+use archon::ui::TuiApp;
 use std::env;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use ui::TuiApp;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +26,7 @@ async fn main() -> Result<()> {
             eprintln!("{cfg_err}");
             std::process::exit(1);
         }
-        if let Err(e) = core::schedule::handle_command(sched_cmd, &config) {
+        if let Err(e) = archon::core::schedule::handle_command(sched_cmd, &config) {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -45,7 +40,7 @@ async fn main() -> Result<()> {
             eprintln!("{cfg_err}");
             std::process::exit(1);
         }
-        if let Err(e) = core::skill_check::handle_command(skill_cmd, &config) {
+        if let Err(e) = archon::core::skill_check::handle_command(skill_cmd, &config) {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -55,7 +50,7 @@ async fn main() -> Result<()> {
     if !cli_args.headless {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
-            ui::restore_terminal(&mut std::io::stdout(), true);
+            archon::ui::restore_terminal(&mut std::io::stdout(), true);
             original_hook(panic_info);
         }));
     }
@@ -81,7 +76,7 @@ async fn main() -> Result<()> {
     if cli_args.model.is_some() {
         config.set_cli_model_override();
     }
-    let guard = core::logger::init(&config.app.history_dir);
+    let guard = archon::core::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
     } else {

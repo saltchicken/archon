@@ -34,7 +34,7 @@ fn systemd_user_dir() -> Result<PathBuf> {
     Ok(base.join("systemd").join("user"))
 }
 
-fn sanitize_unit_component(raw: &str) -> String {
+pub fn sanitize_unit_component(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_dash = false;
     for ch in raw.trim().chars() {
@@ -86,7 +86,7 @@ fn resolve_scope(
     Ok((format!("ws-{}", sanitize_unit_component(raw_name)), canon))
 }
 
-fn unit_base_name(scope: &str, name: &str) -> String {
+pub fn unit_base_name(scope: &str, name: &str) -> String {
     format!(
         "{UNIT_PREFIX}{}--{}",
         sanitize_unit_component(scope),
@@ -94,7 +94,7 @@ fn unit_base_name(scope: &str, name: &str) -> String {
     )
 }
 
-fn scope_unit_prefix(scope: &str) -> String {
+pub fn scope_unit_prefix(scope: &str) -> String {
     format!("{UNIT_PREFIX}{}--", sanitize_unit_component(scope))
 }
 
@@ -102,7 +102,7 @@ fn escape_systemd_specifiers(raw: &str) -> String {
     raw.replace('%', "%%").replace(['\n', '\r'], " ")
 }
 
-fn quote_systemd_arg(arg: &str) -> String {
+pub fn quote_systemd_arg(arg: &str) -> String {
     let mut out = String::with_capacity(arg.len() + 2);
     out.push('"');
     for ch in arg.chars() {
@@ -140,7 +140,7 @@ fn validate_on_calendar(expr: &str) -> Result<()> {
     Ok(())
 }
 
-fn render_service(
+pub fn render_service(
     sched: &ScheduleConfig,
     scope: &str,
     working_dir: &Path,
@@ -208,7 +208,7 @@ fn render_service(
     )
 }
 
-fn render_timer(
+pub fn render_timer(
     sched: &ScheduleConfig,
     scope: &str,
     working_dir: &Path,
@@ -492,68 +492,4 @@ fn clean_schedules(config: &Config, global: bool) -> Result<()> {
     }
     println!("Cleaned {removed} managed unit file(s) for scope '{scope}'.");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn sanitize_unit_component_normalizes_names() {
-        assert_eq!(sanitize_unit_component("Daily_Audit!"), "daily-audit");
-        assert_eq!(sanitize_unit_component("---"), "default");
-        assert_eq!(
-            unit_base_name("ws-archon", "daily_check"),
-            "archon-sched-ws-archon--daily-check"
-        );
-    }
-
-    #[test]
-    fn quote_systemd_arg_escapes_special_chars_and_dollars() {
-        assert_eq!(
-            quote_systemd_arg("Check $HOME and ${USER} 100% \"now\"\n"),
-            "\"Check $$HOME and $${USER} 100%% \\\"now\\\"\\n\""
-        );
-    }
-
-    #[test]
-    fn render_service_and_timer_produce_valid_systemd_units() {
-        let sched = ScheduleConfig {
-            name: "nightly-review".to_string(),
-            enabled: true,
-            on_calendar: "*-*-* 02:00:00".to_string(),
-            persistent: true,
-            skill: Some("review".to_string()),
-            prompt: "Review $BRANCH (100%)".to_string(),
-            model: Some("gemini-2.5-pro".to_string()),
-            system_prompt: None,
-            auto_approve: true,
-            no_tools: false,
-            enabled_tools: Some(vec!["read_file".to_string(), "search".to_string()]),
-            save_session: false,
-        };
-
-        let service = render_service(
-            &sched,
-            "ws-archon",
-            Path::new("/home/user/project"),
-            Path::new("/usr/bin/archon"),
-        );
-        assert!(service.contains("WorkingDirectory=/home/user/project\n"));
-        assert!(!service.contains("WorkingDirectory=\""));
-        assert!(service.contains(
-            "ExecStart=\"/usr/bin/archon\" --skill \"review\" --model \"gemini-2.5-pro\" -y --allowed-tools \"read_file,search\" --no-save -p \"Review $$BRANCH (100%%)\""
-        ));
-
-        let timer = render_timer(
-            &sched,
-            "ws-archon",
-            Path::new("/home/user/project"),
-            "archon-sched-ws-archon--nightly-review.service",
-        );
-        assert!(timer.contains("OnCalendar=*-*-* 02:00:00\n"));
-        assert!(timer.contains("Persistent=true\n"));
-        assert!(timer.contains("Unit=archon-sched-ws-archon--nightly-review.service\n"));
-    }
 }
