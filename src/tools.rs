@@ -10,10 +10,12 @@ mod manual;
 mod memory;
 mod notify;
 mod process;
+pub(crate) mod progress;
 mod read_file;
 mod repo_map;
 mod search;
 mod skill;
+mod subagent;
 mod system;
 pub(crate) mod utils;
 pub mod workspace_snapshot;
@@ -891,6 +893,13 @@ macro_rules! register_tools {
             }
         }
 
+        pub fn schemas_for_tool_names(tool_names: &[String]) -> Vec<Value> {
+            tool_names
+                .iter()
+                .filter_map(|name| tool_schema_by_name(name))
+                .collect()
+        }
+
         pub fn deserialize_tool_args(name: &str, args: &Value) -> Result<()> {
             match name {
                 $( $mod::Tool::NAME => {
@@ -959,6 +968,7 @@ register_tools! {
     blocking: repo_map,
     blocking: search,
     blocking: skill,
+    async: subagent,
     async: system,
     blocking: workspace_snapshot,
 }
@@ -973,7 +983,7 @@ pub struct ToolExecutionOutput {
 }
 
 impl ToolExecutionOutput {
-    fn error(msg: String) -> Self {
+    pub fn error(msg: String) -> Self {
         let raw_bytes = msg.len();
         Self {
             truncated_output: msg.clone(),

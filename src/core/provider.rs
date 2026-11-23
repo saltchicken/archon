@@ -211,6 +211,177 @@ impl Provider {
         Ok((text, prompt_tokens, eval_tokens))
     }
 
+    /// Runs a multi-turn subagent conversation in an isolated context.
+    /// The subagent can use tools across up to `MAX_SUBAGENT_TURNS` model rounds
+    /// and returns the final assistant text.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_subagent(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        num_ctx: u32,
+        system_prompt: &str,
+        task: &str,
+        allowed_tools: Vec<String>,
+        active_skill: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        const MAX_SUBAGENT_TURNS: usize = 10;
+
+        // Build the effective tool list (exclude "subagent" to prevent recursion).
+        let effective_tools: Vec<String> = if allowed_tools.iter().any(|t| t == "*") {
+            config
+                .app
+                .enabled_tools
+                .iter()
+                .filter(|t| {
+                    t.as_str() != "subagent"
+                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                })
+                .cloned()
+                .collect()
+        } else {
+            allowed_tools
+                .into_iter()
+                .filter(|t| {
+                    t != "subagent"
+                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                })
+                .collect()
+        };
+
+        let tools_schema =
+            (!effective_tools.is_empty()).then(|| tools::schemas_for_tool_names(&effective_tools));
+
+        let mut messages = vec![ChatMessage::new("user", task)];
+        let mut final_text = String::new();
+
+        let max_out = config.max_tool_output_for_model(&model);
+        let full_cap = (num_ctx as usize).saturating_mul(4).max(4096);
+        let active_skill_owned: Option<String> = active_skill.map(String::from);
+
+        for turn_idx in 0..MAX_SUBAGENT_TURNS {
+            // Emit progress so the UI can display live subagent activity.
+            let progress = tools::progress::TOOL_PROGRESS_TX
+                .try_with(|tx| tx.clone())
+                .ok();
+            if let Some(ref ptx) = progress {
+                let _ = ptx.send(EngineEvent::ToolStarted {
+                    summary: format!("subagent turn {} — requesting model", turn_idx + 1),
+                    index: turn_idx + 1,
+                    total: MAX_SUBAGENT_TURNS,
+                });
+            }
+
+            let payload = match self {
+                Self::Ollama => ollama::build_payload(
+                    &model,
+                    &messages,
+                    system_prompt,
+                    num_ctx,
+                    tools_schema.clone(),
+                ),
+                Self::Gemini => {
+                    gemini::build_payload(&messages, system_prompt, tools_schema.clone())
+                }
+            };
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            info!("Subagent turn {turn_idx}: streaming model response");
+            self.stream_payload(client.clone(), model.clone(), config.clone(), payload, tx)
+                .await;
+
+            let mut text = String::new();
+            let mut tool_calls = Vec::new();
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    EngineEvent::StreamChunk(c) => text.push_str(&c),
+                    EngineEvent::StreamDone { tool_calls: tc, .. } => tool_calls = tc,
+                    EngineEvent::StreamError(e) => return Err(e),
+                    _ => {}
+                }
+            }
+
+            if tool_calls.is_empty() {
+                final_text = text;
+                if let Some(ref ptx) = progress {
+                    let _ = ptx.send(EngineEvent::ToolStarted {
+                        summary: format!("subagent turn {} — final response", turn_idx + 1),
+                        index: turn_idx + 1,
+                        total: MAX_SUBAGENT_TURNS,
+                    });
+                }
+                break;
+            }
+
+            // Report which tools the subagent is calling.
+            if let Some(ref ptx) = progress {
+                let tool_names: Vec<&str> = tool_calls
+                    .iter()
+                    .map(|tc| tc.function.name.as_str())
+                    .collect();
+                let _ = ptx.send(EngineEvent::ToolStarted {
+                    summary: format!(
+                        "subagent turn {} — calling {}",
+                        turn_idx + 1,
+                        tool_names.join(", ")
+                    ),
+                    index: turn_idx + 1,
+                    total: MAX_SUBAGENT_TURNS,
+                });
+            }
+
+            // Record the assistant's tool-call message.
+            messages.push(ChatMessage {
+                content: text,
+                tool_calls: Some(tool_calls.clone()),
+                ..ChatMessage::new("assistant", "")
+            });
+
+            // Execute each tool call on a dedicated blocking thread so the
+            // wait doesn't stall a tokio worker. The sub-tool gets a fresh
+            // single-thread runtime for its own async I/O.
+            for tc in &tool_calls {
+                let call = tc.clone();
+                let config_clone = config.clone();
+
+                let skill_owned = active_skill_owned.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to build runtime for subagent tool execution");
+                    let skill_ref = skill_owned.as_deref();
+                    rt.block_on(tools::execute(
+                        &call,
+                        &config_clone,
+                        skill_ref,
+                        max_out,
+                        full_cap,
+                    ))
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tools::ToolExecutionOutput::error(format!(
+                        "Subagent tool execution panicked: {e}"
+                    ))
+                });
+                messages.push(ChatMessage::new_tool(
+                    &tc.function.name,
+                    result.truncated_output,
+                    result.truncated,
+                    result.is_error,
+                ));
+            }
+        }
+
+        if final_text.trim().is_empty() {
+            Err("Subagent returned an empty response after all turns.".into())
+        } else {
+            Ok(final_text)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn condense_tool_output(
         &self,
