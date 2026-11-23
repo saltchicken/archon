@@ -253,6 +253,18 @@ impl Provider {
         let full_cap = (num_ctx as usize).saturating_mul(4).max(4096);
 
         for turn_idx in 0..MAX_SUBAGENT_TURNS {
+            // Emit progress so the UI can display live subagent activity.
+            let progress = tools::progress::TOOL_PROGRESS_TX
+                .try_with(|tx| tx.clone())
+                .ok();
+            if let Some(ref ptx) = progress {
+                let _ = ptx.send(EngineEvent::ToolStarted {
+                    summary: format!("subagent turn {} — requesting model", turn_idx + 1),
+                    index: turn_idx + 1,
+                    total: MAX_SUBAGENT_TURNS,
+                });
+            }
+
             let payload = match self {
                 Self::Ollama => ollama::build_payload(
                     &model,
@@ -284,7 +296,31 @@ impl Provider {
 
             if tool_calls.is_empty() {
                 final_text = text;
+                if let Some(ref ptx) = progress {
+                    let _ = ptx.send(EngineEvent::ToolStarted {
+                        summary: format!("subagent turn {} — final response", turn_idx + 1),
+                        index: turn_idx + 1,
+                        total: MAX_SUBAGENT_TURNS,
+                    });
+                }
                 break;
+            }
+
+            // Report which tools the subagent is calling.
+            if let Some(ref ptx) = progress {
+                let tool_names: Vec<&str> = tool_calls
+                    .iter()
+                    .map(|tc| tc.function.name.as_str())
+                    .collect();
+                let _ = ptx.send(EngineEvent::ToolStarted {
+                    summary: format!(
+                        "subagent turn {} — calling {}",
+                        turn_idx + 1,
+                        tool_names.join(", ")
+                    ),
+                    index: turn_idx + 1,
+                    total: MAX_SUBAGENT_TURNS,
+                });
             }
 
             // Record the assistant's tool-call message.

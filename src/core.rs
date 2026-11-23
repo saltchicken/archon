@@ -162,12 +162,17 @@ impl CoreEngine {
 
     fn spawn_with_tx<F, Fut>(&mut self, f: F)
     where
-        F: FnOnce(UnboundedSender<EngineEvent>) -> Fut,
+        F: FnOnce(UnboundedSender<EngineEvent>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.inflight.internal_rx = Some(rx);
-        self.inflight.active_task = Some(tokio::spawn(f(tx)));
+        let progress_tx = tx.clone();
+        self.inflight.active_task = Some(tokio::spawn(async move {
+            crate::tools::progress::TOOL_PROGRESS_TX
+                .scope(progress_tx, f(tx))
+                .await;
+        }));
     }
 
     fn abort_active_state(&mut self) {

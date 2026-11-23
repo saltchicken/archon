@@ -9,6 +9,7 @@ mod git;
 mod manual;
 mod memory;
 mod notify;
+pub(crate) mod progress;
 mod read_file;
 mod repo_map;
 mod search;
