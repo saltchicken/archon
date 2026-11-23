@@ -1,6 +1,7 @@
 pub mod attachments;
 pub mod config;
 pub mod logger;
+pub mod processes;
 pub mod protocol;
 pub mod provider;
 pub mod schedule;
@@ -16,6 +17,7 @@ pub use protocol::{EngineCommand, EngineEvent, ToolExecSource, TruncatedToolActi
 use crate::tools::ToolCall;
 use attachments::ImageStaging;
 use config::Config;
+use processes::ProcessRegistry;
 use provider::Provider;
 use reqwest::Client;
 use session::{ChatMessage, SessionManager};
@@ -259,6 +261,9 @@ impl CoreEngine {
         }
 
         self.finish_active_task();
+
+        info!("Shutting down CoreEngine, terminating background jobs...");
+        ProcessRegistry::global().shutdown().await;
 
         info!("Shutting down CoreEngine, awaiting pending session save...");
         self.flush_save_task().await;
