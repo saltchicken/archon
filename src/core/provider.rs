@@ -330,28 +330,30 @@ impl Provider {
                 ..ChatMessage::new("assistant", "")
             });
 
-            // Execute each tool call and append the results.
-            // Uses a separate thread + runtime to break the type-level
-            // recursion cycle (subagent -> tools::execute -> dispatch -> subagent).
+            // Execute each tool call on a dedicated blocking thread so the
+            // wait doesn't stall a tokio worker. The sub-tool gets a fresh
+            // single-thread runtime for its own async I/O.
             for tc in &tool_calls {
                 let call = tc.clone();
                 let config_clone = config.clone();
 
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
+                let result = tokio::task::spawn_blocking(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("Failed to build runtime for subagent tool execution");
-                    let result = rt.block_on(async {
-                        tools::execute(&call, &config_clone, None, max_out, full_cap).await
-                    });
-                    let _ = tx.send(result);
-                });
-
-                let result = rx.recv().unwrap_or_else(|e| {
+                    rt.block_on(tools::execute(
+                        &call,
+                        &config_clone,
+                        None,
+                        max_out,
+                        full_cap,
+                    ))
+                })
+                .await
+                .unwrap_or_else(|e| {
                     tools::ToolExecutionOutput::error(format!(
-                        "Subagent tool execution failed: {e}"
+                        "Subagent tool execution panicked: {e}"
                     ))
                 });
                 messages.push(ChatMessage::new_tool(
