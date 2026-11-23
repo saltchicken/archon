@@ -224,6 +224,7 @@ impl Provider {
         system_prompt: &str,
         task: &str,
         allowed_tools: Vec<String>,
+        active_skill: Option<&str>,
     ) -> std::result::Result<String, String> {
         const MAX_SUBAGENT_TURNS: usize = 10;
 
@@ -233,13 +234,19 @@ impl Provider {
                 .app
                 .enabled_tools
                 .iter()
-                .filter(|t| t.as_str() != "subagent")
+                .filter(|t| {
+                    t.as_str() != "subagent"
+                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                })
                 .cloned()
                 .collect()
         } else {
             allowed_tools
                 .into_iter()
-                .filter(|t| t != "subagent" && (t == "*" || tools::is_tool_enabled(t, &config)))
+                .filter(|t| {
+                    t != "subagent"
+                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                })
                 .collect()
         };
 
@@ -251,6 +258,7 @@ impl Provider {
 
         let max_out = config.max_tool_output_for_model(&model);
         let full_cap = (num_ctx as usize).saturating_mul(4).max(4096);
+        let active_skill_owned: Option<String> = active_skill.map(String::from);
 
         for turn_idx in 0..MAX_SUBAGENT_TURNS {
             // Emit progress so the UI can display live subagent activity.
@@ -337,15 +345,17 @@ impl Provider {
                 let call = tc.clone();
                 let config_clone = config.clone();
 
+                let skill_owned = active_skill_owned.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .expect("Failed to build runtime for subagent tool execution");
+                    let skill_ref = skill_owned.as_deref();
                     rt.block_on(tools::execute(
                         &call,
                         &config_clone,
-                        None,
+                        skill_ref,
                         max_out,
                         full_cap,
                     ))

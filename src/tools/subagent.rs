@@ -1,4 +1,5 @@
 use crate::core::provider::Provider;
+use crate::core::skills::compose_system_prompt;
 use crate::tools::{AsyncTool, ToolContext};
 use anyhow::Result;
 use schemars::JsonSchema;
@@ -14,6 +15,9 @@ pub struct SubagentArgs {
     /// Optional list of tool names the subagent may use. If omitted, all enabled tools (except "subagent") are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Optional skill to activate. When set, the skill's prompt is appended to the system prompt and its tool filters are applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 pub struct Tool;
@@ -29,11 +33,26 @@ impl AsyncTool for Tool {
         let client = provider.build_client(&ctx.config)?;
         let num_ctx = ctx.config.context_for_model(&model);
 
-        let system_prompt = args
+        let active_skill = args.skill.as_deref();
+
+        let base_prompt = args
             .system_prompt
             .unwrap_or_else(|| {
                 "You are a focused subagent. Complete the given task efficiently using the available tools. Be thorough but concise. Your final response should directly address the task with all relevant findings.".to_string()
             });
+
+        let system_prompt = if active_skill.is_some() {
+            compose_system_prompt(
+                &base_prompt,
+                active_skill,
+                None,
+                None,
+                &std::collections::BTreeMap::new(),
+                &ctx.config,
+            )
+        } else {
+            base_prompt
+        };
 
         let allowed_tools = args
             .tools
@@ -48,6 +67,7 @@ impl AsyncTool for Tool {
                 &system_prompt,
                 &args.task,
                 allowed_tools,
+                active_skill,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Subagent failed: {e}"))?;
