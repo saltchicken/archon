@@ -211,6 +211,129 @@ impl Provider {
         Ok((text, prompt_tokens, eval_tokens))
     }
 
+    /// Runs a multi-turn subagent conversation in an isolated context.
+    /// The subagent can use tools across up to `MAX_SUBAGENT_TURNS` model rounds
+    /// and returns the final assistant text.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_subagent(
+        &self,
+        client: Client,
+        model: String,
+        config: Config,
+        num_ctx: u32,
+        system_prompt: &str,
+        task: &str,
+        allowed_tools: Vec<String>,
+    ) -> std::result::Result<String, String> {
+        const MAX_SUBAGENT_TURNS: usize = 10;
+
+        // Build the effective tool list (exclude "subagent" to prevent recursion).
+        let effective_tools: Vec<String> = if allowed_tools.iter().any(|t| t == "*") {
+            config
+                .app
+                .enabled_tools
+                .iter()
+                .filter(|t| t.as_str() != "subagent")
+                .cloned()
+                .collect()
+        } else {
+            allowed_tools
+                .into_iter()
+                .filter(|t| t != "subagent" && (t == "*" || tools::is_tool_enabled(t, &config)))
+                .collect()
+        };
+
+        let tools_schema =
+            (!effective_tools.is_empty()).then(|| tools::schemas_for_tool_names(&effective_tools));
+
+        let mut messages = vec![ChatMessage::new("user", task)];
+        let mut final_text = String::new();
+
+        let max_out = config.max_tool_output_for_model(&model);
+        let full_cap = (num_ctx as usize).saturating_mul(4).max(4096);
+
+        for turn_idx in 0..MAX_SUBAGENT_TURNS {
+            let payload = match self {
+                Self::Ollama => ollama::build_payload(
+                    &model,
+                    &messages,
+                    system_prompt,
+                    num_ctx,
+                    tools_schema.clone(),
+                ),
+                Self::Gemini => {
+                    gemini::build_payload(&messages, system_prompt, tools_schema.clone())
+                }
+            };
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            info!("Subagent turn {turn_idx}: streaming model response");
+            self.stream_payload(client.clone(), model.clone(), config.clone(), payload, tx)
+                .await;
+
+            let mut text = String::new();
+            let mut tool_calls = Vec::new();
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    EngineEvent::StreamChunk(c) => text.push_str(&c),
+                    EngineEvent::StreamDone { tool_calls: tc, .. } => tool_calls = tc,
+                    EngineEvent::StreamError(e) => return Err(e),
+                    _ => {}
+                }
+            }
+
+            if tool_calls.is_empty() {
+                final_text = text;
+                break;
+            }
+
+            // Record the assistant's tool-call message.
+            messages.push(ChatMessage {
+                content: text,
+                tool_calls: Some(tool_calls.clone()),
+                ..ChatMessage::new("assistant", "")
+            });
+
+            // Execute each tool call and append the results.
+            // Uses a separate thread + runtime to break the type-level
+            // recursion cycle (subagent -> tools::execute -> dispatch -> subagent).
+            for tc in &tool_calls {
+                let call = tc.clone();
+                let config_clone = config.clone();
+
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to build runtime for subagent tool execution");
+                    let result = rt.block_on(async {
+                        tools::execute(&call, &config_clone, None, max_out, full_cap).await
+                    });
+                    let _ = tx.send(result);
+                });
+
+                let result = rx.recv().unwrap_or_else(|e| {
+                    tools::ToolExecutionOutput::error(format!(
+                        "Subagent tool execution failed: {e}"
+                    ))
+                });
+                messages.push(ChatMessage::new_tool(
+                    &tc.function.name,
+                    result.truncated_output,
+                    result.truncated,
+                    result.is_error,
+                ));
+            }
+        }
+
+        if final_text.trim().is_empty() {
+            Err("Subagent returned an empty response after all turns.".into())
+        } else {
+            Ok(final_text)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn condense_tool_output(
         &self,
