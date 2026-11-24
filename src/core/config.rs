@@ -180,6 +180,10 @@ pub struct AppSettings {
     /// loopback, and otherwise reserved IP addresses (e.g. `127.0.0.1`,
     /// `10.x.x.x`, `192.168.x.x`). Default is `false` (SSRF protection on).
     pub http_allow_private: bool,
+    /// Fine-grained CIDR ranges to allow (e.g. `["192.168.1.0/24", "10.0.0.0/8"]`).
+    /// When non-empty, only IPs within these ranges are permitted;
+    /// `http_allow_private` is ignored.
+    pub http_allowed_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +299,7 @@ impl Default for AppSettings {
             .map(String::from)
             .into(),
             http_allow_private: false,
+            http_allowed_cidrs: Vec::new(),
         }
     }
 }
@@ -464,6 +469,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "[app]\n",
             "# allow_hidden = false\n",
             "# http_allow_private = false\n",
+            "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
             "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",

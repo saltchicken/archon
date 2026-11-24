@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use ipnet::IpNet;
 use reqwest::{Client, Url, redirect::Policy};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -42,7 +43,32 @@ fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-pub async fn validate_public_url(url: &Url, allow_private: bool) -> Result<Vec<SocketAddr>> {
+#[derive(Debug, Clone, Default)]
+pub struct SsrfPolicy {
+    allow_all_private: bool,
+    allowed_cidrs: Vec<IpNet>,
+}
+
+impl SsrfPolicy {
+    pub fn from_config(allow_private: bool, allowed_cidrs: &[String]) -> Self {
+        let parsed: Vec<IpNet> =
+            allowed_cidrs.iter().filter_map(|s| s.parse().ok()).collect();
+        Self {
+            allow_all_private: allow_private,
+            allowed_cidrs: parsed,
+        }
+    }
+
+    pub fn is_ip_allowed(&self, ip: IpAddr) -> bool {
+        self.allow_all_private || self.allowed_cidrs.iter().any(|net| net.contains(&ip))
+    }
+
+    fn skips_hostname_heuristic(&self) -> bool {
+        self.allow_all_private || !self.allowed_cidrs.is_empty()
+    }
+}
+
+pub async fn validate_public_url(url: &Url, policy: &SsrfPolicy) -> Result<Vec<SocketAddr>> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!(
             "Security violation: unsupported URL scheme '{}'. Only 'http' and 'https' are allowed.",
@@ -56,13 +82,13 @@ pub async fn validate_public_url(url: &Url, allow_private: bool) -> Result<Vec<S
     let port = url.port_or_known_default().unwrap_or(443);
 
     if let Ok(ip) = host_str.trim_matches(['[', ']']).parse::<IpAddr>() {
-        if !allow_private && is_forbidden_ip(ip) {
+        if is_forbidden_ip(ip) && !policy.is_ip_allowed(ip) {
             bail!("Security violation: access to private or reserved IP '{ip}' is blocked");
         }
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
-    if !allow_private {
+    if !policy.skips_hostname_heuristic() {
         let lower = host_str.trim_end_matches('.').to_ascii_lowercase();
         if lower == "localhost"
             || [".localhost", ".local", ".internal", ".home.arpa"]
@@ -81,7 +107,7 @@ pub async fn validate_public_url(url: &Url, allow_private: bool) -> Result<Vec<S
     if resolved.is_empty() {
         bail!("DNS resolution returned no addresses for '{host_str}'");
     }
-    if !allow_private && let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip())) {
+    if let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip()) && !policy.is_ip_allowed(a.ip())) {
         bail!(
             "Security violation: host '{host_str}' resolved to private/reserved IP '{}'",
             addr.ip()
