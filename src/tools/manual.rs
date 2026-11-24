@@ -87,6 +87,14 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "search" => &["pattern", "path"],
         "fetch_url" => &["url"],
         "curl" => &["url", "method", "body", "json"],
+        "process" if !map.contains_key("action") && matches!(token, "start" | "list" | "output" | "poll" | "kill" | "clean") => {
+            &["action"]
+        }
+        "process" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
+            "start" => &["command"],
+            "output" | "poll" | "kill" => &["id"],
+            _ => &["id"],
+        },
         "create_file" => &["file_path", "content"],
         _ => &[],
     };
@@ -157,7 +165,7 @@ pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)
         let default_action = match tool_name {
             "git" => Some("status"),
             "cargo" => Some("check"),
-            "fs" | "memory" | "skill" | "dotfiles" => Some("list"),
+            "fs" | "memory" | "skill" | "dotfiles" | "process" => Some("list"),
             "github_repo" => Some("fetch"),
             "system" => Some("overview"),
             _ => None,
