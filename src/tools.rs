@@ -51,24 +51,10 @@ use utils::{
     },
 };
 
-const COMMAND_TIMEOUT_SECS: u64 = 30;
-
 #[cfg(unix)]
-fn kill_process_group(pgid: u32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    const SIGKILL: i32 = 9;
-    if let Ok(pgid) = i32::try_from(pgid)
-        && pgid > 0
-    {
-        // SAFETY: Sending SIGKILL to a negative process group ID (-pgid) is a
-        // standard POSIX syscall with no memory-safety preconditions.
-        unsafe {
-            let _ = kill(-pgid, SIGKILL);
-        }
-    }
-}
+use crate::core::processes::kill_process_group;
+
+const COMMAND_TIMEOUT_SECS: u64 = 30;
 
 struct ManagedChild {
     child: tokio::process::Child,
@@ -104,6 +90,44 @@ impl Drop for ManagedChild {
             kill_process_group(pgid);
         }
     }
+}
+
+pub(super) async fn run_captured_command(
+    mut cmd: Command,
+    program: &str,
+    cap: u64,
+    timeout_secs: u64,
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus)> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = ManagedChild::new(
+        cmd.spawn()
+            .with_context(|| format!("Error executing {program}"))?,
+    );
+    let stdout = child
+        .child
+        .stdout
+        .take()
+        .context("Failed to capture stdout")?;
+    let stderr = child
+        .child
+        .stderr
+        .take()
+        .context("Failed to capture stderr")?;
+
+    timeout(Duration::from_secs(timeout_secs), async {
+        let (r1, r2) = tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap));
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((r1?, r2?, status))
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds"))?
+    .with_context(|| format!("Error reading output from {program}"))
 }
 
 const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
@@ -218,28 +242,23 @@ impl ToolContext {
                 rel.display()
             );
         }
-        let is_negated = neg_exclude_set.is_match(rel);
-        if !self.config.app.allow_hidden && has_hidden_component(rel) && !is_negated {
+        if neg_exclude_set.is_match(rel) {
+            return Ok(());
+        }
+        if !self.config.app.allow_hidden && has_hidden_component(rel) {
             bail!(
                 "Security violation: '{}' is a hidden file or directory (set `app.allow_hidden = true` in config.toml to allow access)",
                 rel.display()
             );
         }
-        if exclude_set.is_match(rel) && !is_negated {
+        if rel
+            .ancestors()
+            .any(|p| !p.as_os_str().is_empty() && exclude_set.is_match(p))
+        {
             bail!(
                 "Security violation: '{}' matches an excluded pattern",
                 rel.display()
             );
-        }
-        let mut prefix = PathBuf::new();
-        for comp in rel.components() {
-            prefix.push(comp);
-            if exclude_set.is_match(&prefix) && !is_negated {
-                bail!(
-                    "Security violation: '{}' matches an excluded pattern",
-                    rel.display()
-                );
-            }
         }
         Ok(())
     }
@@ -540,40 +559,10 @@ impl ToolContext {
         S: AsRef<OsStr>,
     {
         let mut cmd = Command::new(program);
-        cmd.current_dir(&self.root)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = ManagedChild::new(
-            cmd.spawn()
-                .with_context(|| format!("Error executing {program}"))?,
-        );
-
+        cmd.current_dir(&self.root).args(args);
         let cap = (self.max_output_size as u64).saturating_add(1);
-        let stdout = child
-            .child
-            .stdout
-            .take()
-            .context("Failed to capture stdout")?;
-        let stderr = child
-            .child
-            .stderr
-            .take()
-            .context("Failed to capture stderr")?;
-
-        let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(timeout_secs), async {
-            let (r1, r2) = tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap));
-            let status = child.wait().await?;
-            Ok::<_, std::io::Error>((r1?, r2?, status))
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Command '{program}' timed out after {timeout_secs} seconds"))?
-        .with_context(|| format!("Error reading output from {program}"))?;
+        let (out_bytes, err_bytes, status) =
+            run_captured_command(cmd, program, cap, timeout_secs).await?;
 
         let mut combined = String::from_utf8_lossy(&out_bytes).into_owned();
         if !err_bytes.is_empty() {
@@ -652,19 +641,7 @@ pub struct ToolFunction {
 
 pub fn call_signature(call: &ToolCall) -> String {
     let name = call.function.name.as_str();
-    let sub = if matches!(
-        name,
-        "git"
-            | "cargo"
-            | "fs"
-            | "repo_map"
-            | "github_repo"
-            | "dotfiles"
-            | "system"
-            | "skill"
-            | "memory"
-            | "process"
-    ) {
+    let sub = if !tool_subactions(name).is_empty() {
         let raw = call
             .function
             .arguments

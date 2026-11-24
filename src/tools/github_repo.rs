@@ -1,7 +1,7 @@
 use super::{
-    AsyncTool, ManagedChild, ToolContext,
+    AsyncTool, ToolContext, run_captured_command,
     utils::{
-        fs::{read_capped, read_file_contents, read_utf8_capped, render_directory_listing},
+        fs::{read_file_contents, read_utf8_capped, render_directory_listing},
         path::{build_globset, has_git_dir_component, resolve_existing_under},
         search::{SearchExecutionParams, search_candidate_files},
     },
@@ -16,11 +16,9 @@ use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::LazyLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{process::Command, sync::Mutex, time::timeout};
+use tokio::{process::Command, sync::Mutex};
 
 const CLONE_TIMEOUT_SECS: u64 = 60;
 const MAX_GIT_OUTPUT_BYTES: u64 = 64 * 1024;
@@ -47,7 +45,7 @@ pub enum GithubRepoAction {
     Search,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Default, Deserialize, JsonSchema)]
 pub struct GithubRepoArgs {
     /// Operation to perform: `fetch` (default), `list`, `read`, or `search`.
     #[serde(default)]
@@ -118,8 +116,7 @@ pub fn parse_repo_slug(raw: &str) -> Result<(String, String)> {
     }
 
     let valid_part = |s: &str| {
-        !s.is_empty()
-            && !s.starts_with('.')
+        !s.starts_with('.')
             && !s.contains("..")
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -142,60 +139,43 @@ pub fn cached_repo_path(owner: &str, name: &str) -> Result<PathBuf> {
     Ok(cache_root_dir()?.join(format!("{owner}__{name}")))
 }
 
-/// Shared resolver used by both `github_repo` and `repo_map` (`github_repo` param).
-pub fn resolve_cached_repo_dir(raw_repo: &str) -> Result<(PathBuf, String)> {
-    let (owner, name) = parse_repo_slug(raw_repo)?;
-    let dir = cached_repo_path(&owner, &name)?;
+fn ensure_cached_repo_dir(owner: &str, name: &str) -> Result<PathBuf> {
+    let dir = cached_repo_path(owner, name)?;
     if !dir.is_dir() {
         bail!(
             "GitHub repo '{owner}/{name}' is not cached yet. Run `github_repo` with `action: \"fetch\"` and `repo: \"{owner}/{name}\"` first."
         );
     }
-    let canon = dunce::canonicalize(&dir).unwrap_or(dir);
-    Ok((canon, format!("{owner}/{name}")))
+    Ok(dunce::canonicalize(&dir).unwrap_or(dir))
+}
+
+/// Shared resolver used by `repo_map` (`github_repo` param).
+pub fn resolve_cached_repo_dir(raw_repo: &str) -> Result<(PathBuf, String)> {
+    let (owner, name) = parse_repo_slug(raw_repo)?;
+    Ok((
+        ensure_cached_repo_dir(&owner, &name)?,
+        format!("{owner}/{name}"),
+    ))
 }
 
 async fn run_git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new("git");
-    cmd.args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
+    cmd.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.symlinks=false",
+    ])
+    .args(args)
+    .env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
 
-    let mut child = ManagedChild::new(cmd.spawn().context("Failed to execute git")?);
-    let stdout = child
-        .child
-        .stdout
-        .take()
-        .context("Failed to capture git stdout")?;
-    let stderr = child
-        .child
-        .stderr
-        .take()
-        .context("Failed to capture git stderr")?;
-
-    let (out_bytes, err_bytes, status) = timeout(Duration::from_secs(CLONE_TIMEOUT_SECS), async {
-        let (r1, r2) = tokio::join!(
-            read_capped(stdout, MAX_GIT_OUTPUT_BYTES),
-            read_capped(stderr, MAX_GIT_OUTPUT_BYTES),
-        );
-        let status = child.wait().await?;
-        Ok::<_, std::io::Error>((r1?, r2?, status))
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("git timed out after {CLONE_TIMEOUT_SECS}s"))?
-    .context("Failed to read git output")?;
-
+    let (out_bytes, err_bytes, status) =
+        run_captured_command(cmd, "git", MAX_GIT_OUTPUT_BYTES, CLONE_TIMEOUT_SECS).await?;
     if !status.success() {
-        let stderr = String::from_utf8_lossy(&err_bytes).trim().to_string();
-        bail!("git failed: {stderr}");
+        bail!("git failed: {}", String::from_utf8_lossy(&err_bytes).trim());
     }
     Ok(String::from_utf8_lossy(&out_bytes).trim().to_string())
 }
@@ -219,21 +199,6 @@ fn validate_git_ref(raw: &str) -> Result<&str> {
         bail!("Invalid git_ref '{trimmed}'.");
     }
     Ok(trimmed)
-}
-
-fn unique_staging_path(root: &Path, owner: &str, name: &str) -> PathBuf {
-    let pid = std::process::id();
-    for attempt in 0..64u32 {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let candidate = root.join(format!(".{owner}__{name}.clone-{pid}-{nanos}-{attempt}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    root.join(format!(".{owner}__{name}.clone-{pid}"))
 }
 
 async fn fetch_repo(
@@ -266,86 +231,42 @@ async fn fetch_repo_from_url(
         if !refresh && ref_trimmed.is_empty() {
             return Ok((dunce::canonicalize(&dest).unwrap_or(dest), false));
         }
-        let mut fetch_args = vec![
-            "-c",
-            "core.hooksPath=/dev/null",
-            "fetch",
-            "--depth",
-            "1",
-            "--",
-            "origin",
-        ];
+        let mut fetch_args = vec!["fetch", "--depth", "1", "--", "origin"];
         if !ref_trimmed.is_empty() {
             fetch_args.push(ref_trimmed);
         }
         run_git(&fetch_args, Some(&dest)).await?;
-        run_git(
-            &[
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.symlinks=false",
-                "reset",
-                "--hard",
-                "FETCH_HEAD",
-            ],
-            Some(&dest),
-        )
-        .await?;
+        run_git(&["reset", "--hard", "FETCH_HEAD"], Some(&dest)).await?;
         return Ok((dunce::canonicalize(&dest).unwrap_or(dest), true));
     }
 
-    // Clone into a sibling staging directory and atomically rename into `dest`
-    // so a failed/cancelled clone never leaves a poisoned cache entry behind.
-    let staging = unique_staging_path(root, owner, name);
-    let staging_str = staging.to_string_lossy().into_owned();
-    let mut clone_args = vec![
-        "clone",
-        "--depth",
-        "1",
-        "--single-branch",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.symlinks=false",
-    ];
+    // Clone into a sibling TempDir and atomically rename into `dest` so a failed
+    // or cancelled clone is automatically cleaned up on drop.
+    let staging = tempfile::Builder::new()
+        .prefix(&format!(".{owner}__{name}.clone-"))
+        .tempdir_in(root)
+        .context("Failed to create clone staging directory")?;
+    let staging_str = staging.path().to_string_lossy().into_owned();
+    let mut clone_args = vec!["clone", "--depth", "1", "--single-branch"];
     if !ref_trimmed.is_empty() {
-        clone_args.push("--branch");
-        clone_args.push(ref_trimmed);
+        clone_args.extend(["--branch", ref_trimmed]);
     }
-    clone_args.push("--");
-    clone_args.push(url);
-    clone_args.push(&staging_str);
+    clone_args.extend(["--", url, &staging_str]);
 
-    if let Err(err) = run_git(&clone_args, None).await {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(err);
-    }
+    run_git(&clone_args, None).await?;
 
-    if dest.is_dir() {
-        if let Err(err) = fs::remove_dir_all(&dest) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to remove stale cache directory '{}'",
-                    dest.display()
-                )
-            });
+    if let Ok(meta) = dest.symlink_metadata() {
+        if meta.is_dir() {
+            fs::remove_dir_all(&dest)
+        } else {
+            fs::remove_file(&dest)
         }
-    } else if dest.exists()
-        && let Err(err) = fs::remove_file(&dest)
-    {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(err)
-            .with_context(|| format!("Failed to remove stale cache path '{}'", dest.display()));
+        .with_context(|| format!("Failed to remove stale cache path '{}'", dest.display()))?;
     }
 
-    if let Err(err) = fs::rename(&staging, &dest) {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(err).with_context(|| {
-            format!("Failed to move cloned repository into '{}'", dest.display())
-        });
-    }
+    fs::rename(staging.path(), &dest)
+        .with_context(|| format!("Failed to move cloned repository into '{}'", dest.display()))?;
+    let _ = staging.keep();
 
     Ok((dunce::canonicalize(&dest).unwrap_or(dest), true))
 }
@@ -389,44 +310,48 @@ fn build_orientation_bundle(repo_dir: &Path, label: &str, freshly_fetched: bool)
     }
     out.push_str("```\n\n");
 
-    let readme_candidates = [
+    let read_rel = |rel: &'static str| {
+        let path = repo_dir.join(rel);
+        path.is_file()
+            .then(|| read_utf8_capped(&path, ORIENTATION_FILE_CAP))
+            .flatten()
+            .map(|content| (rel, content))
+    };
+    let readme = [
         "README.md",
         "readme.md",
         "Readme.md",
         "README.rst",
         "README.txt",
         "README",
-    ];
-    for rel in readme_candidates {
-        let path = repo_dir.join(rel);
-        if path.is_file()
-            && let Some(content) = read_utf8_capped(&path, ORIENTATION_FILE_CAP)
-        {
-            let _ = writeln!(out, "## `{rel}`\n\n{content}\n");
-            break;
-        }
-    }
-
-    let key_files = [
+    ]
+    .into_iter()
+    .find_map(read_rel);
+    let manifests = [
         "Cargo.toml",
         "package.json",
         "pyproject.toml",
         "go.mod",
         "CONTRIBUTING.md",
-    ];
-    for rel in key_files {
-        let path = repo_dir.join(rel);
-        if path.is_file()
-            && let Some(content) = read_utf8_capped(&path, ORIENTATION_FILE_CAP)
-        {
-            let _ = writeln!(out, "## `{rel}`\n\n{content}\n");
-        }
+    ]
+    .into_iter()
+    .filter_map(read_rel);
+    for (rel, content) in readme.into_iter().chain(manifests) {
+        let _ = writeln!(out, "## `{rel}`\n\n{content}\n");
     }
 
     out.push_str(
         "Tip: Use `repo_map` with `github_repo: \"owner/repo\"` (`action: \"map\"`, `\"definition\"`, or `\"references\"`) to inspect AST signatures and implementations, or `github_repo` (`action: \"read\"`, `\"list\"`, or `\"search\"`) to inspect specific files and search text.",
     );
     out
+}
+
+fn resolve_repo_path(repo_dir: &Path, sub_path: &str) -> Result<PathBuf> {
+    let target = resolve_existing_under(repo_dir, sub_path, "path escapes cached repo root")?;
+    if has_git_dir_component(&target) {
+        bail!("Security violation: access to '.git' is not allowed");
+    }
+    Ok(target)
 }
 
 fn execute_list(
@@ -436,11 +361,7 @@ fn execute_list(
     max_depth: Option<usize>,
     max_output_size: usize,
 ) -> Result<String> {
-    let target = resolve_existing_under(repo_dir, sub_path, "path escapes cached repo root")?;
-    if has_git_dir_component(&target) {
-        bail!("Security violation: access to '.git' is not allowed");
-    }
-
+    let target = resolve_repo_path(repo_dir, sub_path)?;
     let trimmed = sub_path.trim();
     let display = if trimmed.is_empty() || trimmed == "." {
         label.to_string()
@@ -470,101 +391,77 @@ fn execute_read(
     if trimmed.is_empty() {
         bail!("'path' is required when `action` is `read`");
     }
-    let target = resolve_existing_under(repo_dir, trimmed, "path escapes cached repo root")?;
-    if has_git_dir_component(&target) {
-        bail!("Security violation: access to '.git' is not allowed");
-    }
+    let target = resolve_repo_path(repo_dir, trimmed)?;
     let display = format!("{label}/{trimmed}");
     read_file_contents(&target, &display, start_line, end_line, max_output_size)
 }
 
-struct GithubSearchOptions {
-    path: String,
-    pattern: String,
-    include: Vec<String>,
-    exclude: Vec<String>,
-    fixed_strings: bool,
-    files_with_matches: bool,
-    case_sensitive: Option<bool>,
-    context_lines: Option<usize>,
-    max_results: Option<usize>,
+fn execute_search(
+    repo_dir: &Path,
+    label: &str,
+    args: &GithubRepoArgs,
     max_files: usize,
     max_file_size: u64,
     max_output_size: usize,
-}
-
-fn execute_search(repo_dir: &Path, label: &str, opts: &GithubSearchOptions) -> Result<String> {
-    if opts.pattern.is_empty() {
+) -> Result<String> {
+    if args.pattern.is_empty() {
         bail!("'pattern' is required when `action` is `search`");
     }
-    let scan_root = resolve_existing_under(repo_dir, &opts.path, "path escapes cached repo root")?;
-    if has_git_dir_component(&scan_root) {
-        bail!("Security violation: access to '.git' is not allowed");
-    }
+    let scan_root = resolve_repo_path(repo_dir, &args.path)?;
 
-    let include_set = (!opts.include.is_empty())
-        .then(|| build_globset(&opts.include, true))
+    let include_set = (!args.include.is_empty())
+        .then(|| build_globset(&args.include, true))
         .transpose()?;
-    let exclude_set = (!opts.exclude.is_empty())
-        .then(|| build_globset(&opts.exclude, true))
+    let exclude_set = (!args.exclude.is_empty())
+        .then(|| build_globset(&args.exclude, true))
         .transpose()?;
 
     let mut candidate_files = Vec::new();
-    if scan_root.is_file() {
-        let rel = diff_paths(&scan_root, repo_dir).unwrap_or_else(|| scan_root.clone());
-        let excluded = exclude_set.as_ref().is_some_and(|ex| ex.is_match(&rel));
-        let included = include_set.as_ref().is_none_or(|inc| inc.is_match(&rel));
-        if !excluded && included {
-            let display = format!("{label}/{}", rel.to_string_lossy());
-            candidate_files.push((scan_root, display));
+    for entry in WalkBuilder::new(&scan_root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .filter_entry(|e| e.file_name() != ".git")
+        .build()
+        .flatten()
+    {
+        if candidate_files.len() >= max_files {
+            break;
         }
-    } else {
-        for entry in WalkBuilder::new(&scan_root)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(false)
-            .git_exclude(false)
-            .filter_entry(|e| e.file_name() != ".git")
-            .build()
-            .flatten()
+        let path = entry.path();
+        if !path.is_file() || has_git_dir_component(path) {
+            continue;
+        }
+        let Ok(canon) = dunce::canonicalize(path) else {
+            continue;
+        };
+        if !canon.starts_with(repo_dir) {
+            continue;
+        }
+        let Some(rel) = diff_paths(&canon, repo_dir) else {
+            continue;
+        };
+        if exclude_set.as_ref().is_some_and(|ex| ex.is_match(&rel))
+            || include_set.as_ref().is_some_and(|inc| !inc.is_match(&rel))
         {
-            if candidate_files.len() >= opts.max_files {
-                break;
-            }
-            let path = entry.path();
-            if !path.is_file() || has_git_dir_component(path) {
-                continue;
-            }
-            let Ok(canon) = dunce::canonicalize(path) else {
-                continue;
-            };
-            if !canon.starts_with(repo_dir) {
-                continue;
-            }
-            let Some(rel) = diff_paths(&canon, repo_dir) else {
-                continue;
-            };
-            if exclude_set.as_ref().is_some_and(|ex| ex.is_match(&rel))
-                || include_set.as_ref().is_some_and(|inc| !inc.is_match(&rel))
-            {
-                continue;
-            }
-            candidate_files.push((canon, format!("{label}/{}", rel.to_string_lossy())));
+            continue;
         }
-        candidate_files.sort_by(|a, b| a.1.cmp(&b.1));
+        candidate_files.push((canon, format!("{label}/{}", rel.to_string_lossy())));
     }
+    candidate_files.sort_by(|a, b| a.1.cmp(&b.1));
 
     search_candidate_files(
         candidate_files,
         &SearchExecutionParams {
-            pattern: &opts.pattern,
-            fixed_strings: opts.fixed_strings,
-            files_with_matches: opts.files_with_matches,
-            case_sensitive: opts.case_sensitive,
-            context_lines: opts.context_lines,
-            max_results: opts.max_results,
-            max_file_size: opts.max_file_size,
-            max_output_size: opts.max_output_size,
+            pattern: &args.pattern,
+            fixed_strings: args.fixed_strings,
+            files_with_matches: args.files_with_matches,
+            case_sensitive: args.case_sensitive,
+            context_lines: args.context_lines,
+            max_results: args.max_results,
+            max_file_size,
+            max_output_size,
         },
     )
 }
@@ -578,56 +475,47 @@ impl AsyncTool for Tool {
         let (owner, name) = parse_repo_slug(&args.repo)?;
         let label = format!("{owner}/{name}");
 
-        match args.action {
-            GithubRepoAction::Fetch => {
-                let (repo_dir, freshly_fetched) =
-                    fetch_repo(&owner, &name, &args.git_ref, args.refresh).await?;
-                Ok(tokio::task::spawn_blocking(move || {
-                    build_orientation_bundle(&repo_dir, &label, freshly_fetched)
-                })
-                .await?)
-            }
-            GithubRepoAction::List => {
-                let (repo_dir, _) = resolve_cached_repo_dir(&args.repo)?;
-                let path = args.path;
-                let max_depth = args.max_depth;
-                let max_output_size = ctx.max_output_size;
-                tokio::task::spawn_blocking(move || {
-                    execute_list(&repo_dir, &label, &path, max_depth, max_output_size)
-                })
-                .await?
-            }
-            GithubRepoAction::Read => {
-                let (repo_dir, _) = resolve_cached_repo_dir(&args.repo)?;
-                let max_output_size = ctx.max_output_size;
-                let path = args.path;
-                let start = args.start_line;
-                let end = args.end_line;
-                tokio::task::spawn_blocking(move || {
-                    execute_read(&repo_dir, &label, &path, start, end, max_output_size)
-                })
-                .await?
-            }
-            GithubRepoAction::Search => {
-                let (repo_dir, _) = resolve_cached_repo_dir(&args.repo)?;
-                let opts = GithubSearchOptions {
-                    path: args.path,
-                    pattern: args.pattern,
-                    include: args.include,
-                    exclude: args.exclude,
-                    fixed_strings: args.fixed_strings,
-                    files_with_matches: args.files_with_matches,
-                    case_sensitive: args.case_sensitive,
-                    context_lines: args.context_lines,
-                    max_results: args.max_results,
-                    max_files: ctx.config.workspace_snapshot.max_files,
-                    max_file_size: ctx.config.workspace_snapshot.max_size,
-                    max_output_size: ctx.max_output_size,
-                };
-                tokio::task::spawn_blocking(move || execute_search(&repo_dir, &label, &opts))
-                    .await?
-            }
+        if args.action == GithubRepoAction::Fetch {
+            let (repo_dir, freshly_fetched) =
+                fetch_repo(&owner, &name, &args.git_ref, args.refresh).await?;
+            return Ok(tokio::task::spawn_blocking(move || {
+                build_orientation_bundle(&repo_dir, &label, freshly_fetched)
+            })
+            .await?);
         }
+
+        let repo_dir = ensure_cached_repo_dir(&owner, &name)?;
+        let max_files = ctx.config.workspace_snapshot.max_files;
+        let max_file_size = ctx.config.workspace_snapshot.max_size;
+        let max_output_size = ctx.max_output_size;
+
+        tokio::task::spawn_blocking(move || match args.action {
+            GithubRepoAction::List => execute_list(
+                &repo_dir,
+                &label,
+                &args.path,
+                args.max_depth,
+                max_output_size,
+            ),
+            GithubRepoAction::Read => execute_read(
+                &repo_dir,
+                &label,
+                &args.path,
+                args.start_line,
+                args.end_line,
+                max_output_size,
+            ),
+            GithubRepoAction::Search => execute_search(
+                &repo_dir,
+                &label,
+                &args,
+                max_files,
+                max_file_size,
+                max_output_size,
+            ),
+            GithubRepoAction::Fetch => unreachable!(),
+        })
+        .await?
     }
 }
 
@@ -829,22 +717,15 @@ mod tests {
     fn execute_search_respects_gitignore_globs_and_blocks_git() {
         let (_tmp, root) = make_sample_repo();
 
-        let base_opts = |pattern: &str| GithubSearchOptions {
-            path: String::new(),
+        let run = |args: &GithubRepoArgs| {
+            execute_search(&root, "owner/demo", args, 1000, 1024 * 1024, 65536)
+        };
+        let base_args = |pattern: &str| GithubRepoArgs {
             pattern: pattern.into(),
-            include: Vec::new(),
-            exclude: Vec::new(),
-            fixed_strings: false,
-            files_with_matches: false,
-            case_sensitive: None,
-            context_lines: None,
-            max_results: None,
-            max_files: 1000,
-            max_file_size: 1024 * 1024,
-            max_output_size: 65536,
+            ..Default::default()
         };
 
-        let out = execute_search(&root, "owner/demo", &base_opts("needle_\\w+")).unwrap();
+        let out = run(&base_args("needle_\\w+")).unwrap();
         assert!(out.contains("owner/demo/src/main.rs"));
         assert!(out.contains("owner/demo/src/nested/mod.rs"));
         // Ignored by `.gitignore` and `.git` excluded
@@ -852,26 +733,26 @@ mod tests {
         assert!(!out.contains(".git/config"));
 
         // Include filter & files_with_matches
-        let mut filtered = base_opts("needle_");
+        let mut filtered = base_args("needle_");
         filtered.fixed_strings = true;
         filtered.files_with_matches = true;
         filtered.include = vec!["**/mod.rs".into()];
-        let out_filtered = execute_search(&root, "owner/demo", &filtered).unwrap();
+        let out_filtered = run(&filtered).unwrap();
         assert!(out_filtered.contains("owner/demo/src/nested/mod.rs"));
         assert!(!out_filtered.contains("src/main.rs"));
 
         // Single-file search
-        let mut single = base_opts("line_three");
+        let mut single = base_args("line_three");
         single.path = "src/main.rs".into();
-        let out_single = execute_search(&root, "owner/demo", &single).unwrap();
+        let out_single = run(&single).unwrap();
         assert!(out_single.contains("owner/demo/src/main.rs"));
         assert!(out_single.contains("line_three"));
 
         // Reject empty pattern and `.git`
-        assert!(execute_search(&root, "owner/demo", &base_opts("")).is_err());
-        let mut git_opts = base_opts("core");
-        git_opts.path = ".git".into();
-        assert!(execute_search(&root, "owner/demo", &git_opts).is_err());
+        assert!(run(&base_args("")).is_err());
+        let mut git_args = base_args("core");
+        git_args.path = ".git".into();
+        assert!(run(&git_args).is_err());
     }
 
     #[test]

@@ -75,7 +75,7 @@ pub struct SpawnedJob {
 }
 
 #[cfg(unix)]
-fn kill_process_group(pgid: u32) {
+pub(crate) fn kill_process_group(pgid: u32) {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
@@ -127,6 +127,40 @@ impl Job {
             truncated: self.truncated,
         }
     }
+
+    fn render_output(&self, body: String) -> String {
+        let status = if self.finished {
+            format!(
+                "finished (exit code {:?})",
+                self.exit.and_then(|s| s.code())
+            )
+        } else {
+            "running".to_string()
+        };
+        let trunc = if self.truncated {
+            " [output truncated]"
+        } else {
+            ""
+        };
+        let body = if body.is_empty() {
+            "(no output)".to_string()
+        } else {
+            body
+        };
+        format!("[job {}] {status}{trunc}\n{body}", self.id)
+    }
+}
+
+fn terminate_running_jobs(map: &mut HashMap<String, Job>) -> usize {
+    let mut terminated = 0usize;
+    for job in map.values_mut().filter(|j| !j.finished) {
+        terminated += 1;
+        #[cfg(unix)]
+        if let Some(pgid) = job.pgid.take() {
+            kill_process_group(pgid);
+        }
+    }
+    terminated
 }
 
 pub struct ProcessRegistry {
@@ -265,19 +299,14 @@ impl ProcessRegistry {
     pub async fn output(self: &Arc<Self>, id: &str, tail_lines: usize) -> Result<String> {
         let map = self.jobs.lock().await;
         let job = job_by_id(&map, id)?;
-        let text = String::from_utf8_lossy(&job.out).into_owned();
+        let text = String::from_utf8_lossy(&job.out);
         let lines: Vec<&str> = text.lines().collect();
-        let n = if tail_lines == 0 {
-            lines.len()
+        let start = if tail_lines == 0 {
+            0
         } else {
-            tail_lines
+            lines.len().saturating_sub(tail_lines)
         };
-        let start = lines.len().saturating_sub(n);
-        let body: String = lines[start..].join("\n");
-        let (finished, exit_code, truncated) =
-            (job.finished, job.exit.and_then(|s| s.code()), job.truncated);
-        drop(map);
-        Ok(render_body(id, finished, exit_code, truncated, body))
+        Ok(job.render_output(lines[start..].join("\n")))
     }
 
     /// Wait up to `wait_ms` for the job to finish or emit new output, then
@@ -299,41 +328,31 @@ impl ProcessRegistry {
         let job = map
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("Unknown job id '{id}'. Use action=\"list\"."))?;
-        let text = String::from_utf8_lossy(&job.out).into_owned();
-        let offset = job.served;
-        let start = if offset >= text.len() {
-            text.len()
-        } else {
-            text.floor_char_boundary(offset)
-        };
+        let text = String::from_utf8_lossy(&job.out);
+        let start = text.floor_char_boundary(job.served.min(text.len()));
         let new_part = text[start..].trim_end().to_string();
-        job.served = text.len();
-        let (finished, exit_code, truncated) =
-            (job.finished, job.exit.and_then(|s| s.code()), job.truncated);
-        drop(map);
-        Ok(render_body(id, finished, exit_code, truncated, new_part))
+        let new_len = text.len();
+        drop(text);
+        job.served = new_len;
+        Ok(job.render_output(new_part))
     }
 
     /// Terminate a running job (SIGKILL its whole process group).
     pub async fn kill(self: &Arc<Self>, id: &str) -> Result<String> {
         let mut map = self.jobs.lock().await;
-        if !map.contains_key(id) {
-            return Err(anyhow::anyhow!(
-                "Unknown job id '{id}'. Use action=\"list\" to see active jobs."
-            ));
-        }
-        if map.get(id).is_some_and(|j| j.finished) {
-            let exit_code = map.get(id).and_then(|j| j.exit.and_then(|s| s.code()));
+        let job = map.get_mut(id).ok_or_else(|| {
+            anyhow::anyhow!("Unknown job id '{id}'. Use action=\"list\" to see active jobs.")
+        })?;
+        if job.finished {
+            let exit_code = job.exit.and_then(|s| s.code());
             map.remove(id);
             return Ok(format!(
                 "Job {id} already finished (exit code {exit_code:?}); removed from the table."
             ));
         }
-        let pid = map.get(id).map(|j| j.pid).unwrap_or(0);
+        let pid = job.pid;
         #[cfg(unix)]
-        if let Some(job) = map.get_mut(id)
-            && let Some(pgid) = job.pgid.take()
-        {
+        if let Some(pgid) = job.pgid.take() {
             kill_process_group(pgid);
         }
         Ok(format!("Job {id} (pid {pid}) terminated."))
@@ -343,17 +362,7 @@ impl ProcessRegistry {
     pub async fn clean(self: &Arc<Self>) -> Result<String> {
         let mut map = self.jobs.lock().await;
         let total = map.len();
-        let mut terminated = 0usize;
-        for job in map.values_mut() {
-            if job.finished {
-                continue;
-            }
-            terminated += 1;
-            #[cfg(unix)]
-            if let Some(pgid) = job.pgid.take() {
-                kill_process_group(pgid);
-            }
-        }
+        let terminated = terminate_running_jobs(&mut map);
         map.clear();
         Ok(format!(
             "Cleaned up {total} job(s) ({terminated} running were terminated)."
@@ -363,17 +372,7 @@ impl ProcessRegistry {
     /// Kill every running job. Called by [`CoreEngine::run`](super::CoreEngine::run) on shutdown.
     pub async fn shutdown(self: &Arc<Self>) {
         let mut map = self.jobs.lock().await;
-        let mut terminated = 0usize;
-        for job in map.values_mut() {
-            if job.finished {
-                continue;
-            }
-            terminated += 1;
-            #[cfg(unix)]
-            if let Some(pgid) = job.pgid.take() {
-                kill_process_group(pgid);
-            }
-        }
+        let terminated = terminate_running_jobs(&mut map);
         if terminated > 0 {
             info!("Shutting down: terminated {terminated} running background job(s)");
         }
@@ -454,28 +453,6 @@ fn job_by_id<'a>(map: &'a HashMap<String, Job>, id: &str) -> Result<&'a Job> {
     map.get(id).ok_or_else(|| {
         anyhow::anyhow!("Unknown job id '{id}'. Use action=\"list\" to see active jobs.")
     })
-}
-
-/// Render a job's output body with a status header.
-fn render_body(
-    id: &str,
-    finished: bool,
-    exit_code: Option<i32>,
-    truncated: bool,
-    body: String,
-) -> String {
-    let status = if finished {
-        format!("finished (exit code {exit_code:?})")
-    } else {
-        "running".to_string()
-    };
-    let trunc = if truncated { " [output truncated]" } else { "" };
-    let body = if body.is_empty() {
-        "(no output)".to_string()
-    } else {
-        body
-    };
-    format!("[job {id}] {status}{trunc}\n{body}")
 }
 
 #[cfg(test)]
