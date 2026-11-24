@@ -42,7 +42,7 @@ fn is_forbidden_ip(ip: IpAddr) -> bool {
     }
 }
 
-pub async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
+pub async fn validate_public_url(url: &Url, allow_private: bool) -> Result<Vec<SocketAddr>> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!(
             "Security violation: unsupported URL scheme '{}'. Only 'http' and 'https' are allowed.",
@@ -53,21 +53,24 @@ pub async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
         bail!("Invalid URL: missing host");
     };
 
-    let lower = host_str.trim_end_matches('.').to_ascii_lowercase();
-    if lower == "localhost"
-        || [".localhost", ".local", ".internal", ".home.arpa"]
-            .iter()
-            .any(|s| lower.ends_with(s))
-    {
-        bail!("Security violation: access to local/internal host '{host_str}' is blocked");
-    }
-
     let port = url.port_or_known_default().unwrap_or(443);
+
     if let Ok(ip) = host_str.trim_matches(['[', ']']).parse::<IpAddr>() {
-        if is_forbidden_ip(ip) {
+        if !allow_private && is_forbidden_ip(ip) {
             bail!("Security violation: access to private or reserved IP '{ip}' is blocked");
         }
         return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+
+    if !allow_private {
+        let lower = host_str.trim_end_matches('.').to_ascii_lowercase();
+        if lower == "localhost"
+            || [".localhost", ".local", ".internal", ".home.arpa"]
+                .iter()
+                .any(|s| lower.ends_with(s))
+        {
+            bail!("Security violation: access to local/internal host '{host_str}' is blocked");
+        }
     }
 
     let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host_str, port))
@@ -78,7 +81,7 @@ pub async fn validate_public_url(url: &Url) -> Result<Vec<SocketAddr>> {
     if resolved.is_empty() {
         bail!("DNS resolution returned no addresses for '{host_str}'");
     }
-    if let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip())) {
+    if !allow_private && let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip())) {
         bail!(
             "Security violation: host '{host_str}' resolved to private/reserved IP '{}'",
             addr.ip()

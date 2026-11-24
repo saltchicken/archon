@@ -212,8 +212,8 @@ impl AsyncTool for Tool {
         }
 
         let method = resolve_method(&args)?;
-        let has_body_payload = !matches!(method, HttpMethod::Head)
-            && (args.body.is_some() || args.json.is_some());
+        let has_body_payload =
+            !matches!(method, HttpMethod::Head) && (args.body.is_some() || args.json.is_some());
         // Only follow redirects for requests that won't replay a body (curl-like:
         // don't replay a POST/PUT/PATCH body). HEAD never carries a body here.
         let follow_redirects = !has_body_payload;
@@ -225,7 +225,7 @@ impl AsyncTool for Tool {
         let start = Instant::now();
         let mut resp = None;
         for hop in 0..=MAX_REDIRECTS {
-            let addrs = validate_public_url(&target_url).await?;
+            let addrs = validate_public_url(&target_url, ctx.config.app.http_allow_private).await?;
             let client = build_pinned_client(&target_url, &addrs)?;
 
             let req = build_request(&client, &target_url, method, &args)

@@ -176,6 +176,10 @@ pub struct AppSettings {
     pub allow_hidden: bool,
     pub enabled_tools: Vec<String>,
     pub auto_approve: Vec<String>,
+    /// When `true`, the `curl` and `fetch_url` tools may access private,
+    /// loopback, and otherwise reserved IP addresses (e.g. `127.0.0.1`,
+    /// `10.x.x.x`, `192.168.x.x`). Default is `false` (SSRF protection on).
+    pub http_allow_private: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +294,7 @@ impl Default for AppSettings {
             ]
             .map(String::from)
             .into(),
+            http_allow_private: false,
         }
     }
 }
@@ -458,6 +463,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "workspace = \"{escaped_ws}\"\n\n",
             "[app]\n",
             "# allow_hidden = false\n",
+            "# http_allow_private = false\n",
             "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",

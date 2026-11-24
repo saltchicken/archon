@@ -155,7 +155,7 @@ impl AsyncTool for Tool {
 
         let mut resp = None;
         for hop in 0..=MAX_REDIRECTS {
-            let addrs = validate_public_url(&target_url).await?;
+            let addrs = validate_public_url(&target_url, ctx.config.app.http_allow_private).await?;
             let client = build_pinned_client(&target_url, &addrs)?;
 
             let r = client
