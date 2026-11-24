@@ -257,6 +257,7 @@ impl Default for AppSettings {
                 "repo_map",
                 "github_repo:list",
                 "github_repo:read",
+                "github_repo:search",
                 "workspace_snapshot",
                 "fs:list",
                 "git:status",

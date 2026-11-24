@@ -763,7 +763,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "fs" => &["list", "rename", "copy", "remove"],
         "repo_map" => &["map", "definition", "references"],
-        "github_repo" => &["fetch", "list", "read"],
+        "github_repo" => &["fetch", "list", "read", "search"],
         "memory" => &[
             "list", "read", "add", "remove", "set", "clear", "enable", "disable",
         ],
@@ -793,7 +793,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "read_file" => "<file_path> [start_line=N] [end_line=N]",
         "search" => "<pattern> [path=...] [files_with_matches=true]",
         "repo_map" => "[map|definition|references] [symbol=...] [max_tokens=N]",
-        "github_repo" => "[fetch|list|read] repo=<owner/repo> [path=...] [git_ref=...]",
+        "github_repo" => {
+            "[fetch|list|read|search] repo=<owner/repo> [path=...] [pattern=...] [git_ref=...]"
+        }
         "cargo" => {
             "[check|clippy|test|fmt_check|fmt|doc|metadata|info|tree] [package=...] [bin=...]"
         }

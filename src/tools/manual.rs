@@ -61,6 +61,17 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             _ => &["target", "path"],
         },
         "fs" => &["action", "path", "destination"],
+        "github_repo"
+            if !map.contains_key("action")
+                && matches!(token, "fetch" | "list" | "read" | "search") =>
+        {
+            &["action"]
+        }
+        "github_repo" => match map.get("action").and_then(Value::as_str).unwrap_or("fetch") {
+            "fetch" => &["repo", "git_ref"],
+            "search" => &["repo", "pattern", "path"],
+            _ => &["repo", "path"],
+        },
         "dotfiles" if map.get("action").and_then(Value::as_str) == Some("sync") => &["content"],
         "dotfiles" => &["action", "path", "pattern"],
         "skill" => &["action", "name"],
@@ -146,6 +157,7 @@ pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)
             "git" => Some("status"),
             "cargo" => Some("check"),
             "fs" | "memory" | "skill" | "dotfiles" => Some("list"),
+            "github_repo" => Some("fetch"),
             "system" => Some("overview"),
             _ => None,
         };
