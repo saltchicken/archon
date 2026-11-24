@@ -6,6 +6,7 @@ mod edit_file;
 mod fetch_url;
 pub mod fs;
 mod git;
+mod github_repo;
 mod manual;
 mod memory;
 mod notify;
@@ -657,6 +658,7 @@ pub fn call_signature(call: &ToolCall) -> String {
             | "cargo"
             | "fs"
             | "repo_map"
+            | "github_repo"
             | "dotfiles"
             | "system"
             | "skill"
@@ -761,6 +763,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "fs" => &["list", "rename", "copy", "remove"],
         "repo_map" => &["map", "definition", "references"],
+        "github_repo" => &["fetch", "list", "read"],
         "memory" => &[
             "list", "read", "add", "remove", "set", "clear", "enable", "disable",
         ],
@@ -790,6 +793,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "read_file" => "<file_path> [start_line=N] [end_line=N]",
         "search" => "<pattern> [path=...] [files_with_matches=true]",
         "repo_map" => "[map|definition|references] [symbol=...] [max_tokens=N]",
+        "github_repo" => "[fetch|list|read] repo=<owner/repo> [path=...] [git_ref=...]",
         "cargo" => {
             "[check|clippy|test|fmt_check|fmt|doc|metadata|info|tree] [package=...] [bin=...]"
         }
@@ -961,6 +965,7 @@ register_tools! {
     async: fetch_url,
     blocking: fs,
     async: git,
+    async: github_repo,
     blocking: memory,
     async: notify,
     async: process,

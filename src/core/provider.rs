@@ -244,8 +244,7 @@ impl Provider {
             allowed_tools
                 .into_iter()
                 .filter(|t| {
-                    t != "subagent"
-                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                    t != "subagent" && tools::is_tool_enabled_for_turn(t, &config, active_skill)
                 })
                 .collect()
         };

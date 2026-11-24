@@ -52,7 +52,10 @@ pub struct RepoMapArgs {
     /// Optional crate name (e.g. `"ratatui"`, `"ratatui-textarea"`, `"tree_sitter"`) to inspect an installed Rust crate's source inside `~/.cargo/registry/src` instead of the workspace. Automatically resolves the version matching `Cargo.lock` (or the latest installed version in the registry cache).
     #[serde(default)]
     crate_name: String,
-    /// Optional relative directory or file path within the workspace (or within the crate root when `crate_name` is set) to scope the operation. Also accepts a direct path inside `~/.cargo/registry/src`.
+    /// Optional cached GitHub repo (`"owner/repo"`) previously fetched with `github_repo` (`action: "fetch"`) to inspect its AST map, symbol definitions, or references. Takes precedence over `crate_name` if both are set.
+    #[serde(default)]
+    github_repo: String,
+    /// Optional relative directory or file path within the workspace (or within the crate/repo root when `crate_name` or `github_repo` is set) to scope the operation. Also accepts a direct path inside `~/.cargo/registry/src`.
     #[serde(default)]
     target_path: String,
     /// Optional glob patterns to filter included files (e.g. `["src/**/*.rs", "**/*.ts"]`).
@@ -1163,10 +1166,30 @@ fn resolve_installed_crate_dir(
     Ok((best_path, label))
 }
 
+/// Resolved external (non-workspace) scan target:
+/// `(base_root, scan_root, label, respect_gitignore)`.
+///
+/// `respect_gitignore` is `true` only for cached GitHub repos, whose own
+/// `.gitignore` files meaningfully mark generated/third-party noise (e.g.
+/// committed `node_modules/`). Registry crate sources carry no such signal,
+/// so they keep the historical walk behavior.
+type ExternalScanTarget = (PathBuf, PathBuf, Option<String>, bool);
+
 fn resolve_external_cargo_roots(
     ctx: &ToolContext,
     args: &RepoMapArgs,
-) -> Result<Option<(PathBuf, PathBuf, Option<String>)>> {
+) -> Result<Option<ExternalScanTarget>> {
+    let gh_arg = args.github_repo.trim();
+    if !gh_arg.is_empty() {
+        let (repo_root, repo_label) = super::github_repo::resolve_cached_repo_dir(gh_arg)?;
+        let scan_root = resolve_existing_under(
+            &repo_root,
+            &args.target_path,
+            "target_path escapes cached repo root",
+        )?;
+        return Ok(Some((repo_root, scan_root, Some(repo_label), true)));
+    }
+
     let crate_arg = args.crate_name.trim();
     if !crate_arg.is_empty() {
         let (crate_root, crate_label) = resolve_installed_crate_dir(&ctx.root, crate_arg)?;
@@ -1175,7 +1198,7 @@ fn resolve_external_cargo_roots(
             &args.target_path,
             "target_path escapes crate root",
         )?;
-        return Ok(Some((crate_root, scan_root, Some(crate_label))));
+        return Ok(Some((crate_root, scan_root, Some(crate_label), false)));
     }
 
     let raw_target = args.target_path.trim();
@@ -1217,7 +1240,7 @@ fn resolve_external_cargo_roots(
         .and_then(|n| n.to_str())
         .map(String::from);
 
-    Ok(Some((base_root, canon_target, label)))
+    Ok(Some((base_root, canon_target, label, false)))
 }
 
 fn walk_external_crate_files(
@@ -1225,12 +1248,16 @@ fn walk_external_crate_files(
     base_root: &Path,
     scan_root: &Path,
     crate_label: Option<&str>,
+    respect_gitignore: bool,
     include_patterns: &[String],
     call_exclude: &[String],
 ) -> Result<Vec<(PathBuf, String)>> {
+    // Cached GitHub repos carry their own `.gitignore` files, which reliably
+    // mark generated/third-party noise even when it is committed; registry
+    // crate sources do not, so they keep the historical walk behavior.
     let walker = WalkBuilder::new(scan_root)
         .hidden(false)
-        .git_ignore(false)
+        .git_ignore(respect_gitignore)
         .git_global(false)
         .git_exclude(false)
         .build()
@@ -1256,7 +1283,7 @@ fn collect_candidate_files(
     args: &RepoMapArgs,
     ctx: &ToolContext,
 ) -> Result<Vec<(PathBuf, String, SupportedLang)>> {
-    let walked = if let Some((base_root, scan_root, crate_label)) =
+    let walked = if let Some((base_root, scan_root, crate_label, respect_gitignore)) =
         resolve_external_cargo_roots(ctx, args)?
     {
         walk_external_crate_files(
@@ -1264,6 +1291,7 @@ fn collect_candidate_files(
             &base_root,
             &scan_root,
             crate_label.as_deref(),
+            respect_gitignore,
             &args.include,
             &args.exclude,
         )?
@@ -1598,7 +1626,7 @@ fn execute_references(
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "repo_map";
-    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, Go, and Lua. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly.";
+    const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, Go, and Lua. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly, or `github_repo` (e.g. `owner/repo`) to inspect a cached GitHub repository fetched with the `github_repo` tool (`action: fetch`).";
     type Args = RepoMapArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1688,6 +1716,7 @@ bootstrap()
             symbol: String::new(),
             focus_symbols: Vec::new(),
             crate_name: String::new(),
+            github_repo: String::new(),
             target_path: String::new(),
             include: Vec::new(),
             exclude: Vec::new(),
@@ -1717,6 +1746,7 @@ bootstrap()
                 symbol: query.into(),
                 focus_symbols: Vec::new(),
                 crate_name: String::new(),
+                github_repo: String::new(),
                 target_path: String::new(),
                 include: Vec::new(),
                 exclude: Vec::new(),
@@ -1738,6 +1768,7 @@ bootstrap()
             symbol: "M.setup".into(),
             focus_symbols: Vec::new(),
             crate_name: String::new(),
+            github_repo: String::new(),
             target_path: String::new(),
             include: Vec::new(),
             exclude: Vec::new(),
@@ -1748,5 +1779,62 @@ bootstrap()
         let ref_out = execute_references(&ref_args, candidates, &settings, 65536).unwrap();
         assert!(ref_out.contains("[method M:run_action]"));
         assert!(ref_out.contains("[fn bootstrap]"));
+    }
+
+    #[test]
+    fn cached_repo_gitignore_marks_noise_but_crate_walk_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+
+        // Cached GitHub repos are git clones, so model one: the `ignore`
+        // crate only applies `.gitignore` rules when a `.git` directory is
+        // present in the tree (`require_git` defaults to `true`).
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("vendor_noise")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(
+            root.join("vendor_noise/generated.rs"),
+            "pub fn generated() {}\n",
+        )
+        .unwrap();
+        fs::write(root.join(".gitignore"), "vendor_noise/\n").unwrap();
+
+        let mut ctx = ToolContext {
+            root: root.clone(),
+            max_output_size: 65536,
+            active_skill: None,
+            config: crate::core::config::Config::default(),
+        };
+        // Neutralize the default `!.gitignore` negation so the `.gitignore`
+        // file itself stays hidden and out of the walk results.
+        ctx.config.workspace_snapshot.exclude = Vec::new();
+
+        // Cached GitHub repo path: the repo's own `.gitignore` marks noise.
+        let walked =
+            walk_external_crate_files(&ctx, &root, &root, Some("owner/repo"), true, &[], &[])
+                .unwrap();
+        let rels: Vec<String> = walked.iter().map(|(_, r)| r.clone()).collect();
+        assert_eq!(rels, vec!["owner/repo/src/main.rs"]);
+
+        // Registry crate path: historical behavior, `.gitignore` not honored.
+        let walked = walk_external_crate_files(
+            &ctx,
+            &root,
+            &root,
+            Some("some-crate-1.0.0"),
+            false,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let rels: Vec<String> = walked.iter().map(|(_, r)| r.clone()).collect();
+        assert_eq!(
+            rels,
+            vec![
+                "some-crate-1.0.0/src/main.rs",
+                "some-crate-1.0.0/vendor_noise/generated.rs"
+            ]
+        );
     }
 }
