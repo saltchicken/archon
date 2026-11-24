@@ -86,6 +86,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "read_file" => &["file_path"],
         "search" => &["pattern", "path"],
         "fetch_url" => &["url"],
+        "curl" => &["url", "method", "body", "json"],
         "create_file" => &["file_path", "content"],
         _ => &[],
     };

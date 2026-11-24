@@ -1,6 +1,7 @@
 mod approval;
 mod cargo;
 mod create_file;
+mod curl;
 mod dotfiles;
 mod edit_file;
 mod fetch_url;
@@ -779,6 +780,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "git" => "[status|diff|log|show|blame|branch|add|...] [target=...] [path=...]",
         "fs" => "[list|rename|copy|remove] [path=...] [destination=...]",
         "fetch_url" => "<url> [raw=true|false]",
+        "curl" => {
+            "<url> [method=post] [headers=...] [body=... | json=...] [head=true] [show_headers=true]"
+        }
         "memory" => {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
@@ -942,6 +946,7 @@ register_tools! {
     blocking: dotfiles,
     blocking: edit_file,
     async: fetch_url,
+    async: curl,
     blocking: fs,
     async: git,
     async: github_repo,
