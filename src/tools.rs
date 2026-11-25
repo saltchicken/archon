@@ -894,7 +894,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[start|list|output|poll|kill|clean] [command=... args=...] [id=...] [tail_lines=N | wait_ms=N]"
         }
         "browser" => {
-            "[goto|read|click|type|eval|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...]"
+            "[goto|read|click|type|eval|extract|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...] [headless=true|false]"
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",

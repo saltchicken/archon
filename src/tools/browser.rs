@@ -81,6 +81,9 @@ pub struct BrowserArgs {
     /// Max seconds to wait for `selector` to appear (default: 10).
     #[serde(default)]
     pub wait_secs: Option<u64>,
+    /// Whether to run the browser in headless mode (default: true). Set to false to launch a visible browser window you can observe and interact with.
+    #[serde(default = "default_true")]
+    pub headless: bool,
 }
 
 fn default_true() -> bool {
@@ -157,6 +160,7 @@ impl BrowserSession {
 
 pub struct BrowserRegistry {
     session: Mutex<Option<BrowserSession>>,
+    headless: Mutex<bool>,
 }
 
 impl BrowserRegistry {
@@ -166,6 +170,7 @@ impl BrowserRegistry {
             .get_or_init(|| {
                 Arc::new(Self {
                     session: Mutex::new(None),
+                    headless: Mutex::new(true),
                 })
             })
             .clone()
@@ -206,7 +211,7 @@ impl BrowserRegistry {
         bail!("Timed out waiting for `chromedriver` to become ready at {wd_url}");
     }
 
-    async fn connect_new() -> Result<BrowserSession> {
+    async fn connect_new(headless: bool) -> Result<BrowserSession> {
         let (wd_url, mut driver_proc) = match Self::external_webdriver_url() {
             Some(url) => (url, None),
             None => {
@@ -223,11 +228,14 @@ impl BrowserRegistry {
         };
 
         let mut caps = DesiredCapabilities::chrome();
-        caps.add_arg("--headless=new")?;
-        caps.add_arg("--disable-gpu")?;
+        if headless {
+            caps.add_arg("--headless=new")?;
+            caps.add_arg("--disable-gpu")?;
+        }
         caps.add_arg("--window-size=1440,900")?;
 
-        info!("Starting headless WebDriver session at {wd_url}");
+        let mode = if headless { "headless" } else { "visible" };
+        info!("Starting {mode} WebDriver session at {wd_url}");
         match WebDriver::new(&wd_url, caps).await {
             Ok(driver) => Ok(BrowserSession {
                 driver,
@@ -242,27 +250,41 @@ impl BrowserRegistry {
         }
     }
 
-    async fn get_or_init(&self) -> Result<WebDriver> {
+    async fn get_or_init(&self, headless: bool) -> Result<WebDriver> {
+        let current_headless = *self.headless.lock().await;
+        let headless_changed = current_headless != headless;
+
         let mut guard = self.session.lock().await;
         if let Some(ref existing) = *guard {
-            if existing.driver.status().await.is_ok() {
+            if !headless_changed && existing.driver.status().await.is_ok() {
                 return Ok(existing.driver.clone());
             }
-            warn!("Existing WebDriver session is stale; reconnecting...");
+            if headless_changed {
+                info!("Browser mode changed (headless: {current_headless} -> {headless}); reconnecting...");
+            } else {
+                warn!("Existing WebDriver session is stale; reconnecting...");
+            }
             if let Some(stale) = guard.take() {
                 stale.teardown().await;
             }
         }
-        let session = Self::connect_new().await?;
+
+        if headless_changed {
+            *self.headless.lock().await = headless;
+        }
+
+        let session = Self::connect_new(headless).await?;
         let driver = session.driver.clone();
         *guard = Some(session);
         Ok(driver)
     }
 
     pub async fn status(&self) -> String {
+        let headless = *self.headless.lock().await;
         let guard = self.session.lock().await;
         let Some(ref session) = *guard else {
-            return "Browser status: inactive (no open session).".into();
+            let mode = if headless { "headless" } else { "visible" };
+            return format!("Browser status: inactive (no open session, mode: {mode}).");
         };
         let url = session
             .driver
@@ -276,7 +298,8 @@ impl BrowserRegistry {
         } else {
             "external WebDriver"
         };
-        format!("Browser status: active ({managed})\nURL: {url}\nTitle: {title}")
+        let mode = if headless { "headless" } else { "visible" };
+        format!("Browser status: active ({mode}, {managed})\nURL: {url}\nTitle: {title}")
     }
 
     pub async fn close(&self) -> Result<String> {
@@ -557,7 +580,7 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 driver
                     .goto(parsed.as_str())
                     .await
@@ -574,11 +597,12 @@ impl AsyncTool for Tool {
 
                 let final_url = driver.current_url().await?;
                 let title = driver.title().await.unwrap_or_default();
-                Ok(format!("Navigated to: {final_url}\nTitle: {title}"))
+                let mode = if args.headless { "[headless]" } else { "[visible]" };
+                Ok(format!("Navigated to: {final_url}\nTitle: {title} {mode}"))
             }
 
             BrowserAction::Read => {
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let text = if let Some(sel) = args
                     .selector
                     .as_deref()
@@ -610,7 +634,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let elem = find_with_wait(&driver, sel, wait_secs).await?;
                 elem.click()
                     .await
@@ -634,7 +658,7 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let elem = find_with_wait(&driver, sel, wait_secs).await?;
                 if args.clear {
                     let _ = elem.clear().await;
@@ -655,7 +679,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let ret = driver
                     .execute(ensure_return(script), vec![])
                     .await
@@ -670,7 +694,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let ret = driver
                     .execute("return document.documentElement.outerHTML", vec![])
                     .await
@@ -685,7 +709,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Screenshot => {
-                let driver = reg.get_or_init().await?;
+                let driver = reg.get_or_init(args.headless).await?;
                 let png = if let Some(sel) = args
                     .selector
                     .as_deref()
@@ -917,5 +941,13 @@ mod tests {
         assert!(matches!(args.action, BrowserAction::Status));
         assert_eq!(args.url, None);
         assert!(args.clear, "clear should default to true");
+        assert!(args.headless, "headless should default to true");
+    }
+
+    #[test]
+    fn browser_args_headless_false() {
+        let json = r#"{"action":"goto","url":"https://example.com","headless":false}"#;
+        let args: BrowserArgs = serde_json::from_str(json).unwrap();
+        assert!(!args.headless, "headless should be false when explicitly set");
     }
 }
