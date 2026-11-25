@@ -672,7 +672,7 @@ impl AsyncTool for Tool {
                     .context("'selector' is required for browser:extract")?;
                 let driver = reg.get_or_init().await?;
                 let ret = driver
-                    .execute(ensure_return("document.documentElement.outerHTML"), vec![])
+                    .execute("return document.documentElement.outerHTML", vec![])
                     .await
                     .context("Failed to read rendered HTML for extract")?;
                 let source = ret
