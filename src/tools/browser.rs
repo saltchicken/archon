@@ -81,9 +81,15 @@ pub struct BrowserArgs {
     /// Max seconds to wait for `selector` to appear (default: 10).
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Whether to run the browser in headless mode (default: true). Set to false to launch a visible browser window you can observe and interact with.
-    #[serde(default = "default_true")]
-    pub headless: bool,
+    /// Whether to run the browser in headless mode. Set to `false` to launch a visible
+    /// browser window you can observe and interact with.
+    ///
+    /// This is a *sticky* session setting: once a mode is established it persists across
+    /// subsequent calls, so only provide it when you want to (re)start the session in a
+    /// specific mode. When omitted, the current session's mode is kept (defaulting to
+    /// headless only when no session exists yet).
+    #[serde(default)]
+    pub headless: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -250,17 +256,30 @@ impl BrowserRegistry {
         }
     }
 
-    async fn get_or_init(&self, headless: bool) -> Result<WebDriver> {
-        let current_headless = *self.headless.lock().await;
-        let headless_changed = current_headless != headless;
+    /// Returns a live WebDriver for the requested mode.
+    ///
+    /// `headless` is a *sticky* session setting:
+    /// - `Some(h)` establishes/overrides the mode, reconnecting only if it differs
+    ///   from the current session's mode.
+    /// - `None` keeps the current session's mode (falling back to the stored default,
+    ///   which is headless, when no session exists yet).
+    ///
+    /// This means the mode only has to be specified once; omitting it on later calls
+    /// no longer forces a reconnect back to headless.
+    async fn get_or_init(&self, headless: Option<bool>) -> Result<WebDriver> {
+        let stored_headless = *self.headless.lock().await;
+        let desired = headless.unwrap_or(stored_headless);
+        let mode_changed = headless.is_some_and(|h| h != stored_headless);
 
         let mut guard = self.session.lock().await;
         if let Some(ref existing) = *guard {
-            if !headless_changed && existing.driver.status().await.is_ok() {
+            if !mode_changed && existing.driver.status().await.is_ok() {
                 return Ok(existing.driver.clone());
             }
-            if headless_changed {
-                info!("Browser mode changed (headless: {current_headless} -> {headless}); reconnecting...");
+            if mode_changed {
+                info!(
+                    "Browser mode changed (headless: {stored_headless} -> {desired}); reconnecting..."
+                );
             } else {
                 warn!("Existing WebDriver session is stale; reconnecting...");
             }
@@ -269,14 +288,19 @@ impl BrowserRegistry {
             }
         }
 
-        if headless_changed {
-            *self.headless.lock().await = headless;
+        if mode_changed {
+            *self.headless.lock().await = desired;
         }
 
-        let session = Self::connect_new(headless).await?;
+        let session = Self::connect_new(desired).await?;
         let driver = session.driver.clone();
         *guard = Some(session);
         Ok(driver)
+    }
+
+    /// The headless mode of the current (or most recently created) session.
+    pub async fn headless_mode(&self) -> bool {
+        *self.headless.lock().await
     }
 
     pub async fn status(&self) -> String {
@@ -597,7 +621,11 @@ impl AsyncTool for Tool {
 
                 let final_url = driver.current_url().await?;
                 let title = driver.title().await.unwrap_or_default();
-                let mode = if args.headless { "[headless]" } else { "[visible]" };
+                let mode = if reg.headless_mode().await {
+                    "[headless]"
+                } else {
+                    "[visible]"
+                };
                 Ok(format!("Navigated to: {final_url}\nTitle: {title} {mode}"))
             }
 
@@ -941,13 +969,20 @@ mod tests {
         assert!(matches!(args.action, BrowserAction::Status));
         assert_eq!(args.url, None);
         assert!(args.clear, "clear should default to true");
-        assert!(args.headless, "headless should default to true");
+        assert!(
+            args.headless.is_none(),
+            "headless should default to None (sticky)"
+        );
     }
 
     #[test]
     fn browser_args_headless_false() {
         let json = r#"{"action":"goto","url":"https://example.com","headless":false}"#;
         let args: BrowserArgs = serde_json::from_str(json).unwrap();
-        assert!(!args.headless, "headless should be false when explicitly set");
+        assert_eq!(
+            args.headless,
+            Some(false),
+            "headless should be Some(false) when explicitly set"
+        );
     }
 }
