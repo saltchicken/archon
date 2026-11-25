@@ -65,6 +65,14 @@ impl CoreEngine {
                 global_memory,
                 workspace_memory,
             });
+        } else if tool_name == "session" {
+            if let Ok(data) = self.sessions.load(&self.session.id) {
+                self.session.custom_title = data.custom_title();
+                self.session.is_pinned = data.pinned;
+                self.emit_chat();
+            }
+            let list = self.sessions.list();
+            let _ = self.tx.send(EngineEvent::SessionsListed(list));
         }
     }
 

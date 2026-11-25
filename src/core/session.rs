@@ -153,6 +153,39 @@ pub struct SessionSummary {
     pub pinned: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionDetails {
+    pub id: String,
+    pub workspace: String,
+    pub title: String,
+    pub model: String,
+    pub updated_at: String,
+    pub messages: usize,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionMatchSnippet {
+    pub message_index: usize,
+    pub role: String,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSearchHit {
+    pub session: SessionDetails,
+    pub title_matched: bool,
+    pub snippets: Vec<SessionMatchSnippet>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionStats {
+    pub total_sessions: usize,
+    pub pinned_sessions: usize,
+    pub total_messages: usize,
+    pub models: Vec<(String, usize)>,
+}
+
 pub struct SessionManager {
     conn: Mutex<Connection>,
     workspace: String,
@@ -343,6 +376,284 @@ impl SessionManager {
             params![i64::from(next), id],
         )?;
         Ok(next)
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<bool> {
+        let conn = self.lock_conn();
+        let updated = conn.execute(
+            "UPDATE sessions SET pinned = ?1 WHERE id = ?2",
+            params![i64::from(pinned), id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("Session '{id}' not found in database");
+        }
+        Ok(pinned)
+    }
+
+    pub fn rename(&self, id: &str, new_title: &str) -> Result<String> {
+        let cleaned = strip_fork_prefix(new_title.trim()).trim();
+        if cleaned.is_empty() {
+            anyhow::bail!("Session title cannot be empty.");
+        }
+        let conn = self.lock_conn();
+        let current_title: String = conn
+            .query_row(
+                "SELECT title FROM sessions WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("Session '{id}' not found in database"))?;
+
+        let base = truncate_str(cleaned, 50);
+        let final_title = if current_title.starts_with(FORK_TITLE_PREFIX) {
+            format!("{FORK_TITLE_PREFIX}{base}")
+        } else {
+            base
+        };
+
+        conn.execute(
+            "UPDATE sessions SET title = ?1 WHERE id = ?2",
+            params![final_title, id],
+        )?;
+        Ok(final_title)
+    }
+
+    pub fn list_filtered(
+        &self,
+        all_workspaces: bool,
+        pinned_only: bool,
+        limit: usize,
+    ) -> Vec<SessionDetails> {
+        let conn = self.lock_conn();
+        let sql = match (all_workspaces, pinned_only) {
+            (true, true) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned
+                 FROM sessions WHERE pinned = 1
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1"
+            }
+            (true, false) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned
+                 FROM sessions
+                 ORDER BY pinned DESC, updated_at DESC, id DESC LIMIT ?1"
+            }
+            (false, true) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned
+                 FROM sessions WHERE workspace = ?1 AND pinned = 1
+                 ORDER BY updated_at DESC, id DESC LIMIT ?2"
+            }
+            (false, false) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned
+                 FROM sessions WHERE workspace = ?1
+                 ORDER BY pinned DESC, updated_at DESC, id DESC LIMIT ?2"
+            }
+        };
+
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Vec::new();
+        };
+
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(SessionDetails {
+                id: row.get(0)?,
+                workspace: row.get(1)?,
+                title: row.get(2)?,
+                model: row.get(3)?,
+                updated_at: row.get(4)?,
+                messages: row.get::<_, i64>(5)?.max(0) as usize,
+                pinned: row.get::<_, i64>(6).unwrap_or(0) != 0,
+            })
+        };
+
+        let limit_i64 = limit as i64;
+        if all_workspaces {
+            stmt.query_map(params![limit_i64], map_row)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        } else {
+            stmt.query_map(params![self.workspace, limit_i64], map_row)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        }
+    }
+
+    pub fn search(
+        &self,
+        query: &str,
+        is_regex: bool,
+        all_workspaces: bool,
+        pinned_only: bool,
+        limit: usize,
+    ) -> Result<Vec<SessionSearchHit>> {
+        const MAX_SNIPPETS_PER_SESSION: usize = 3;
+
+        let re = if is_regex {
+            Some(regex::Regex::new(query).with_context(|| format!("Invalid regex: '{query}'"))?)
+        } else {
+            None
+        };
+        let query_lower = query.to_ascii_lowercase();
+
+        let matches_text = |text: &str| -> Option<usize> {
+            if let Some(ref r) = re {
+                r.find(text).map(|m| m.start())
+            } else {
+                text.to_ascii_lowercase().find(&query_lower)
+            }
+        };
+
+        let conn = self.lock_conn();
+        let sql = match (all_workspaces, pinned_only) {
+            (true, true) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned, messages_json
+                 FROM sessions WHERE pinned = 1
+                 ORDER BY updated_at DESC, id DESC"
+            }
+            (true, false) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned, messages_json
+                 FROM sessions
+                 ORDER BY pinned DESC, updated_at DESC, id DESC"
+            }
+            (false, true) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned, messages_json
+                 FROM sessions WHERE workspace = ?1 AND pinned = 1
+                 ORDER BY updated_at DESC, id DESC"
+            }
+            (false, false) => {
+                "SELECT id, workspace, title, model, updated_at, message_count, pinned, messages_json
+                 FROM sessions WHERE workspace = ?1
+                 ORDER BY pinned DESC, updated_at DESC, id DESC"
+            }
+        };
+
+        let mut stmt = conn.prepare(sql)?;
+        let rows = if all_workspaces {
+            stmt.query_map([], |row| {
+                Ok((
+                    SessionDetails {
+                        id: row.get(0)?,
+                        workspace: row.get(1)?,
+                        title: row.get(2)?,
+                        model: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        messages: row.get::<_, i64>(5)?.max(0) as usize,
+                        pinned: row.get::<_, i64>(6).unwrap_or(0) != 0,
+                    },
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .flatten()
+            .collect::<Vec<_>>()
+        } else {
+            stmt.query_map(params![self.workspace], |row| {
+                Ok((
+                    SessionDetails {
+                        id: row.get(0)?,
+                        workspace: row.get(1)?,
+                        title: row.get(2)?,
+                        model: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        messages: row.get::<_, i64>(5)?.max(0) as usize,
+                        pinned: row.get::<_, i64>(6).unwrap_or(0) != 0,
+                    },
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+
+        let mut hits = Vec::new();
+        for (details, messages_json) in rows {
+            if hits.len() >= limit {
+                break;
+            }
+            let title_matched = matches_text(&details.title).is_some();
+            let mut snippets = Vec::new();
+
+            if let Ok(msgs) = serde_json::from_str::<Vec<ChatMessage>>(&messages_json) {
+                for (idx, msg) in msgs.iter().enumerate() {
+                    if msg.role == "error" || msg.content.trim().is_empty() {
+                        continue;
+                    }
+                    if let Some(byte_pos) = matches_text(&msg.content) {
+                        let start = msg.content.floor_char_boundary(byte_pos.saturating_sub(60));
+                        let end = msg
+                            .content
+                            .ceil_char_boundary((byte_pos + 120).min(msg.content.len()));
+                        let raw_excerpt = msg.content[start..end].replace('\n', " ");
+                        let prefix = if start > 0 { "..." } else { "" };
+                        let suffix = if end < msg.content.len() { "..." } else { "" };
+                        snippets.push(SessionMatchSnippet {
+                            message_index: idx + 1,
+                            role: msg.role.clone(),
+                            excerpt: format!("{prefix}{}{suffix}", raw_excerpt.trim()),
+                        });
+                        if snippets.len() >= MAX_SNIPPETS_PER_SESSION {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if title_matched || !snippets.is_empty() {
+                hits.push(SessionSearchHit {
+                    session: details,
+                    title_matched,
+                    snippets,
+                });
+            }
+        }
+
+        Ok(hits)
+    }
+
+    pub fn stats(&self, all_workspaces: bool) -> Result<SessionStats> {
+        let conn = self.lock_conn();
+        let (total_sessions, pinned_sessions, total_messages): (i64, i64, i64) = if all_workspaces {
+            conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(pinned), 0), COALESCE(SUM(message_count), 0) FROM sessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(pinned), 0), COALESCE(SUM(message_count), 0)
+                 FROM sessions WHERE workspace = ?1",
+                params![self.workspace],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        };
+
+        let model_sql = if all_workspaces {
+            "SELECT model, COUNT(*) FROM sessions GROUP BY model ORDER BY COUNT(*) DESC, model ASC"
+        } else {
+            "SELECT model, COUNT(*) FROM sessions WHERE workspace = ?1 GROUP BY model ORDER BY COUNT(*) DESC, model ASC"
+        };
+        let mut stmt = conn.prepare(model_sql)?;
+        let models: Vec<(String, usize)> = if all_workspaces {
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+            })?
+            .flatten()
+            .collect()
+        } else {
+            stmt.query_map(params![self.workspace], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+            })?
+            .flatten()
+            .collect()
+        };
+
+        Ok(SessionStats {
+            total_sessions: total_sessions.max(0) as usize,
+            pinned_sessions: pinned_sessions.max(0) as usize,
+            total_messages: total_messages.max(0) as usize,
+            models,
+        })
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {

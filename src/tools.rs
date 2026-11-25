@@ -17,6 +17,7 @@ pub(crate) mod progress;
 mod read_file;
 mod repo_map;
 mod search;
+mod session;
 mod skill;
 mod subagent;
 mod system;
@@ -832,6 +833,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         "memory" => &[
             "list", "read", "add", "remove", "set", "clear", "enable", "disable",
         ],
+        "session" => &["list", "search", "read", "stats", "rename", "pin"],
         "skill" => &["list", "read", "create", "modify", "check"],
         "dotfiles" => &[
             "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore",
@@ -885,6 +887,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
         "notify" => "<summary> [body=...] [urgency=low|normal|critical] [timeout_ms=N]",
+        "session" => "[list|search|read|stats|rename|pin] [id=...] [query=...] [start_message=N] [end_message=N]",
         "skill" => "[list|read|create|modify|check] [name=...]",
         "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {
@@ -1058,6 +1061,7 @@ register_tools! {
     blocking: read_file,
     blocking: repo_map,
     blocking: search,
+    blocking: session,
     blocking: skill,
     async: subagent,
     async: system,
