@@ -180,6 +180,14 @@ pub struct AppSettings {
     /// loopback, and otherwise reserved IP addresses (e.g. `127.0.0.1`,
     /// `10.x.x.x`, `192.168.x.x`). Default is `false` (SSRF protection on).
     pub http_allow_private: bool,
+    /// Extra directories (absolute, or relative to CWD) that `read_file` and
+    /// `search` are additionally allowed to read, beyond the workspace root.
+    /// Entries that do not resolve to an existing directory are ignored, but
+    /// listed in rejection messages (e.g. `~/.cargo/registry/src` does not
+    /// exist until the first dependency fetch). Default is empty.
+    ///
+    /// Example: `read_roots = ["~/.cargo/registry/src"]`
+    pub read_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,6 +303,7 @@ impl Default for AppSettings {
             .map(String::from)
             .into(),
             http_allow_private: false,
+            read_roots: Vec::new(),
         }
     }
 }

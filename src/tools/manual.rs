@@ -87,7 +87,13 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "search" => &["pattern", "path"],
         "fetch_url" => &["url"],
         "curl" => &["url", "method", "body", "json"],
-        "process" if !map.contains_key("action") && matches!(token, "start" | "list" | "output" | "poll" | "kill" | "clean") => {
+        "process"
+            if !map.contains_key("action")
+                && matches!(
+                    token,
+                    "start" | "list" | "output" | "poll" | "kill" | "clean"
+                ) =>
+        {
             &["action"]
         }
         "process" => match map.get("action").and_then(Value::as_str).unwrap_or("") {

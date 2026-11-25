@@ -184,6 +184,34 @@ impl ToolContext {
         ensure_within_root(path, &self.root, label)
     }
 
+    /// Canonicalized, existing directories the user has explicitly allowed
+    /// `read_file`/`search` to read, in addition to the workspace root.
+    pub fn extra_read_roots(&self) -> Vec<PathBuf> {
+        self.config
+            .app
+            .read_roots
+            .iter()
+            .map(|s| expand_tilde(s))
+            .filter_map(|p| dunce::canonicalize(p).ok())
+            .collect()
+    }
+
+    /// `app.read_roots` entries that currently fail to resolve to an existing
+    /// path (a typo, or a lazy directory like `~/.cargo/registry/src` before
+    /// the first dependency fetch), as a comma-joined list. Surfaced in
+    /// rejection messages so a misconfigured entry is not silently ignored.
+    fn read_roots_hint(&self) -> Option<String> {
+        let unresolved: Vec<&str> = self
+            .config
+            .app
+            .read_roots
+            .iter()
+            .filter(|raw| dunce::canonicalize(expand_tilde(raw)).is_err())
+            .map(String::as_str)
+            .collect();
+        (!unresolved.is_empty()).then(|| unresolved.join(", "))
+    }
+
     pub fn ensure_path_or_ancestor_within_workspace(
         &self,
         target: &Path,
@@ -293,7 +321,8 @@ impl ToolContext {
         }
 
         let expanded = expand_tilde(trimmed);
-        let candidate = if expanded.is_absolute() {
+        let is_absolute = expanded.is_absolute();
+        let candidate = if is_absolute {
             expanded
         } else {
             self.root.join(validate_relative_path(trimmed)?)
@@ -303,6 +332,21 @@ impl ToolContext {
             bail!("Target path does not exist: '{trimmed}'");
         }
         let canon = dunce::canonicalize(&candidate)?;
+
+        if let Some(root) = self
+            .extra_read_roots()
+            .iter()
+            .find(|r| canon.starts_with(r))
+        {
+            // Enforce the same policy as the workspace path (and what `search`
+            // already enforces on read roots): hidden-file and default-exclude
+            // checks on the path *relative* to the read root.
+            // `~/.cargo/registry/src/foo` is fine, but hidden files and secret
+            // patterns (`.env`, `*.key`, `secrets.json`, …) stay blocked
+            // unless `app.allow_hidden` (or a negated exclude) allows them.
+            self.ensure_not_excluded_under(&canon, root)?;
+            return Ok(canon);
+        }
 
         let global_skills_root = expand_tilde(&self.config.app.skills_dir);
         let canon_global = dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
@@ -346,7 +390,18 @@ impl ToolContext {
         {
             self.ensure_not_excluded(&candidate)?;
         }
-        let canon = self.ensure_within_workspace(&canon, trimmed)?;
+        let canon = match self.ensure_within_workspace(&canon, trimmed) {
+            Ok(canon) => canon,
+            Err(err) => {
+                // An absolute path was rejected while a configured read root
+                // failed to resolve: name the misconfigured entry instead of
+                // letting it fail silently.
+                if is_absolute && let Some(hint) = self.read_roots_hint() {
+                    bail!("{err} (unresolved `app.read_roots` entries: {hint})");
+                }
+                return Err(err);
+            }
+        };
         self.ensure_not_excluded(&canon)?;
         Ok(canon)
     }
@@ -368,6 +423,25 @@ impl ToolContext {
         target_path: &str,
         escape_label: &str,
     ) -> Result<(PathBuf, PathBuf)> {
+        // Allow searching an explicitly-configured extra root (e.g.
+        // ~/.cargo/registry/src) by passing its absolute path as `path`.
+        let expanded = expand_tilde(target_path.trim());
+        if expanded.is_absolute()
+            && let Ok(canon) = dunce::canonicalize(&expanded)
+            && let Some(root) = self
+                .extra_read_roots()
+                .iter()
+                .find(|r| canon.starts_with(r))
+        {
+            // Anchor the display `base_root` at the configured read root rather
+            // than at `canon` itself. When `canon` is a single file, returning
+            // `(canon, canon)` would make `diff_paths(scan_root, base_root)`
+            // empty and `walk_filtered_files` would emit a blank filename; keying
+            // off the read root keeps the relative path (and the workspace-style
+            // exclude/hidden checks) well-defined for both file and dir targets.
+            return Ok((root.clone(), canon));
+        }
+
         let base_root = if self.config.workspace_snapshot.git_root {
             self.root
                 .ancestors()
@@ -378,7 +452,19 @@ impl ToolContext {
             self.root.clone()
         };
         let base_root = dunce::canonicalize(&base_root).unwrap_or(base_root);
-        let scan_root = self.resolve_under_base(&base_root, target_path, escape_label)?;
+        let scan_root = match self.resolve_under_base(&base_root, target_path, escape_label) {
+            Ok(scan_root) => scan_root,
+            Err(err) => {
+                // See the matching note in `resolve_readable_path`: name the
+                // misconfigured entry instead of failing opaquely.
+                if expanded.is_absolute()
+                    && let Some(hint) = self.read_roots_hint()
+                {
+                    bail!("{err} (unresolved `app.read_roots` entries: {hint})");
+                }
+                return Err(err);
+            }
+        };
         Ok((base_root, scan_root))
     }
 
@@ -1133,4 +1219,178 @@ pub async fn execute_manual(
         ToolFilter::Manual,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolContext, diff_paths};
+    use crate::core::config::Config;
+    use std::path::Path;
+
+    #[test]
+    fn read_root_file_search_anchors_base_root_to_read_root() {
+        // Keep the `TempDir` guard alive so the directory is not deleted.
+        let root_dir = tempfile::tempdir().unwrap();
+        let read_root = dunce::canonicalize(root_dir.path()).unwrap();
+        let file = read_root.join("dep.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let mut config = Config::default();
+        config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        // A single file under a read root must resolve with a non-empty relative
+        // path: `base_root` anchors at the read root, not the file itself.
+        let (base_root, scan_root) = ctx
+            .resolve_scan_roots(&file.to_string_lossy(), "label")
+            .unwrap();
+        assert_eq!(scan_root, dunce::canonicalize(&file).unwrap());
+        assert_eq!(
+            diff_paths(&scan_root, &base_root).as_deref(),
+            Some(Path::new("dep.rs"))
+        );
+
+        // A directory target still resolves (base_root == scan_root == the root).
+        let (base_root, scan_root) = ctx
+            .resolve_scan_roots(&read_root.to_string_lossy(), "label")
+            .unwrap();
+        assert_eq!(base_root, scan_root);
+        assert_eq!(base_root, read_root);
+    }
+
+    #[test]
+    fn read_file_via_read_root_succeeds() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let read_root = dunce::canonicalize(root_dir.path()).unwrap();
+        let f = read_root.join("lib.rs");
+        std::fs::write(&f, "pub fn x() {}\n").unwrap();
+
+        let mut config = Config::default();
+        config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        let resolved = ctx.resolve_readable_path(f.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, f);
+    }
+
+    #[test]
+    fn read_file_hidden_file_in_read_root_blocked() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let read_root = dunce::canonicalize(root_dir.path()).unwrap();
+        // Create a hidden subdirectory with a file inside it.
+        let hidden_dir = read_root.join(".secret");
+        std::fs::create_dir(&hidden_dir).unwrap();
+        let secret = hidden_dir.join("credentials.txt");
+        std::fs::write(&secret, "token=abc\n").unwrap();
+
+        let mut config = Config::default();
+        config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
+        config.app.allow_hidden = false;
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        let err = ctx
+            .resolve_readable_path(secret.to_str().unwrap())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("hidden file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_file_hidden_file_in_read_root_allowed_when_configured() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let read_root = dunce::canonicalize(root_dir.path()).unwrap();
+        let hidden_dir = read_root.join(".secret");
+        std::fs::create_dir(&hidden_dir).unwrap();
+        let secret = hidden_dir.join("credentials.txt");
+        std::fs::write(&secret, "token=abc\n").unwrap();
+
+        let mut config = Config::default();
+        config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
+        config.app.allow_hidden = true;
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        let resolved = ctx.resolve_readable_path(secret.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, secret);
+    }
+
+    #[test]
+    fn file_outside_all_read_roots_is_rejected() {
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside_file = dunce::canonicalize(outside_dir.path())
+            .unwrap()
+            .join("dep.rs");
+        std::fs::write(&outside_file, "x\n").unwrap();
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_root = dunce::canonicalize(other_dir.path()).unwrap();
+        let mut config = Config::default();
+        config.app.read_roots = vec![other_root.to_string_lossy().into_owned()];
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        let err = ctx
+            .resolve_scan_roots(&outside_file.to_string_lossy(), "label")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("relative") || err.to_string().contains("Security violation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn read_file_secret_pattern_in_read_root_blocked() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let read_root = dunce::canonicalize(root_dir.path()).unwrap();
+        // `secrets.json` matches DEFAULT_EXCLUDE_PATTERNS: it must stay blocked
+        // under a read root exactly as it does inside the workspace.
+        let secret = read_root.join("secrets.json");
+        std::fs::write(&secret, "{}\n").unwrap();
+
+        let mut config = Config::default();
+        config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
+        config.app.allow_hidden = false;
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        let err = ctx
+            .resolve_readable_path(secret.to_str().unwrap())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("excluded pattern"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unresolved_read_root_hint_surfaces_in_rejection() {
+        // Non-hidden prefix: tempdir's default `.tmp*` name would trip the
+        // hidden-file policy before reaching the workspace-escape check.
+        let base = tempfile::Builder::new()
+            .prefix("archon_root_")
+            .tempdir()
+            .unwrap();
+        let broken = base.path().join("missing-root");
+        let mut config = Config::default();
+        config.app.read_roots = vec![broken.to_string_lossy().into_owned()];
+        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+
+        // `read_file`: an absolute path outside the workspace is rejected, and
+        // the misconfigured entry is named in the message.
+        let msg = ctx
+            .resolve_readable_path(base.path().to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("escapes workspace"), "unexpected error: {msg}");
+        assert!(msg.contains("`app.read_roots`"), "unexpected error: {msg}");
+        assert!(msg.contains("missing-root"), "unexpected error: {msg}");
+
+        // `search`: the same path must get the same actionable hint instead of
+        // just "path must be relative".
+        let msg = ctx
+            .resolve_scan_roots(base.path().to_str().unwrap(), "label")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("relative"), "unexpected error: {msg}");
+        assert!(msg.contains("missing-root"), "unexpected error: {msg}");
+    }
 }

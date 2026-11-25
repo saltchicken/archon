@@ -7,7 +7,9 @@ pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ReadFileArgs {
-    /// Path to the file in the workspace (or inside a skill directory).
+    /// Path to the file in the workspace (or inside a skill directory). Also
+    /// accepts an absolute path into a directory configured via
+    /// `app.read_roots` (e.g. `~/.cargo/registry/src`).
     file_path: String,
     /// Optional 1-based starting line number (inclusive). If set, output lines are prefixed with line numbers.
     #[serde(default)]

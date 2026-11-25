@@ -12,7 +12,7 @@ pub struct Tool;
 pub struct SearchArgs {
     /// Regular expression (or literal string when `fixed_strings: true`) to search for across files.
     pattern: String,
-    /// Optional relative directory or file path within the workspace to restrict the search scope (defaults to workspace root).
+    /// Optional relative directory or file path within the workspace to restrict the search scope (defaults to workspace root). An absolute path into a directory configured via `app.read_roots` (e.g. `~/.cargo/registry/src`) is also accepted.
     #[serde(default)]
     path: String,
     /// Optional glob patterns to filter which files are searched (e.g. `["*.rs", "src/**/*.toml"]`).
