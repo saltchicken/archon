@@ -24,7 +24,7 @@ regex = "1.11"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 rusqlite = { version = "0.43", features = ["bundled"] }
 schemars = "1.2.3"
-scraper = "0.20"
+scraper = "0.29"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 shellexpand = "3.1"
@@ -32,7 +32,7 @@ shlex = "2.0.1"
 similar = "3.2.1"
 tempfile = "3.27"
 textwrap = "0.16"
-thirtyfour = "0.35"
+thirtyfour = "0.38"
 tokio = { version = "1.54", features = ["full", "process"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml = "1.2.1"
