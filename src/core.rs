@@ -269,6 +269,9 @@ impl CoreEngine {
 
         info!("Shutting down CoreEngine, terminating background jobs...");
         ProcessRegistry::global().shutdown().await;
+        crate::tools::browser::BrowserRegistry::global()
+            .shutdown()
+            .await;
 
         info!("Shutting down CoreEngine, awaiting pending session save...");
         self.flush_save_task().await;

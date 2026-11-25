@@ -101,6 +101,23 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             "output" | "poll" | "kill" => &["id"],
             _ => &["id"],
         },
+        "browser"
+            if !map.contains_key("action")
+                && matches!(
+                    token,
+                    "goto" | "read" | "click" | "type" | "eval" | "screenshot" | "status" | "close"
+                ) =>
+        {
+            &["action"]
+        }
+        "browser" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
+            "goto" => &["url", "selector"],
+            "read" | "click" => &["selector"],
+            "type" => &["selector", "text"],
+            "eval" => &["script"],
+            "screenshot" => &["selector", "path"],
+            _ => &[],
+        },
         "create_file" => &["file_path", "content"],
         _ => &[],
     };
