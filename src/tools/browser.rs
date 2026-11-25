@@ -5,6 +5,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use schemars::JsonSchema;
+use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 use std::{
     net::TcpListener,
@@ -28,6 +29,7 @@ use crate::core::processes::kill_process_group;
 
 const DEFAULT_WAIT_SECS: u64 = 10;
 const DRIVER_START_TIMEOUT_SECS: u64 = 5;
+const MAX_EXTRACT_ELEMENTS: usize = 200;
 
 pub struct Tool;
 
@@ -44,6 +46,8 @@ pub enum BrowserAction {
     Type,
     /// Execute JavaScript in the page context and return its JSON result.
     Eval,
+    /// Extract structured data (text, attributes, href) from elements matching a CSS selector, parsed server-side with the `scraper` crate.
+    Extract,
     /// Capture a PNG screenshot of the current viewport (or element) to a file.
     Screenshot,
     /// Show current URL, title, and session status.
@@ -59,7 +63,7 @@ pub struct BrowserArgs {
     /// Target URL (required for `goto`).
     #[serde(default)]
     pub url: Option<String>,
-    /// CSS selector to target (used by `read`, `click`, `type`, `screenshot`, or as wait condition in `goto`).
+    /// CSS selector to target (used by `read`, `click`, `type`, `extract`, `screenshot`, or as wait condition in `goto`).
     #[serde(default)]
     pub selector: Option<String>,
     /// Text to type (required for `type`).
@@ -469,9 +473,62 @@ async fn find_with_wait(
         .with_context(|| format!("Element '{selector}' not found within {wait_secs}s"))
 }
 
+/// Extract structured data (inner text, all attributes, and a resolved
+/// `href`) from every element matching `selector` in an HTML `source`.
+///
+/// This is the CSS-selector extraction engine behind the `extract` action.
+/// It parses the rendered HTML once with `scraper` and returns a JSON object:
+/// `{ selector, count, truncated, items: [{ text, attrs, href }] }`.
+fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> {
+    let document = Html::parse_document(source);
+    let sel = Selector::parse(selector)
+        .map_err(|e| anyhow::anyhow!("Invalid CSS selector '{selector}': {e}"))?;
+    let anchor_sel = Selector::parse("a[href]").expect("'a[href]' is a valid CSS selector");
+
+    let matches: Vec<ElementRef> = document.select(&sel).collect();
+    let truncated = matches.len() > MAX_EXTRACT_ELEMENTS;
+
+    let items: Vec<serde_json::Value> = matches
+        .iter()
+        .take(MAX_EXTRACT_ELEMENTS)
+        .map(|element| {
+            let text: String = element.text().collect();
+            let attrs: serde_json::Map<String, serde_json::Value> = element
+                .value()
+                .attrs
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.local.to_string(),
+                        serde_json::Value::String(value.to_string()),
+                    )
+                })
+                .collect();
+            let href = element.attr("href").map(str::to_owned).or_else(|| {
+                element
+                    .select(&anchor_sel)
+                    .next()
+                    .and_then(|a| a.attr("href").map(str::to_owned))
+            });
+            serde_json::json!({
+                "text": text.trim(),
+                "attrs": attrs,
+                "href": href,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "selector": selector,
+        "count": items.len(),
+        "truncated": truncated,
+        "items": items,
+    }))
+}
+
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a headless browser via WebDriver (thirtyfour) to render JS pages, interact with DOM elements, evaluate JavaScript, and capture screenshots.";
+    const DESCRIPTION: &'static str = "Controls a headless browser via WebDriver (thirtyfour) to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -604,6 +661,27 @@ impl AsyncTool for Tool {
                     .await
                     .context("JavaScript evaluation failed")?;
                 Ok(serde_json::to_string_pretty(ret.json())?)
+            }
+
+            BrowserAction::Extract => {
+                let selector = args
+                    .selector
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .context("'selector' is required for browser:extract")?;
+                let driver = reg.get_or_init().await?;
+                let ret = driver
+                    .execute(ensure_return("document.documentElement.outerHTML"), vec![])
+                    .await
+                    .context("Failed to read rendered HTML for extract")?;
+                let source = ret
+                    .json()
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("rendered HTML source was not a string"))?;
+                let result = extract_from_html(&source, selector)?;
+                Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
@@ -775,6 +853,52 @@ mod tests {
         // The second `return` is top-level (depth 0); the first is inside the
         // block and is correctly ignored.
         assert!(has_return_statement("if (x) { return 1; } return 2;"));
+    }
+
+    #[test]
+    fn extract_from_html_pulls_text_and_attrs() {
+        let html =
+            r#"<html><body><article class="post" id="a1"><h2>Title A</h2></article></body></html>"#;
+        let out = extract_from_html(html, "article.post h2").unwrap();
+        let items = out["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["text"], "Title A");
+        assert_eq!(out["count"], 1);
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[test]
+    fn extract_from_html_follows_descendant_anchor_href() {
+        let html = r#"<ul><li data-id="7"><a href="/doc/7">Read</a></li></ul>"#;
+        let out = extract_from_html(html, "li").unwrap();
+        let item = &out["items"][0];
+        assert_eq!(item["attrs"]["data-id"], "7");
+        assert_eq!(item["href"], "/doc/7");
+        assert_eq!(item["text"], "Read");
+    }
+
+    #[test]
+    fn extract_from_html_prefers_own_href() {
+        let html = r#"<a class="link" href="/self">link <a href="/child">nested</a></a>"#;
+        let out = extract_from_html(html, "a.link").unwrap();
+        assert_eq!(out["items"][0]["href"], "/self");
+    }
+
+    #[test]
+    fn extract_from_html_invalid_selector_errors() {
+        // A leading combinator (no left-hand compound) is invalid CSS.
+        assert!(extract_from_html("<html></html>", "> div").is_err());
+    }
+
+    #[test]
+    fn extract_from_html_truncates_over_max() {
+        let html = format!(
+            "<ul>{}</ul>",
+            std::iter::repeat_n("<li>x</li>", 220).collect::<String>()
+        );
+        let out = extract_from_html(&html, "li").unwrap();
+        assert_eq!(out["count"], 200);
+        assert_eq!(out["truncated"], true);
     }
 
     #[test]
