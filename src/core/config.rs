@@ -172,6 +172,10 @@ pub struct BrowserSettings {
     pub backend: String,
     /// CDP port to connect to (only used when `backend = "cdp"`).
     pub cdp_port: u16,
+    /// Launch the browser in headless mode (no visible window) by default.
+    /// Default is `false` — a visible browser window is used unless this is
+    /// set to `true`, or a browser tool call passes `headless: true` explicitly.
+    pub headless: bool,
 }
 
 impl Default for BrowserSettings {
@@ -179,6 +183,7 @@ impl Default for BrowserSettings {
         Self {
             backend: "webdriver".into(),
             cdp_port: 9222,
+            headless: false,
         }
     }
 }
@@ -505,7 +510,8 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[browser]\n",
             "# backend = \"webdriver\"  # or \"cdp\" to attach to a running Chrome\n",
-            "# cdp_port = 9222\n\n",
+            "# cdp_port = 9222\n",
+            "# headless = false  # true to launch without a visible window\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",
@@ -765,5 +771,33 @@ impl Config {
         );
         cfg.workspace_skills_dir = Some(ws_skills_dir);
         (cfg, err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_settings_default_is_visible() {
+        let settings = BrowserSettings::default();
+        assert!(
+            !settings.headless,
+            "browser.headless should default to false (visible window)"
+        );
+    }
+
+    #[test]
+    fn browser_settings_deserializes_headless() {
+        let toml_str = "backend = \"webdriver\"\ncdp_port = 9222\nheadless = true\n";
+        let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
+        assert!(settings.headless);
+    }
+
+    #[test]
+    fn browser_settings_missing_headless_defaults_false() {
+        let toml_str = "backend = \"cdp\"\ncdp_port = 9223\n";
+        let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
+        assert!(!settings.headless);
     }
 }

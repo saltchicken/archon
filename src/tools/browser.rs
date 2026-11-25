@@ -85,15 +85,17 @@ pub struct BrowserArgs {
     /// Max seconds to wait for `selector` to appear (default: 10).
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Whether to run the browser in headless mode. Set to `false` to launch a visible
-    /// browser window you can observe and interact with.
+    /// Whether to run the browser in headless mode (no visible window).
+    /// Set to `true` for headless, or `false` for a visible window you can
+    /// observe and interact with.
     ///
-    /// This is a *sticky* session setting: once a mode is established it persists across
-    /// subsequent calls, so only provide it when you want to (re)start the session in a
-    /// specific mode. When omitted, the current session's mode is kept (defaulting to
-    /// headless only when no session exists yet).
+    /// This is a *sticky* session setting: once a mode is established it persists
+    /// across subsequent calls, so only provide it when you want to (re)start the
+    /// session in a specific mode. When omitted, the current session's mode is
+    /// kept; if no session exists yet, the default comes from `browser.headless`
+    /// in config.toml (default: `false`, i.e. a visible window).
     ///
-    /// Ignored when `ARCHON_BROWSER_BACKEND=cdp` (attaching to an existing browser).
+    /// Ignored when `browser.backend` is set to `"cdp"` in config.toml (attaching to an existing browser).
     #[serde(default)]
     pub headless: Option<bool>,
 }
@@ -336,25 +338,27 @@ enum BackendType {
 }
 
 impl BackendType {
-    /// Resolve the backend to use. Environment variables override config:
-    /// - `ARCHON_BROWSER_BACKEND=cdp` overrides `browser.backend`
-    /// - `ARCHON_CDP_PORT` overrides `browser.cdp_port`
+    /// Resolve the backend from config:
+    /// - `browser.backend = "cdp"` enables CDP mode using `browser.cdp_port`
+    /// - anything else defaults to WebDriver (chromedriver)
     fn resolve(backend: &str, cdp_port: u16) -> Self {
-        // Env var takes priority over config.
-        let effective_backend =
-            std::env::var("ARCHON_BROWSER_BACKEND").unwrap_or_else(|_| backend.to_string());
-        let effective_port = std::env::var("ARCHON_CDP_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(cdp_port);
-
-        match effective_backend.as_str() {
-            "cdp" => Self::Cdp {
-                port: effective_port,
-            },
+        match backend {
+            "cdp" => Self::Cdp { port: cdp_port },
             _ => Self::WebDriver,
         }
     }
+}
+
+/// Resolve the default headless mode used when a tool call does not pass
+/// `headless` explicitly and no session exists yet.
+///
+/// `ARCHON_BROWSER_HEADLESS` (a boolean string) overrides
+/// `browser.headless` from config.toml, which defaults to `false` (visible).
+fn resolve_headless_default(config_default: bool) -> bool {
+    std::env::var("ARCHON_BROWSER_HEADLESS")
+        .ok()
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(config_default)
 }
 
 /// Attaches to an already-running Chrome via the Chrome DevTools Protocol.
@@ -708,7 +712,7 @@ impl BrowserRegistry {
             .get_or_init(|| {
                 Arc::new(Self {
                     session: Mutex::new(None),
-                    headless: Mutex::new(true),
+                    headless: Mutex::new(false),
                 })
             })
             .clone()
@@ -806,21 +810,28 @@ impl BrowserRegistry {
     /// `headless` is a *sticky* session setting:
     /// - `Some(h)` establishes/overrides the mode, reconnecting only if it differs
     ///   from the current session's mode.
-    /// - `None` keeps the current session's mode (falling back to the stored default,
-    ///   which is headless, when no session exists yet).
+    /// - `None` keeps the current session's mode. When no session exists yet,
+    ///   `default_headless` applies — this comes from `browser.headless` in
+    ///   config.toml (default: `false`, i.e. a visible browser window).
     ///
     /// This means the mode only has to be specified once; omitting it on later calls
-    /// no longer forces a reconnect back to headless.
+    /// no longer forces a reconnect back to a default.
     async fn get_or_init(
         &self,
         headless: Option<bool>,
+        default_headless: bool,
         backend_type: &BackendType,
     ) -> Result<Arc<dyn BrowserBackend>> {
         let stored_headless = *self.headless.lock().await;
-        let desired = headless.unwrap_or(stored_headless);
-        let mode_changed = headless.is_some_and(|h| h != stored_headless);
 
         let mut guard = self.session.lock().await;
+        let desired = match headless {
+            Some(h) => h,
+            None if guard.is_some() => stored_headless,
+            None => default_headless,
+        };
+        let mode_changed = desired != stored_headless;
+
         if let Some(ref existing) = *guard {
             if !mode_changed && existing.is_alive().await {
                 return Ok(Arc::clone(existing));
@@ -1115,7 +1126,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or attaches to a running Chrome via CDP when ARCHON_BROWSER_BACKEND=cdp.";
+    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or attaches to a running Chrome via CDP when browser.backend is set to cdp in config.toml. Runs with a visible window by default; set browser.headless = true in config.toml (or pass headless: true) for headless mode.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1123,6 +1134,7 @@ impl AsyncTool for Tool {
         let wait_secs = args.wait_secs.unwrap_or(DEFAULT_WAIT_SECS).clamp(1, 60);
         let backend_type =
             BackendType::resolve(&ctx.config.browser.backend, ctx.config.browser.cdp_port);
+        let default_headless = resolve_headless_default(ctx.config.browser.headless);
 
         match args.action {
             BrowserAction::Close => reg.close().await,
@@ -1146,7 +1158,7 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 backend.goto(parsed.as_str()).await?;
 
                 if let Some(sel) = args
@@ -1171,7 +1183,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Read => {
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 let sel = args
                     .selector
                     .as_deref()
@@ -1196,7 +1208,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 backend.click(sel, Duration::from_secs(wait_secs)).await?;
                 let url = backend.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
@@ -1213,7 +1225,7 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 backend
                     .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
                     .await?;
@@ -1230,7 +1242,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 let result = backend.evaluate(script).await?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
@@ -1242,14 +1254,14 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 let source = backend.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
-                let backend = reg.get_or_init(args.headless, &backend_type).await?;
+                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
                 let sel = args
                     .selector
                     .as_deref()
