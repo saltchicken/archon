@@ -40,7 +40,10 @@ pub struct ProcessArgs {
     #[serde(default)]
     command: String,
     /// Arguments for the executable (action=start). e.g. `["server.js"]` or `["watch", "-w", ".", "run"]`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     args: Vec<String>,
     /// Working directory (action=start); relative to the workspace root, or absolute. Defaults to the workspace root.
     #[serde(default)]

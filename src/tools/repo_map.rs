@@ -47,7 +47,10 @@ pub struct RepoMapArgs {
     #[serde(default)]
     symbol: String,
     /// Optional focus symbols or query terms when `action` is `map` (e.g. `["CoreEngine", "Provider"]`). Boosts PageRank personalization toward files defining or referencing these symbols.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     focus_symbols: Vec<String>,
     /// Optional crate name (e.g. `"ratatui"`, `"ratatui-textarea"`, `"tree_sitter"`) to inspect an installed Rust crate's source inside `~/.cargo/registry/src` instead of the workspace. Automatically resolves the version matching `Cargo.lock` (or the latest installed version in the registry cache).
     #[serde(default)]
@@ -59,10 +62,16 @@ pub struct RepoMapArgs {
     #[serde(default)]
     target_path: String,
     /// Optional glob patterns to filter included files (e.g. `["src/**/*.rs", "**/*.ts"]`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     include: Vec<String>,
     /// Optional glob patterns to exclude.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     exclude: Vec<String>,
     /// When `action` is `map`, whether to include leading doc comments above AST symbol signatures (default: true).
     #[serde(default = "default_true")]

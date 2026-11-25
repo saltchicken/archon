@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    utils::http::{validate_public_url, SsrfPolicy},
+    utils::http::{SsrfPolicy, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
 use reqwest::Url;

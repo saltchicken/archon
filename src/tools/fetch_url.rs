@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    utils::http::{build_pinned_client, decode_entities, validate_public_url, SsrfPolicy},
+    utils::http::{SsrfPolicy, build_pinned_client, decode_entities, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;

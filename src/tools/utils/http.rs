@@ -51,8 +51,10 @@ pub struct SsrfPolicy {
 
 impl SsrfPolicy {
     pub fn from_config(allow_private: bool, allowed_cidrs: &[String]) -> Self {
-        let parsed: Vec<IpNet> =
-            allowed_cidrs.iter().filter_map(|s| s.parse().ok()).collect();
+        let parsed: Vec<IpNet> = allowed_cidrs
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
         Self {
             allow_all_private: allow_private,
             allowed_cidrs: parsed,
@@ -107,7 +109,10 @@ pub async fn validate_public_url(url: &Url, policy: &SsrfPolicy) -> Result<Vec<S
     if resolved.is_empty() {
         bail!("DNS resolution returned no addresses for '{host_str}'");
     }
-    if let Some(addr) = resolved.iter().find(|a| is_forbidden_ip(a.ip()) && !policy.is_ip_allowed(a.ip())) {
+    if let Some(addr) = resolved
+        .iter()
+        .find(|a| is_forbidden_ip(a.ip()) && !policy.is_ip_allowed(a.ip()))
+    {
         bail!(
             "Security violation: host '{host_str}' resolved to private/reserved IP '{}'",
             addr.ip()

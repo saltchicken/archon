@@ -70,13 +70,19 @@ pub struct SkillArgs {
     #[serde(default)]
     pub command: Option<String>,
     /// Optional parent skill name(s) to inherit tools, hooks, typed args, and prompt from (e.g. `["base-rust"]`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+    )]
     pub extends: Option<Vec<String>>,
     /// If true, marks this skill as a reusable base skill that can be extended via `extends` but not invoked directly via `@name`.
     #[serde(default, rename = "abstract")]
     pub is_abstract: Option<bool>,
     /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`; prefix with `!` to exclude an inherited tool).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+    )]
     pub tools: Option<Vec<String>>,
     /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}`, `{{args}}`, or declared `{{arg_name}}` placeholders).
     #[serde(default)]

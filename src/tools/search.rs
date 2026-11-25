@@ -16,10 +16,16 @@ pub struct SearchArgs {
     #[serde(default)]
     path: String,
     /// Optional glob patterns to filter which files are searched (e.g. `["*.rs", "src/**/*.toml"]`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     include: Vec<String>,
     /// Optional glob patterns to exclude from search.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     exclude: Vec<String>,
     /// If true, treats `pattern` as a literal string instead of a regular expression.
     #[serde(default)]

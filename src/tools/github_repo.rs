@@ -74,10 +74,16 @@ pub struct GithubRepoArgs {
     #[serde(default)]
     pub pattern: String,
     /// Optional glob patterns to filter included files when `action` is `search` (e.g. `["*.rs", "src/**/*.ts"]`).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     pub include: Vec<String>,
     /// Optional glob patterns to exclude when `action` is `search`.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+    )]
     pub exclude: Vec<String>,
     /// If true during `search`, treats `pattern` as a literal string instead of a regular expression.
     #[serde(default)]
