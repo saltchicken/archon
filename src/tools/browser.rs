@@ -303,10 +303,13 @@ impl BrowserRegistry {
 /// auto-prepended; multi-statement scripts are passed through unchanged
 /// (the user is expected to include their own `return`).
 ///
-/// Detection: `return` is only recognised when it appears at a
-/// statement-start position (start of line, or immediately after `;`,
-/// `{`, or `}`), so that identifiers or CSS selectors containing the
-/// substring "return" (e.g. `.return-btn`) do not produce a false positive.
+/// Detection: only a *top-level* `return` (parenthesis depth 0 and brace
+/// depth 0) counts. `return`s nested inside a callback/function body, e.g.
+/// `[1,2,3].map(function (x) { return x * 2; })`, are deliberately ignored so
+/// that a `return` is still auto-prepended for the outer expression.
+/// String literals, template literals, and comments are skipped, so the
+/// substring "return" (e.g. in a CSS selector like `.return-btn`) never
+/// produces a false positive.
 fn ensure_return(script: &str) -> String {
     let trimmed = script.trim();
     if has_return_statement(trimmed) {
@@ -316,25 +319,140 @@ fn ensure_return(script: &str) -> String {
     }
 }
 
-/// Returns `true` if the script contains a `return` statement at a
-/// statement-start position (beginning of a line, or after `;`, `{`, `}`).
+/// Returns `true` if the script contains a *top-level* `return` statement.
+///
+/// A `return` only counts as top-level when it is **not** nested inside a
+/// function body (a `function (...) { ... }`, `function { ... }`, or
+/// `=> { ... }` body). This correctly ignores `return`s that belong to an
+/// inner callback (for example
+/// `[1,2,3].map(function (x) { return x * 2; })`), which would otherwise
+/// suppress the required top-level `return` and make the whole expression
+/// evaluate to `undefined` (serialised as `null`).
+///
+/// A `return` inside a *plain* block is still top-level, e.g.
+/// `if (x) { return 1; }` or `{ return 'a'; }`.
+///
+/// String literals, template literals, and line/block comments are skipped,
+/// so the substring "return" (e.g. inside a CSS selector such as
+/// `.return-btn`) never triggers a false positive.
 fn has_return_statement(script: &str) -> bool {
-    for line in script.lines() {
-        let trimmed = line.trim_start();
-        // `return` at the beginning of the line.
-        if trimmed.starts_with("return ") || trimmed.starts_with("return;") || trimmed == "return" {
-            return true;
+    let chars: Vec<char> = script.chars().collect();
+    let n = chars.len();
+    let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+
+    let mut i = 0;
+    let mut paren_depth: i32 = 0;
+    let mut brace_stack: Vec<bool> = Vec::new(); // true = function body
+    let mut fn_awaiting_paren = false; // saw `function`; a param-list `(` may follow
+    let mut fn_param_depth: Option<i32> = None; // open depth of a function param list
+    let mut next_brace_is_fn = false; // the next `{` opens a function body
+
+    while i < n {
+        let c = chars[i];
+
+        // Line comment: skip to the end of the line.
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
         }
-        // `return` inline after `;`, `{`, or `}`.
-        for (i, c) in line.char_indices() {
-            if matches!(c, ';' | '{' | '}' | ')') {
-                let rest = line[i + c.len_utf8()..].trim_start();
-                if rest.starts_with("return ") || rest.starts_with("return;") {
-                    return true;
+        // Block comment: skip to the closing `*/`.
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2; // consume the closing `*/` (or run off the end)
+            continue;
+        }
+        // String / template literal: skip to the matching (unescaped) quote.
+        if c == '"' || c == '\'' || c == '`' {
+            let quote = c;
+            i += 1;
+            while i < n && chars[i] != quote {
+                if chars[i] == '\\' {
+                    i += 1; // skip the escaped character
                 }
+                i += 1;
+            }
+            i += 1; // skip the closing quote (or run off the end)
+            continue;
+        }
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        // `function` keyword (whole word).
+        if c == 'f'
+            && chars[i..]
+                .iter()
+                .collect::<String>()
+                .starts_with("function")
+            && chars.get(i + 8).map(|ch| !is_ident(*ch)).unwrap_or(true)
+        {
+            fn_awaiting_paren = true;
+            next_brace_is_fn = true; // covers a paramless `function { ... }`
+            i += 8;
+            continue;
+        }
+
+        // Arrow `=>` (a `=` immediately followed by `>`).
+        if c == '=' && i + 1 < n && chars[i + 1] == '>' {
+            next_brace_is_fn = true;
+            i += 2;
+            continue;
+        }
+
+        match c {
+            '(' => {
+                paren_depth += 1;
+                if fn_awaiting_paren {
+                    fn_param_depth = Some(paren_depth);
+                    fn_awaiting_paren = false;
+                }
+                i += 1;
+            }
+            ')' => {
+                paren_depth -= 1;
+                if matches!(fn_param_depth, Some(d) if paren_depth == d - 1) {
+                    next_brace_is_fn = true;
+                    fn_param_depth = None;
+                }
+                i += 1;
+            }
+            '{' => {
+                brace_stack.push(next_brace_is_fn);
+                next_brace_is_fn = false;
+                fn_awaiting_paren = false;
+                i += 1;
+            }
+            '}' => {
+                brace_stack.pop();
+                i += 1;
+            }
+            'r' if paren_depth == 0 => {
+                let is_word = chars.get(i + 6).map(|ch| !is_ident(*ch)).unwrap_or(true);
+                if chars[i..].iter().collect::<String>().starts_with("return") && is_word {
+                    // A top-level `return` unless we are nested inside a
+                    // function body (a callback), in which case it is not the
+                    // top-level return the driver needs.
+                    if !brace_stack.iter().any(|&b| b) {
+                        return true;
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                // Any other token ends a pending `function`/`=>` body.
+                fn_awaiting_paren = false;
+                next_brace_is_fn = false;
+                i += 1;
             }
         }
     }
+
     false
 }
 
@@ -611,6 +729,52 @@ mod tests {
         assert!(has_return_statement("let x = 1; return x;"));
         assert!(has_return_statement("{ return 'a'; }"));
         assert!(has_return_statement("if (x) return y; else return z;"));
+    }
+
+    #[test]
+    fn ensure_return_fixes_callback_false_positive() {
+        // A `return` inside a callback must not suppress the top-level `return`
+        // (this is the real-world bug that produced `null` from
+        // `[1,2,3].map(function (x) { return x * 2; }).length`).
+        assert_eq!(
+            ensure_return("[1,2,3].map(function (x) { return x * 2; }).length"),
+            "return [1,2,3].map(function (x) { return x * 2; }).length"
+        );
+    }
+
+    #[test]
+    fn ensure_return_fixes_arrow_callback_false_positive() {
+        assert_eq!(
+            ensure_return("[1,2,3].map((x) => x * 2).length"),
+            "return [1,2,3].map((x) => x * 2).length"
+        );
+    }
+
+    #[test]
+    fn has_return_statement_ignores_callback_return() {
+        assert!(!has_return_statement(
+            "[1,2,3].map(function (x) { return x; }).length"
+        ));
+        assert!(!has_return_statement(
+            "[1,2,3].forEach(function (x) { return; })"
+        ));
+        assert!(!has_return_statement(
+            "JSON.stringify({ fn: function () { return 1; } })"
+        ));
+    }
+
+    #[test]
+    fn has_return_statement_ignores_string_and_comment_return() {
+        assert!(!has_return_statement("JSON.stringify({ s: 'return 1' })"));
+        assert!(!has_return_statement("// return 1\ndocument.title"));
+        assert!(!has_return_statement("/* return 1 */\ndocument.title"));
+    }
+
+    #[test]
+    fn has_return_statement_allows_top_level_return_after_block() {
+        // The second `return` is top-level (depth 0); the first is inside the
+        // block and is correctly ignored.
+        assert!(has_return_statement("if (x) { return 1; } return 2;"));
     }
 
     #[test]
