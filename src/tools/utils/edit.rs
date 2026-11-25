@@ -46,12 +46,13 @@ fn locate_hunk_span(
         }
     }
 
-    // Fallback: whitespace-insensitive line matching for multi-line searches.
-    // Handles trailing-whitespace and minor indentation differences that
-    // commonly occur when an LLM reconstructs code from memory.
+    // Fallback: whitespace-insensitive line matching under `canonical_line`.
+    // Tolerates leading indentation, internal-whitespace, and stray outer
+    // blank-line differences that commonly occur when an LLM reconstructs code
+    // from memory. Applies to single-line searches too; ambiguous windows are
+    // still rejected (see `find_canonical_match`).
     if matches.is_empty()
-        && search.contains('\n')
-        && let Some((start, end)) = find_whitespace_insensitive_match(content, search)
+        && let Some((start, end)) = find_canonical_match(content, search)
     {
         let matched_text = &content[start..end];
         let target_crlf = matched_text.contains("\r\n");
@@ -61,7 +62,7 @@ fn locate_hunk_span(
     match matches.as_slice() {
         [] => {
             let hint = nearest_match_hint(content, search);
-            bail!("{hunk_label}: exact search_string not found in {file_path}.{hint}")
+            bail!("{hunk_label}: search_string not found in {file_path}.{hint}")
         }
         &[start] => Ok((
             start,
@@ -75,37 +76,57 @@ fn locate_hunk_span(
     }
 }
 
-/// Finds a multi-line search string in content by comparing lines with
-/// trailing whitespace ignored. Returns the byte span of the matched region.
-fn find_whitespace_insensitive_match(content: &str, search: &str) -> Option<(usize, usize)> {
-    let search_lines: Vec<&str> = search.lines().collect();
-    if search_lines.len() < 2 {
+/// Canonical form of a line used for *matching only* (never for the
+/// replacement): both ends trimmed and internal whitespace runs collapsed to
+/// single spaces. Two lines are "equal" under this form when their non-whitespace
+/// content and token order are identical, which tolerates leading indentation,
+/// tabs-vs-spaces, and extra internal spacing.
+fn canonical_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Finds a search string in content by comparing lines under [`canonical_line`].
+/// Tolerates leading indentation, internal-whitespace, and leading/trailing
+/// blank-line differences that commonly occur when an LLM reconstructs code
+/// from memory. Works for single-line searches too.
+///
+/// The matched region spans whole lines (including their original leading
+/// indentation) and excludes the final newline; callers splice the replacement
+/// in verbatim, so the replacement should include any indentation it wants to
+/// preserve. Ambiguous windows (more than one candidate) are rejected by
+/// returning `None`, so a wrong region is never silently edited.
+fn find_canonical_match(content: &str, search: &str) -> Option<(usize, usize)> {
+    // Canonical search lines, dropping leading/trailing blank lines so a stray
+    // blank line in the model's search string does not break matching.
+    let mut search_lines: Vec<String> = search.lines().map(canonical_line).collect();
+    while search_lines.first().is_some_and(|l| l.is_empty()) {
+        search_lines.remove(0);
+    }
+    while search_lines.last().is_some_and(|l| l.is_empty()) {
+        search_lines.pop();
+    }
+    let window = search_lines.len();
+    if window == 0 {
         return None;
     }
 
-    // Build (byte_offset, line_text_without_newline) for each content line.
-    let mut content_lines: Vec<(usize, &str)> = Vec::new();
+    // (byte_offset, trimmed_len, canonical) per content line. Using
+    // split_inclusive keeps byte offsets stable so spans map back into `content`.
+    let mut content_lines: Vec<(usize, usize, String)> = Vec::new();
     let mut offset = 0usize;
     for line in content.split_inclusive('\n') {
         let text = line.trim_end_matches(['\n', '\r']);
-        content_lines.push((offset, text));
+        content_lines.push((offset, text.len(), canonical_line(text)));
         offset += line.len();
     }
 
-    if content_lines.len() < search_lines.len() {
+    if content_lines.len() < window {
         return None;
     }
 
-    let search_trimmed: Vec<String> = search_lines
-        .iter()
-        .map(|l| l.trim_end().to_string())
-        .collect();
-
     let mut candidates: Vec<usize> = Vec::new();
-    let window = search_lines.len();
     for i in 0..=(content_lines.len() - window) {
-        let all_match =
-            (0..window).all(|j| content_lines[i + j].1.trim_end() == search_trimmed[j].as_str());
+        let all_match = (0..window).all(|j| content_lines[i + j].2 == search_lines[j]);
         if all_match {
             candidates.push(i);
         }
@@ -117,35 +138,41 @@ fn find_whitespace_insensitive_match(content: &str, search: &str) -> Option<(usi
 
     let start_byte = content_lines[*start_line].0;
     let end_line_idx = start_line + window - 1;
-    let end_byte = content_lines[end_line_idx].0 + content_lines[end_line_idx].1.len();
+    let end_byte = content_lines[end_line_idx].0 + content_lines[end_line_idx].1;
 
     Some((start_byte, end_byte))
 }
 
-/// Produces a short hint for the error message by finding the closest
-/// line-based match, helping the model correct its search_string.
+/// Produces an actionable hint for the error message by locating the closest
+/// line-based match and showing the real file content with line numbers and a
+/// per-line match marker, so the model can copy the exact text (including
+/// indentation) and retry in a single step. Always shown when any line is
+/// partially similar; empty only when nothing in the file resembles the search.
 fn nearest_match_hint(content: &str, search: &str) -> String {
-    let search_lines: Vec<&str> = search.lines().collect();
-    if search_lines.len() < 2 {
-        return String::new();
+    let mut search_lines: Vec<String> = search.lines().map(canonical_line).collect();
+    while search_lines.first().is_some_and(|l| l.is_empty()) {
+        search_lines.remove(0);
     }
-
-    let content_lines: Vec<&str> = content.lines().collect();
-    if content_lines.len() < search_lines.len() {
-        return String::new();
+    while search_lines.last().is_some_and(|l| l.is_empty()) {
+        search_lines.pop();
     }
-
-    let search_trimmed: Vec<String> = search_lines
-        .iter()
-        .map(|l| l.trim_end().to_string())
-        .collect();
     let window = search_lines.len();
+    if window == 0 {
+        return String::new();
+    }
+
+    let raw_lines: Vec<&str> = content.lines().collect();
+    if raw_lines.len() < window {
+        return String::new();
+    }
+
+    let canon_lines: Vec<String> = raw_lines.iter().map(|l| canonical_line(l)).collect();
 
     let mut best_score = 0usize;
     let mut best_start = 0usize;
-    for i in 0..=(content_lines.len() - window) {
+    for i in 0..=(raw_lines.len() - window) {
         let score = (0..window)
-            .filter(|&j| content_lines[i + j].trim_end() == search_trimmed[j].as_str())
+            .filter(|&j| canon_lines[i + j] == search_lines[j])
             .count();
         if score > best_score {
             best_score = score;
@@ -153,28 +180,34 @@ fn nearest_match_hint(content: &str, search: &str) -> String {
         }
     }
 
-    if best_score >= window.saturating_sub(1) && best_score < window {
-        // Very close match (off by 1 line) — show a snippet.
-        let snippet: String = content_lines[best_start..best_start + window]
-            .iter()
-            .take(4)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "\n  Closest match found at line {} ({} of {} lines matched).\n  Did you mean:\n    {}",
-            best_start + 1,
-            best_score,
-            window,
-            snippet
-                .lines()
-                .map(|l| format!("    {}", l))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
-    } else {
-        String::new()
+    if best_score == 0 {
+        return String::new();
     }
+
+    let show = window.min(8);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "\n  Closest region near line {} ({} of {} line(s) matched under whitespace normalization).\n",
+        best_start + 1,
+        best_score,
+        window
+    ));
+    out.push_str("  File lines (copy the exact text, including indentation, and retry):\n");
+    for (j, expected) in search_lines.iter().take(show).enumerate() {
+        let idx = best_start + j;
+        let matched = canon_lines[idx] == *expected;
+        let marker = if matched { "  " } else { "!=" };
+        out.push_str(&format!(
+            "    {:>4} {} {}\n",
+            idx + 1,
+            marker,
+            raw_lines[idx]
+        ));
+    }
+    if window > 8 {
+        out.push_str("      ... (window truncated)\n");
+    }
+    out
 }
 
 pub fn apply_hunks_to_str(content: &str, file_path: &str, edits: &[EditHunk]) -> Result<String> {
@@ -277,15 +310,100 @@ mod tests {
     }
 
     #[test]
-    fn single_line_search_still_requires_exact() {
-        // Single-line searches don't use the fallback.
+    fn single_line_exact_substring_match() {
+        // Single-line searches that are exact substrings still match (Tier 0).
         let content = "let x = 1;   \n";
         let hunk = EditHunk {
             search_string: "let x = 1;".into(),
             replace_string: "let x = 2;".into(),
         };
-        // Exact match works fine here.
         let result = apply_hunks_to_str(content, "test.rs", &[hunk]).unwrap();
         assert_eq!(result, "let x = 2;   \n");
+    }
+
+    #[test]
+    fn single_line_internal_whitespace_matches_via_canonical() {
+        // Internal-whitespace differences no longer block single-line edits.
+        let content = "fn foo() {\n    let x = 1;\n}\n";
+        let hunk = EditHunk {
+            search_string: "let x   =   1;".into(),
+            replace_string: "    let x = 2;".into(),
+        };
+        let result = apply_hunks_to_str(content, "test.rs", &[hunk]).unwrap();
+        assert_eq!(result, "fn foo() {\n    let x = 2;\n}\n");
+    }
+
+    #[test]
+    fn indentation_drift_multiline_matches() {
+        // File uses 4-space indent; search uses 2-space indent.
+        let content = "fn foo() {\n    let x = 1;\n    let y = 2;\n}\n";
+        let hunk = EditHunk {
+            search_string: "fn foo() {\n  let x = 1;\n  let y = 2;\n}".into(),
+            replace_string: "fn bar() {\n    let x = 9;\n    let y = 9;\n}".into(),
+        };
+        let result = apply_hunks_to_str(content, "test.rs", &[hunk]).unwrap();
+        assert_eq!(result, "fn bar() {\n    let x = 9;\n    let y = 9;\n}\n");
+    }
+
+    #[test]
+    fn outer_blank_lines_in_search_are_ignored() {
+        // A leading blank line in the search string is tolerated.
+        let content = "fn foo() {\n    let x = 1;\n}\n";
+        let hunk = EditHunk {
+            search_string: "\nfn foo() {\n    let x = 1;\n}".into(),
+            replace_string: "fn bar() {\n    let y = 2;\n}".into(),
+        };
+        let result = apply_hunks_to_str(content, "test.rs", &[hunk]).unwrap();
+        assert_eq!(result, "fn bar() {\n    let y = 2;\n}\n");
+    }
+
+    #[test]
+    fn ambiguous_single_line_fails() {
+        // Two identical lines → match is ambiguous → rejected (no silent edit).
+        let content = "let a = 1;\nlet a = 1;\n";
+        let hunk = EditHunk {
+            search_string: "let a = 1;".into(),
+            replace_string: "let a = 2;".into(),
+        };
+        let result = apply_hunks_to_str(content, "test.rs", &[hunk]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn canonical_match_preserves_file_line_ending() {
+        // CRLF file with an LF/indentation-drifted search must not corrupt endings.
+        let content = "fn foo() {\r\n    let x = 1;\r\n}\r\n";
+        let hunk = EditHunk {
+            search_string: "fn foo() {\n  let x = 1;\n}".into(),
+            replace_string: "fn bar() {\n    let y = 2;\n}".into(),
+        };
+        let result = apply_hunks_to_str(content, "crlf.rs", &[hunk]).unwrap();
+        assert_eq!(result, "fn bar() {\r\n    let y = 2;\r\n}\r\n");
+    }
+
+    #[test]
+    fn hint_shows_numbered_region_with_markers() {
+        let content = "fn foo() {\n    let x = 1;\n    let z = 0;\n}\n";
+        // One line's indentation differs → partial match, expect a hint.
+        let hint = nearest_match_hint(content, "fn foo() {\nlet x = 1;\n}");
+        assert!(
+            hint.contains("line 1"),
+            "hint should reference line numbers: {hint}"
+        );
+        assert!(
+            hint.contains("fn foo() {"),
+            "hint should show file content: {hint}"
+        );
+        assert!(
+            hint.contains("!="),
+            "hint should mark a mismatched line: {hint}"
+        );
+    }
+
+    #[test]
+    fn hint_empty_when_no_similarity() {
+        let content = "fn foo() {\n    let x = 1;\n}\n";
+        let hint = nearest_match_hint(content, "completely unrelated text here");
+        assert_eq!(hint, String::new());
     }
 }
