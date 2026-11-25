@@ -126,6 +126,7 @@ dependencies = [
  "globset",
  "ignore",
  "image",
+ "ipnet",
  "pathdiff",
  "ratatui",
  "ratatui-textarea",

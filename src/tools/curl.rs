@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    utils::http::{build_pinned_client, validate_public_url},
+    utils::http::{build_pinned_client, validate_public_url, SsrfPolicy},
 };
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -225,7 +225,11 @@ impl AsyncTool for Tool {
         let start = Instant::now();
         let mut resp = None;
         for hop in 0..=MAX_REDIRECTS {
-            let addrs = validate_public_url(&target_url, ctx.config.app.http_allow_private).await?;
+            let policy = SsrfPolicy::from_config(
+                ctx.config.app.http_allow_private,
+                &ctx.config.app.http_allowed_cidrs,
+            );
+            let addrs = validate_public_url(&target_url, &policy).await?;
             let client = build_pinned_client(&target_url, &addrs)?;
 
             let req = build_request(&client, &target_url, method, &args)
