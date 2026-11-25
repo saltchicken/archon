@@ -128,6 +128,7 @@ pub struct Config {
     #[serde(skip)]
     pub workspace_memory: Memory,
     pub workspace_snapshot: WorkspaceSnapshotSettings,
+    pub browser: BrowserSettings,
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
     pub models: Vec<ModelPreset>,
@@ -158,6 +159,26 @@ impl Default for DotfilesSettings {
         Self {
             allowed_dirs: vec!["*".into()],
             repo_url: "saltchicken/dotfiles.git".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserSettings {
+    /// Browser automation backend: `"webdriver"` (default) or `"cdp"`.
+    /// When `"cdp"`, Archon attaches to an already-running Chrome via the
+    /// Chrome DevTools Protocol instead of spawning chromedriver.
+    pub backend: String,
+    /// CDP port to connect to (only used when `backend = "cdp"`).
+    pub cdp_port: u16,
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            backend: "webdriver".into(),
+            cdp_port: 9222,
         }
     }
 }
@@ -356,6 +377,7 @@ impl Default for Config {
             global_memory: Memory::default(),
             workspace_memory: Memory::empty(),
             workspace_snapshot: WorkspaceSnapshotSettings::default(),
+            browser: BrowserSettings::default(),
             ollama: EndpointSettings {
                 api_key: String::new(),
                 base_url: "http://localhost:11434".into(),
@@ -481,6 +503,9 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# http_allow_private = false\n",
             "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
             "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
+            "[browser]\n",
+            "# backend = \"webdriver\"  # or \"cdp\" to attach to a running Chrome\n",
+            "# cdp_port = 9222\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",

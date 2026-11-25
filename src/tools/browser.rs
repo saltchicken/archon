@@ -336,13 +336,21 @@ enum BackendType {
 }
 
 impl BackendType {
-    fn from_env() -> Self {
-        match std::env::var("ARCHON_BROWSER_BACKEND").ok().as_deref() {
-            Some("cdp") => Self::Cdp {
-                port: std::env::var("ARCHON_CDP_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(9222),
+    /// Resolve the backend to use. Environment variables override config:
+    /// - `ARCHON_BROWSER_BACKEND=cdp` overrides `browser.backend`
+    /// - `ARCHON_CDP_PORT` overrides `browser.cdp_port`
+    fn resolve(backend: &str, cdp_port: u16) -> Self {
+        // Env var takes priority over config.
+        let effective_backend =
+            std::env::var("ARCHON_BROWSER_BACKEND").unwrap_or_else(|_| backend.to_string());
+        let effective_port = std::env::var("ARCHON_CDP_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(cdp_port);
+
+        match effective_backend.as_str() {
+            "cdp" => Self::Cdp {
+                port: effective_port,
             },
             _ => Self::WebDriver,
         }
@@ -741,10 +749,13 @@ impl BrowserRegistry {
         bail!("Timed out waiting for `chromedriver` to become ready at {wd_url}");
     }
 
-    async fn connect_new(headless: bool) -> Result<Arc<dyn BrowserBackend>> {
-        match BackendType::from_env() {
+    async fn connect_new(
+        headless: bool,
+        backend_type: &BackendType,
+    ) -> Result<Arc<dyn BrowserBackend>> {
+        match backend_type {
             BackendType::Cdp { port } => {
-                let backend = CdpBackend::connect(port).await?;
+                let backend = CdpBackend::connect(*port).await?;
                 Ok(Arc::new(backend))
             }
             BackendType::WebDriver => Self::connect_webdriver(headless).await,
@@ -800,7 +811,11 @@ impl BrowserRegistry {
     ///
     /// This means the mode only has to be specified once; omitting it on later calls
     /// no longer forces a reconnect back to headless.
-    async fn get_or_init(&self, headless: Option<bool>) -> Result<Arc<dyn BrowserBackend>> {
+    async fn get_or_init(
+        &self,
+        headless: Option<bool>,
+        backend_type: &BackendType,
+    ) -> Result<Arc<dyn BrowserBackend>> {
         let stored_headless = *self.headless.lock().await;
         let desired = headless.unwrap_or(stored_headless);
         let mode_changed = headless.is_some_and(|h| h != stored_headless);
@@ -826,7 +841,7 @@ impl BrowserRegistry {
             *self.headless.lock().await = desired;
         }
 
-        let backend = Self::connect_new(desired).await?;
+        let backend = Self::connect_new(desired, backend_type).await?;
         let cloned = Arc::clone(&backend);
         *guard = Some(backend);
         Ok(cloned)
@@ -1106,6 +1121,8 @@ impl AsyncTool for Tool {
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let reg = BrowserRegistry::global();
         let wait_secs = args.wait_secs.unwrap_or(DEFAULT_WAIT_SECS).clamp(1, 60);
+        let backend_type =
+            BackendType::resolve(&ctx.config.browser.backend, ctx.config.browser.cdp_port);
 
         match args.action {
             BrowserAction::Close => reg.close().await,
@@ -1129,7 +1146,7 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 backend.goto(parsed.as_str()).await?;
 
                 if let Some(sel) = args
@@ -1154,7 +1171,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Read => {
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 let sel = args
                     .selector
                     .as_deref()
@@ -1179,7 +1196,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 backend.click(sel, Duration::from_secs(wait_secs)).await?;
                 let url = backend.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
@@ -1196,7 +1213,7 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 backend
                     .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
                     .await?;
@@ -1213,7 +1230,7 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 let result = backend.evaluate(script).await?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
@@ -1225,14 +1242,14 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 let source = backend.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
-                let backend = reg.get_or_init(args.headless).await?;
+                let backend = reg.get_or_init(args.headless, &backend_type).await?;
                 let sel = args
                     .selector
                     .as_deref()
