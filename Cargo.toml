@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 arboard = { version = "3.7", features = ["wayland-data-control"] }
+async-trait = "0.1"
 base64 = "0.23.1"
 chrono = { version = "0.4", features = ["serde"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
@@ -34,6 +35,7 @@ tempfile = "3.27"
 textwrap = "0.16"
 thirtyfour = "0.38"
 tokio = { version = "1.54", features = ["full", "process"] }
+tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml = "1.2.1"
 tracing = "0.1"
