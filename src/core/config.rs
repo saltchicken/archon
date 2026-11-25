@@ -308,7 +308,6 @@ impl Default for AppSettings {
             .map(String::from)
             .into(),
             http_allow_private: false,
-            http_allow_private: false,
             read_roots: Vec::new(),
             http_allowed_cidrs: Vec::new(),
         }

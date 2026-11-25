@@ -1,4 +1,7 @@
-use super::{AsyncTool, ToolContext, utils::http::validate_public_url};
+use super::{
+    AsyncTool, ToolContext,
+    utils::http::{validate_public_url, SsrfPolicy},
+};
 use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use schemars::JsonSchema;
@@ -373,7 +376,11 @@ impl AsyncTool for Tool {
                 let parsed =
                     Url::parse(raw_url).with_context(|| format!("Invalid URL: '{raw_url}'"))?;
 
-                validate_public_url(&parsed, ctx.config.app.http_allow_private).await?;
+                let policy = SsrfPolicy::from_config(
+                    ctx.config.app.http_allow_private,
+                    &ctx.config.app.http_allowed_cidrs,
+                );
+                validate_public_url(&parsed, &policy).await?;
 
                 let driver = reg.get_or_init().await?;
                 driver
