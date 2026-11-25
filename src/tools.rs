@@ -1,4 +1,5 @@
 mod approval;
+pub(crate) mod browser;
 mod cargo;
 mod create_file;
 mod curl;
@@ -761,6 +762,16 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "packages",
         ],
         "process" => &["start", "list", "output", "poll", "kill", "clean"],
+        "browser" => &[
+            "goto",
+            "read",
+            "click",
+            "type",
+            "eval",
+            "screenshot",
+            "status",
+            "close",
+        ],
         _ => &[],
     }
 }
@@ -794,6 +805,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         }
         "process" => {
             "[start|list|output|poll|kill|clean] [command=... args=...] [id=...] [tail_lines=N | wait_ms=N]"
+        }
+        "browser" => {
+            "[goto|read|click|type|eval|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...]"
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
@@ -941,6 +955,7 @@ macro_rules! register_tools {
 }
 
 register_tools! {
+    async: browser,
     async: cargo,
     blocking: create_file,
     blocking: dotfiles,
