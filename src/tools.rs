@@ -16,6 +16,7 @@ mod process;
 pub(crate) mod progress;
 mod read_file;
 mod repo_map;
+mod schedule;
 mod search;
 mod session;
 mod skill;
@@ -862,6 +863,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "status",
             "close",
         ],
+        "schedule" => &["list", "logs", "run", "sync", "clean"],
         "sqlite" => &["tables", "schema", "query"],
         _ => &[],
     }
@@ -901,6 +903,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "browser" => {
             "[goto|read|click|type|eval|extract|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...] [headless=true|false]"
         }
+        "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
@@ -1063,6 +1066,7 @@ register_tools! {
     async: process,
     blocking: read_file,
     blocking: repo_map,
+    blocking: schedule,
     blocking: search,
     blocking: session,
     blocking: skill,

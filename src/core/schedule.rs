@@ -5,7 +5,9 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     collections::HashSet,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -14,6 +16,14 @@ const MANAGED_HEADER_PREFIX: &str = "# Managed by archon schedule sync";
 const UNIT_PREFIX: &str = "archon-sched-";
 
 pub fn handle_command(cmd: ScheduleCommand, config: &Config) -> Result<()> {
+    let out = execute_command(cmd, config)?;
+    if !out.is_empty() {
+        println!("{out}");
+    }
+    Ok(())
+}
+
+pub fn execute_command(cmd: ScheduleCommand, config: &Config) -> Result<String> {
     match cmd {
         ScheduleCommand::Sync { global } => sync_schedules(config, global),
         ScheduleCommand::List { global } => list_schedules(config, global),
@@ -270,7 +280,7 @@ fn schedules_for_scope(config: &Config, global: bool) -> &[ScheduleConfig] {
     }
 }
 
-fn sync_schedules(config: &Config, global: bool) -> Result<()> {
+fn sync_schedules(config: &Config, global: bool) -> Result<String> {
     let (scope, working_dir) = resolve_scope(config, global, true)?;
     let schedules = schedules_for_scope(config, global);
     let unit_dir = systemd_user_dir()?;
@@ -378,20 +388,20 @@ fn sync_schedules(config: &Config, global: bool) -> Result<()> {
         }
     }
 
-    println!(
+    Ok(format!(
         "Synced schedules for scope '{scope}': {enabled_count} enabled, {disabled_count} disabled, {removed} stale unit file(s) removed."
-    );
-    Ok(())
+    ))
 }
 
-fn list_schedules(config: &Config, global: bool) -> Result<()> {
+fn list_schedules(config: &Config, global: bool) -> Result<String> {
     let (scope, _) = resolve_scope(config, global, true)?;
     let schedules = schedules_for_scope(config, global);
+    let mut out = String::new();
 
     if schedules.is_empty() {
-        println!("No schedules configured for scope '{scope}'.");
+        let _ = writeln!(out, "No schedules configured for scope '{scope}'.");
     } else {
-        println!("Configured schedules (scope: {scope}):");
+        let _ = writeln!(out, "Configured schedules (scope: {scope}):");
         for sched in schedules {
             let state = if sched.enabled { "enabled" } else { "disabled" };
             let skill = sched.skill.as_deref().unwrap_or("-");
@@ -416,57 +426,82 @@ fn list_schedules(config: &Config, global: bool) -> Result<()> {
             } else {
                 "tools: default".to_string()
             };
-            println!(
+            let _ = writeln!(
+                out,
                 "  - {} [{}] | on_calendar: {} | skill: {} | {} | {}",
                 sched.name, state, sched.on_calendar, skill, tools_info, save
             );
         }
     }
 
-    println!("\nActive systemd user timers:");
+    let _ = writeln!(out, "\nActive systemd user timers:");
     let pattern = format!("{}*", scope_unit_prefix(&scope));
-    let status = Command::new("systemctl")
+    let output = Command::new("systemctl")
         .args(["--user", "list-timers", "--all", &pattern, "--no-pager"])
-        .status()
+        .output()
         .context("Failed to execute `systemctl --user list-timers`")?;
-    if !status.success() {
-        bail!("`systemctl --user list-timers` exited with status {status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "`systemctl --user list-timers` failed: {}",
+            if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            }
+        );
     }
-    Ok(())
+    out.push_str(&String::from_utf8_lossy(&output.stdout));
+    Ok(out.trim_end().to_string())
 }
 
-fn run_schedule(config: &Config, name: &str, global: bool) -> Result<()> {
+fn run_schedule(config: &Config, name: &str, global: bool) -> Result<String> {
     let (scope, _) = resolve_scope(config, global, false)?;
     let service_name = format!("{}.service", unit_base_name(&scope, name));
-    println!("Starting {service_name}...");
     run_systemctl(&["start", &service_name], false)?;
-    println!("Completed {service_name}.");
-    Ok(())
+    Ok(format!("Completed {service_name}."))
 }
 
-fn logs_schedule(config: &Config, name: Option<&str>, lines: usize, global: bool) -> Result<()> {
+fn logs_schedule(
+    config: &Config,
+    name: Option<&str>,
+    lines: usize,
+    global: bool,
+) -> Result<String> {
     let (scope, _) = resolve_scope(config, global, false)?;
     let unit_filter = match name {
         Some(n) => format!("{}.service", unit_base_name(&scope, n)),
         None => format!("{}*.service", scope_unit_prefix(&scope)),
     };
     let lines_str = lines.to_string();
-    let status = Command::new("journalctl")
+    let output = Command::new("journalctl")
         .args(["--user", "-u", &unit_filter, "-n", &lines_str, "--no-pager"])
-        .status()
+        .output()
         .context("Failed to execute `journalctl --user`")?;
-    if !status.success() {
-        bail!("`journalctl --user` exited with status {status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "`journalctl --user` failed: {}",
+            if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            }
+        );
     }
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+    Ok(if stdout.is_empty() {
+        format!("No journal entries found for {unit_filter}.")
+    } else {
+        stdout
+    })
 }
 
-fn clean_schedules(config: &Config, global: bool) -> Result<()> {
+fn clean_schedules(config: &Config, global: bool) -> Result<String> {
     let (scope, _) = resolve_scope(config, global, false)?;
     let unit_dir = systemd_user_dir()?;
     if !unit_dir.exists() {
-        println!("No systemd user unit directory found; nothing to clean.");
-        return Ok(());
+        return Ok("No systemd user unit directory found; nothing to clean.".to_string());
     }
 
     let prefix = scope_unit_prefix(&scope);
@@ -490,6 +525,7 @@ fn clean_schedules(config: &Config, global: bool) -> Result<()> {
     if removed > 0 {
         run_systemctl(&["daemon-reload"], false)?;
     }
-    println!("Cleaned {removed} managed unit file(s) for scope '{scope}'.");
-    Ok(())
+    Ok(format!(
+        "Cleaned {removed} managed unit file(s) for scope '{scope}'."
+    ))
 }

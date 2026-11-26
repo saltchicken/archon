@@ -334,6 +334,8 @@ impl Default for AppSettings {
                 "skill:list",
                 "skill:read",
                 "skill:check",
+                "schedule:list",
+                "schedule:logs",
                 "sqlite:tables",
                 "sqlite:schema",
                 "sqlite:query",
