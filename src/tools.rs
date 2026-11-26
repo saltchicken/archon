@@ -19,6 +19,7 @@ mod repo_map;
 mod search;
 mod session;
 mod skill;
+mod sqlite;
 mod subagent;
 mod system;
 pub(crate) mod utils;
@@ -861,6 +862,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "status",
             "close",
         ],
+        "sqlite" => &["tables", "schema", "query"],
         _ => &[],
     }
 }
@@ -899,6 +901,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "browser" => {
             "[goto|read|click|type|eval|extract|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...] [headless=true|false]"
         }
+        "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
         _ => "[key=value | JSON]",
@@ -1063,6 +1066,7 @@ register_tools! {
     blocking: search,
     blocking: session,
     blocking: skill,
+    blocking: sqlite,
     async: subagent,
     async: system,
     blocking: workspace_snapshot,

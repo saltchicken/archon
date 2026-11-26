@@ -334,6 +334,9 @@ impl Default for AppSettings {
                 "skill:list",
                 "skill:read",
                 "skill:check",
+                "sqlite:tables",
+                "sqlite:schema",
+                "sqlite:query",
             ]
             .map(String::from)
             .into(),
