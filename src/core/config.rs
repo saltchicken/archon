@@ -334,6 +334,7 @@ impl Default for AppSettings {
                 "sqlite:tables",
                 "sqlite:schema",
                 "sqlite:query",
+                "todo:*",
             ]
             .map(String::from)
             .into(),
@@ -511,7 +512,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# allow_hidden = false\n",
             "# http_allow_private = false\n",
             "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
-            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
+            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"todo\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",

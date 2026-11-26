@@ -23,6 +23,7 @@ mod skill;
 mod sqlite;
 mod subagent;
 mod system;
+pub mod todo;
 pub(crate) mod utils;
 pub mod workspace_snapshot;
 
@@ -892,6 +893,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "schedule" => &["list", "logs", "run", "sync", "clean"],
         "sqlite" => &["tables", "schema", "query"],
+        "todo" => &["list", "add", "update", "complete", "remove", "clear"],
         _ => &[],
     }
 }
@@ -932,6 +934,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         }
         "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
+        "todo" => {
+            "[list|add|update|complete|remove|clear] [id=N] [title=...] [status=pending|in_progress|done] [priority=low|medium|high]"
+        }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
         _ => "[key=value | JSON]",
@@ -1100,6 +1105,7 @@ register_tools! {
     blocking: sqlite,
     async: subagent,
     async: system,
+    blocking: todo,
     blocking: workspace_snapshot,
 }
 

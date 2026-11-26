@@ -53,6 +53,10 @@ pub fn compose_system_prompt(
         sections.push(mem_block);
     }
 
+    if let Some(todo_block) = crate::tools::todo::format_active_todos_for_prompt(config) {
+        sections.push(todo_block);
+    }
+
     if let Some(skill_name) = active_skill
         && let Some(skill) = find_skill(config, skill_name)
     {
