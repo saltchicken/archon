@@ -171,14 +171,15 @@ fn open_todo_db(config: &Config) -> Result<Connection> {
          PRAGMA synchronous = NORMAL;
 
          CREATE TABLE IF NOT EXISTS todos (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
              workspace TEXT NOT NULL,
+             id INTEGER NOT NULL,
              title TEXT NOT NULL,
              status TEXT NOT NULL DEFAULT 'pending',
              priority TEXT NOT NULL DEFAULT 'medium',
              notes TEXT NOT NULL DEFAULT '',
              created_at TEXT NOT NULL,
-             updated_at TEXT NOT NULL
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY (workspace, id)
          );
 
          CREATE INDEX IF NOT EXISTS idx_todos_workspace_status
@@ -330,11 +331,19 @@ impl BlockingTool for Tool {
                     if title.is_empty() {
                         bail!("Task `title` cannot be empty.");
                     }
+                    // Per-workspace dense numbering: an empty list restarts
+                    // at #1 instead of continuing the global counter.
+                    let next_id: i64 = conn.query_row(
+                        "SELECT COALESCE(MAX(id), 0) + 1 FROM todos WHERE workspace = ?1",
+                        params![ws],
+                        |r| r.get(0),
+                    )?;
                     conn.execute(
-                        "INSERT INTO todos (workspace, title, status, priority, notes, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        "INSERT INTO todos (workspace, id, title, status, priority, notes, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             ws,
+                            next_id,
                             title,
                             item.status.as_str(),
                             item.priority.as_str(),
@@ -343,7 +352,7 @@ impl BlockingTool for Tool {
                             now,
                         ],
                     )?;
-                    added_ids.push(conn.last_insert_rowid());
+                    added_ids.push(next_id);
                 }
 
                 let rows = fetch_todos(&conn, &ws, None)?;
@@ -500,5 +509,23 @@ mod tests {
         )
         .unwrap();
         assert!(cleared.contains("Cleared 1 task(s)."));
+
+        // With an empty list, the next task must restart at #1 rather than
+        // continuing the previous numbering.
+        let readded = Tool::execute(
+            TodoArgs {
+                action: TodoAction::Add,
+                id: None,
+                title: Some("Restart numbering".into()),
+                items: vec![],
+                status: None,
+                priority: None,
+                notes: None,
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(readded.contains("Added #1."));
+        assert!(readded.contains("#1 [ ] [med] Restart numbering"));
     }
 }
