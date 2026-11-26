@@ -8,6 +8,8 @@ use reqwest::Url;
 use schemars::JsonSchema;
 use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     path::PathBuf,
@@ -28,6 +30,8 @@ const DEFAULT_WAIT_SECS: u64 = 10;
 /// How long to wait for a spawned CDP Chrome to become ready.
 const CDP_START_TIMEOUT_SECS: u64 = 10;
 const MAX_EXTRACT_ELEMENTS: usize = 200;
+/// Max number of rendered lines for `snapshot` accessibility-tree output.
+const MAX_AX_TREE_LINES: usize = 500;
 
 pub struct Tool;
 
@@ -50,6 +54,8 @@ pub enum BrowserAction {
     Find,
     /// Capture a PNG screenshot of the current viewport (or element) to a file.
     Screenshot,
+    /// Capture a compact, indented accessibility tree snapshot of the current page.
+    Snapshot,
     /// Show current URL, title, and session status.
     Status,
     /// Close the active browser session and free resources.
@@ -570,6 +576,39 @@ impl CdpSession {
             .context("Failed to decode CDP screenshot base64")
     }
 
+    async fn snapshot_ax_tree(&self) -> Result<String> {
+        self.send_cmd("Accessibility.enable", serde_json::json!({}))
+            .await?;
+
+        let res = async {
+            let frame_tree = self
+                .send_cmd("Page.getFrameTree", serde_json::json!({}))
+                .await?;
+            let frame_id = frame_tree
+                .pointer("/frameTree/frame/id")
+                .and_then(|v| v.as_str());
+
+            let params = match frame_id {
+                Some(id) => serde_json::json!({ "frameId": id }),
+                None => serde_json::json!({}),
+            };
+            self.send_cmd("Accessibility.getFullAXTree", params).await
+        }
+        .await;
+
+        let _ = self
+            .send_cmd("Accessibility.disable", serde_json::json!({}))
+            .await;
+
+        let tree = res?;
+        let nodes = tree
+            .get("nodes")
+            .and_then(|v| v.as_array())
+            .context("CDP Accessibility.getFullAXTree response had no 'nodes' array")?;
+
+        Ok(format_ax_tree(nodes))
+    }
+
     async fn current_url(&self) -> Result<String> {
         let val = self.evaluate_raw("location.href").await?;
         Ok(val.as_str().unwrap_or("").to_string())
@@ -952,6 +991,140 @@ fn format_selector_error(
     format!("{head}Available interactive elements (first 15):\n{el_list}")
 }
 
+fn ax_id(val: &serde_json::Value) -> Option<String> {
+    val.as_str()
+        .map(str::to_owned)
+        .or_else(|| val.as_i64().map(|n| n.to_string()))
+        .or_else(|| val.as_u64().map(|n| n.to_string()))
+}
+
+fn format_ax_tree(nodes: &[serde_json::Value]) -> String {
+    let by_id: HashMap<String, &serde_json::Value> = nodes
+        .iter()
+        .filter_map(|n| Some((ax_id(n.get("nodeId")?)?, n)))
+        .collect();
+
+    let Some(root_id) = find_ax_root(nodes, &by_id) else {
+        return "(empty accessibility tree)".into();
+    };
+
+    let mut out = String::new();
+    let mut rendered = 0;
+    let truncated = render_ax_node(
+        &root_id,
+        &by_id,
+        0,
+        &mut out,
+        &mut rendered,
+        MAX_AX_TREE_LINES,
+    );
+    if out.is_empty() {
+        return "(empty accessibility tree)".into();
+    }
+    if truncated {
+        let _ = writeln!(out, "… (truncated after {MAX_AX_TREE_LINES} lines)");
+    }
+    out
+}
+
+/// Locate the root node: the first node with no `parentId` (or one that does
+/// not reference an existing node), falling back to the first node — Chrome
+/// emits `getFullAXTree` results in depth-first order with the root first.
+fn find_ax_root(
+    nodes: &[serde_json::Value],
+    by_id: &HashMap<String, &serde_json::Value>,
+) -> Option<String> {
+    let root = nodes.iter().find_map(|n| {
+        let id = ax_id(n.get("nodeId")?)?;
+        let is_root = match n.get("parentId").and_then(ax_id) {
+            None => true,
+            Some(parent) => !by_id.contains_key(&parent),
+        };
+        is_root.then_some(id)
+    });
+    root.or_else(|| nodes.first().and_then(|n| n.get("nodeId")).and_then(ax_id))
+}
+
+/// Render a subtree, returning `true` once `max_lines` lines have been
+/// rendered so callers can stop early.
+fn render_ax_node(
+    id: &str,
+    by_id: &HashMap<String, &serde_json::Value>,
+    depth: usize,
+    out: &mut String,
+    rendered: &mut usize,
+    max_lines: usize,
+) -> bool {
+    let Some(node) = by_id.get(id) else {
+        return false;
+    };
+
+    let ignored = node
+        .get("ignored")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let role = node
+        .pointer("/role/value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let name = node
+        .pointer("/name/value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let value = node
+        .pointer("/value/value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let skip_self = ignored || matches!(role, "" | "none" | "generic" | "InlineTextBox");
+    let next_depth = if skip_self {
+        depth
+    } else {
+        if *rendered >= max_lines {
+            return true;
+        }
+        *rendered += 1;
+        let indent = "  ".repeat(depth);
+        let _ = write!(out, "{indent}[{role}]");
+        if !name.is_empty() {
+            let _ = write!(out, " {name:?}");
+        }
+        if !value.is_empty() && value != name {
+            let _ = write!(out, " value={value:?}");
+        }
+        if let Some(props) = node.get("properties").and_then(|v| v.as_array()) {
+            for prop in props {
+                let p_name = prop.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let p_val = prop.pointer("/value/value");
+                match (p_name, p_val) {
+                    ("focused" | "disabled" | "checked" | "expanded" | "selected", Some(v))
+                        if v.as_bool() == Some(true) =>
+                    {
+                        let _ = write!(out, " ({p_name})");
+                    }
+                    ("level", Some(v)) if v.as_u64().is_some() => {
+                        let _ = write!(out, " level={}", v.as_u64().unwrap());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out.push('\n');
+        depth + 1
+    };
+
+    if let Some(children) = node.get("childIds").and_then(|v| v.as_array()) {
+        for child_id in children.iter().filter_map(ax_id) {
+            if render_ax_node(&child_id, by_id, next_depth, out, rendered, max_lines) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Extract structured data (inner text, all attributes, and a resolved
 /// `href`) from every element matching `selector` in an HTML `source`.
 ///
@@ -1007,7 +1180,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, and capture screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
+    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, capture accessibility tree snapshots, and take screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1182,6 +1355,14 @@ impl AsyncTool for Tool {
                     png.len(),
                     out_path.display()
                 ))
+            }
+
+            BrowserAction::Snapshot => {
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                let url = session.current_url().await.unwrap_or_default();
+                let title = session.title().await.unwrap_or_default();
+                let tree = session.snapshot_ax_tree().await?;
+                Ok(format!("URL: {url}\nTitle: {title}\n\n{}", tree.trim_end()))
             }
         }
     }
@@ -1398,6 +1579,105 @@ mod tests {
     #[test]
     fn cdp_evaluate_no_wrap_for_callback_return() {
         assert!(!has_return_statement("[1,2,3].map((x) => x * 2).length"));
+    }
+
+    #[test]
+    fn format_ax_tree_prunes_ignored_and_generic_wrappers() {
+        let nodes = vec![
+            serde_json::json!({
+                "nodeId": "1",
+                "ignored": false,
+                "role": { "value": "RootWebArea" },
+                "name": { "value": "Demo Page" },
+                "childIds": ["2", 3]
+            }),
+            serde_json::json!({
+                "nodeId": "2",
+                "ignored": false,
+                "role": { "value": "generic" },
+                "childIds": ["4"]
+            }),
+            serde_json::json!({
+                "nodeId": 3,
+                "ignored": true,
+                "role": { "value": "button" },
+                "name": { "value": "Hidden" }
+            }),
+            serde_json::json!({
+                "nodeId": "4",
+                "ignored": false,
+                "role": { "value": "heading" },
+                "name": { "value": "Welcome" },
+                "properties": [
+                    { "name": "level", "value": { "value": 1 } },
+                    { "name": "focused", "value": { "value": true } }
+                ]
+            }),
+        ];
+
+        let rendered = format_ax_tree(&nodes);
+        assert_eq!(
+            rendered,
+            "[RootWebArea] \"Demo Page\"\n  [heading] \"Welcome\" level=1 (focused)\n"
+        );
+    }
+
+    #[test]
+    fn format_ax_tree_handles_empty_nodes() {
+        assert_eq!(format_ax_tree(&[]), "(empty accessibility tree)");
+    }
+
+    #[test]
+    fn format_ax_tree_truncates_over_max_lines() {
+        let total_headings = MAX_AX_TREE_LINES + 5;
+        let mut nodes: Vec<serde_json::Value> = Vec::with_capacity(total_headings + 1);
+        for i in 1..=(total_headings + 1) {
+            let child_ids = if i < total_headings + 1 {
+                serde_json::json!([i + 1])
+            } else {
+                serde_json::json!([])
+            };
+            nodes.push(serde_json::json!({
+                "nodeId": i,
+                "role": { "value": if i == 1 { "RootWebArea" } else { "heading" } },
+                "name": { "value": format!("H{i}") },
+                "childIds": child_ids
+            }));
+        }
+
+        let rendered = format_ax_tree(&nodes);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), MAX_AX_TREE_LINES + 1); // capped lines + marker
+        assert!(lines[0].starts_with("[RootWebArea]"));
+        assert!(
+            lines[MAX_AX_TREE_LINES - 1]
+                .trim_start()
+                .starts_with("[heading]")
+        );
+        assert!(lines[MAX_AX_TREE_LINES].contains("truncated"));
+    }
+
+    #[test]
+    fn format_ax_tree_finds_root_by_parent_id_when_nodes_unordered() {
+        let nodes = vec![
+            serde_json::json!({
+                "nodeId": 2,
+                "parentId": 1,
+                "role": { "value": "button" },
+                "name": { "value": "OK" }
+            }),
+            serde_json::json!({
+                "nodeId": 1,
+                "role": { "value": "RootWebArea" },
+                "name": { "value": "Root" },
+                "childIds": [2]
+            }),
+        ];
+
+        assert_eq!(
+            format_ax_tree(&nodes),
+            "[RootWebArea] \"Root\"\n  [button] \"OK\"\n"
+        );
     }
 
     // ── CDP integration tests ─────────────────────────────────────────────

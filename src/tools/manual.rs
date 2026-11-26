@@ -98,7 +98,17 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             if !map.contains_key("action")
                 && matches!(
                     token,
-                    "goto" | "read" | "click" | "type" | "eval" | "screenshot" | "status" | "close"
+                    "goto"
+                        | "read"
+                        | "click"
+                        | "type"
+                        | "eval"
+                        | "extract"
+                        | "find"
+                        | "screenshot"
+                        | "snapshot"
+                        | "status"
+                        | "close"
                 ) =>
         {
             &["action"]
@@ -200,4 +210,66 @@ pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)
     };
     let summary = format_call_summary(&call);
     Ok((call, summary))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed_action(raw: &str) -> Option<String> {
+        let (call, _) = parse_manual_tool_call(raw).expect("manual invocation should parse");
+        call.function
+            .arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn manual_browser_positional_actions_map_to_action_key() {
+        for action in [
+            "goto",
+            "read",
+            "click",
+            "type",
+            "eval",
+            "extract",
+            "find",
+            "screenshot",
+            "snapshot",
+            "status",
+            "close",
+        ] {
+            assert_eq!(
+                parsed_action(&format!("browser {action}")),
+                Some(action.to_string()),
+                "positional token '{action}' should map to action"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_browser_positional_extract_keeps_selector() {
+        let (call, _) = parse_manual_tool_call("browser extract selector=#main")
+            .expect("manual invocation should parse");
+        assert_eq!(
+            call.function
+                .arguments
+                .get("action")
+                .and_then(Value::as_str),
+            Some("extract")
+        );
+        assert_eq!(
+            call.function
+                .arguments
+                .get("selector")
+                .and_then(Value::as_str),
+            Some("#main")
+        );
+    }
+
+    #[test]
+    fn manual_browser_colon_action_still_works() {
+        assert_eq!(parsed_action("browser:snapshot"), Some("snapshot".into()));
+    }
 }
