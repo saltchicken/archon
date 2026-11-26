@@ -130,10 +130,8 @@ impl BlockingTool for Tool {
     type Args = SessionArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
-        let mgr = SessionManager::new(
-            &ctx.config.app.history_dir,
-            ctx.config.workspace.as_deref(),
-        )?;
+        let mgr =
+            SessionManager::new(&ctx.config.app.history_dir, ctx.config.workspace.as_deref())?;
         let limit = args.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
         match args.action {

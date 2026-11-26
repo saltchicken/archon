@@ -1,6 +1,7 @@
 use archon::core::config::ScheduleConfig;
 use archon::core::schedule::{
     quote_systemd_arg, render_service, render_timer, sanitize_unit_component, unit_base_name,
+    workspace_scope,
 };
 use std::path::Path;
 
@@ -12,6 +13,14 @@ fn sanitize_unit_component_normalizes_names() {
         unit_base_name("archon", "daily_check"),
         "archon-sched-archon--daily-check"
     );
+}
+
+#[test]
+fn workspace_scope_reserves_global_name() {
+    assert_eq!(workspace_scope("archon"), "archon");
+    assert_eq!(workspace_scope("global"), "ws-global");
+    assert_eq!(workspace_scope("Global!"), "ws-global");
+    assert_eq!(workspace_scope("---"), "default");
 }
 
 #[test]

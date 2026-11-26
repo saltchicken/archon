@@ -636,13 +636,19 @@ impl SessionManager {
         let mut stmt = conn.prepare(model_sql)?;
         let models: Vec<(String, usize)> = if all_workspaces {
             stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.max(0) as usize,
+                ))
             })?
             .flatten()
             .collect()
         } else {
             stmt.query_map(params![self.workspace], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?.max(0) as usize,
+                ))
             })?
             .flatten()
             .collect()

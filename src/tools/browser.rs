@@ -1158,7 +1158,9 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 backend.goto(parsed.as_str()).await?;
 
                 if let Some(sel) = args
@@ -1183,7 +1185,9 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Read => {
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 let sel = args
                     .selector
                     .as_deref()
@@ -1208,7 +1212,9 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 backend.click(sel, Duration::from_secs(wait_secs)).await?;
                 let url = backend.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
@@ -1225,7 +1231,9 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 backend
                     .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
                     .await?;
@@ -1242,7 +1250,9 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 let result = backend.evaluate(script).await?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
@@ -1254,14 +1264,18 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 let source = backend.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
-                let backend = reg.get_or_init(args.headless, default_headless, &backend_type).await?;
+                let backend = reg
+                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .await?;
                 let sel = args
                     .selector
                     .as_deref()

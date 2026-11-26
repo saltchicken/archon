@@ -915,7 +915,9 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
         }
         "notify" => "<summary> [body=...] [urgency=low|normal|critical] [timeout_ms=N]",
-        "session" => "[list|search|read|stats|rename|pin] [id=...] [query=...] [start_message=N] [end_message=N]",
+        "session" => {
+            "[list|search|read|stats|rename|pin] [id=...] [query=...] [start_message=N] [end_message=N]"
+        }
         "skill" => "[list|read|create|modify|check] [name=...]",
         "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
         "system" => {

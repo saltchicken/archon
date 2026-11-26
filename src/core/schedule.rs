@@ -64,6 +64,23 @@ pub fn sanitize_unit_component(raw: &str) -> String {
     }
 }
 
+/// Derive the scope label for a workspace from its config-dir name.
+///
+/// Normally this is just the sanitized directory name, so the scope maps 1:1
+/// to `~/.config/archon/workspaces/<name>/`. If that would equal the reserved
+/// `global` scope label (a project literally named `global`), fall back to a
+/// `ws-`-prefixed label so its units (`archon-sched-ws-global--*`) can't
+/// collide with — or be pruned by — the real `global` scope's units
+/// (`archon-sched-global--*`).
+pub fn workspace_scope(raw_name: &str) -> String {
+    let base = sanitize_unit_component(raw_name);
+    if base == "global" {
+        "ws-global".to_string()
+    } else {
+        base
+    }
+}
+
 fn resolve_scope(
     config: &Config,
     global: bool,
@@ -93,7 +110,7 @@ fn resolve_scope(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    Ok((sanitize_unit_component(raw_name), canon))
+    Ok((workspace_scope(raw_name), canon))
 }
 
 pub fn unit_base_name(scope: &str, name: &str) -> String {
@@ -489,7 +506,9 @@ fn logs_schedule(
             }
         );
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     Ok(if stdout.is_empty() {
         format!("No journal entries found for {unit_filter}.")
     } else {
