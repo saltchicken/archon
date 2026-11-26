@@ -893,7 +893,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "schedule" => &["list", "logs", "run", "sync", "clean"],
         "sqlite" => &["tables", "schema", "query"],
-        "todo" => &["list", "add", "update", "complete", "remove", "clear"],
+        "todo" => &["list", "add", "update", "remove", "clear"],
         _ => &[],
     }
 }
@@ -935,7 +935,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
         "todo" => {
-            "[list|add|update|complete|remove|clear] [id=N] [title=...] [status=pending|in_progress|done] [priority=low|medium|high]"
+            "[list|add|update|remove|clear] [id=N] [title=...] [status=pending|in_progress] [priority=low|medium|high]"
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",

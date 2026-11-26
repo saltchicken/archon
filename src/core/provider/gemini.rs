@@ -188,8 +188,18 @@ fn sanitize_schema_node(val: &mut Value) {
                 }
             }
 
-            for v in obj.values_mut() {
-                sanitize_schema_node(v);
+            for (k, v) in obj.iter_mut() {
+                if (k == "properties" || k == "patternProperties") && v.is_object() {
+                    // The keys here are property *names*, not schema keywords.
+                    // Only sanitize each property's schema, not the mapping itself.
+                    if let Some(props) = v.as_object_mut() {
+                        for prop_schema in props.values_mut() {
+                            sanitize_schema_node(prop_schema);
+                        }
+                    }
+                } else {
+                    sanitize_schema_node(v);
+                }
             }
         }
         Value::Array(arr) => {
@@ -603,4 +613,75 @@ pub async fn stream_chat(
         tool_calls: collected_tools,
         thoughts: collected_thoughts,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_preserves_title_property_name() {
+        // Simulates the todo tool's `items` parameter with NewTodoItem having a `title` field.
+        let mut schema = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": { "type": "string" },
+                    "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+                    "notes": { "type": "string" }
+                }
+            }
+        });
+
+        sanitize_schema_node(&mut schema);
+
+        // The `title` property must still exist in `properties`.
+        let props = schema["items"]["properties"].as_object().unwrap();
+        assert!(
+            props.contains_key("title"),
+            "expected 'title' property to survive sanitization, got: {props:?}"
+        );
+        assert!(
+            props.contains_key("priority"),
+            "expected 'priority' property to survive sanitization"
+        );
+        assert!(
+            props.contains_key("notes"),
+            "expected 'notes' property to survive sanitization"
+        );
+        // Required should still be intact.
+        let required = schema["items"]["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], json!("title"));
+    }
+
+    #[test]
+    fn sanitize_still_strips_schema_keywords() {
+        let mut schema = json!({
+            "type": "object",
+            "title": "My Tool",
+            "format": "date-time",
+            "default": "x",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "title": "The name field",
+                    "default": "foo"
+                }
+            }
+        });
+
+        sanitize_schema_node(&mut schema);
+
+        // Top-level `title` (string value) should be stripped.
+        assert!(schema.get("title").is_none());
+        // Property-level `title` (string value) should also be stripped.
+        let name_schema = schema["properties"]["name"].as_object().unwrap();
+        assert!(name_schema.get("title").is_none(), "inner title should be stripped");
+        assert!(name_schema.get("default").is_none(), "inner default should be stripped");
+        // The `name` property must still exist.
+        assert!(schema["properties"].as_object().unwrap().contains_key("name"));
+    }
 }

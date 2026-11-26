@@ -19,21 +19,20 @@ pub enum TodoAction {
     Add,
     /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`.
     Update,
-    /// Mark one (`id`) or more (`ids`) tasks as `done`.
-    Complete,
     /// Delete a task by `id`.
     Remove,
-    /// Clear completed tasks (or all tasks when `all = true`).
+    /// Remove all tasks for the current workspace.
     Clear,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
+    /// Backlog / not started.
     #[default]
     Pending,
+    /// Actively being worked on.
     InProgress,
-    Done,
 }
 
 impl TodoStatus {
@@ -41,14 +40,12 @@ impl TodoStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
-            Self::Done => "done",
         }
     }
 
     fn from_db(s: &str) -> Self {
         match s {
             "in_progress" => Self::InProgress,
-            "done" => Self::Done,
             _ => Self::Pending,
         }
     }
@@ -57,7 +54,6 @@ impl TodoStatus {
         match self {
             Self::Pending => "[ ]",
             Self::InProgress => "[~]",
-            Self::Done => "[x]",
         }
     }
 }
@@ -104,7 +100,7 @@ pub struct NewTodoItem {
     /// Optional priority (`low`, `medium`, `high`). Defaults to `medium`.
     #[serde(default)]
     pub priority: TodoPriority,
-    /// Optional initial status (`pending`, `in_progress`, `done`). Defaults to `pending`.
+    /// Optional initial status (`pending`, `in_progress`). Defaults to `pending`.
     #[serde(default)]
     pub status: TodoStatus,
     /// Optional details, file paths, or acceptance notes.
@@ -114,22 +110,19 @@ pub struct NewTodoItem {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TodoArgs {
-    /// Operation to perform: `list` (default), `add`, `update`, `complete`, `remove`, or `clear`.
+    /// Operation to perform: `list` (default), `add`, `update`, `remove`, or `clear`.
     #[serde(default)]
     pub action: TodoAction,
-    /// Task ID (for `update`, `complete`, `remove`).
+    /// Task ID (for `update` or `remove`).
     #[serde(default)]
     pub id: Option<i64>,
-    /// Multiple task IDs (for batch `complete`).
-    #[serde(default)]
-    pub ids: Vec<i64>,
     /// Task title (for single `add` or `update`).
     #[serde(default)]
     pub title: Option<String>,
     /// Batch of tasks to add in a single call (for `add`).
     #[serde(default)]
     pub items: Vec<NewTodoItem>,
-    /// Task status (`pending`, `in_progress`, `done`) for `add`, `update`, or filtering `list`.
+    /// Task status (`pending`, `in_progress`) for `add`, `update`, or filtering `list`.
     #[serde(default)]
     pub status: Option<TodoStatus>,
     /// Task priority (`low`, `medium`, `high`) for `add` or `update`.
@@ -138,16 +131,6 @@ pub struct TodoArgs {
     /// Optional notes for `add` or `update`.
     #[serde(default)]
     pub notes: Option<String>,
-    /// For `list`: include completed tasks (default: `true`).
-    #[serde(default = "default_true")]
-    pub include_done: bool,
-    /// For `clear`: remove all tasks instead of only `done` tasks (default: `false`).
-    #[serde(default)]
-    pub all: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +186,10 @@ fn open_todo_db(config: &Config) -> Result<Connection> {
     )
     .context("Failed to initialize todos table")?;
 
+    // The `done` status no longer exists; drop any legacy rows so finished
+    // tasks can't resurface as active ones.
+    conn.execute("DELETE FROM todos WHERE status = 'done'", params![])?;
+
     Ok(conn)
 }
 
@@ -210,7 +197,6 @@ fn fetch_todos(
     conn: &Connection,
     workspace: &str,
     status_filter: Option<TodoStatus>,
-    include_done: bool,
 ) -> Result<Vec<TodoRow>> {
     let mut rows = Vec::new();
     let mut stmt = conn.prepare(
@@ -218,7 +204,7 @@ fn fetch_todos(
          FROM todos
          WHERE workspace = ?1
          ORDER BY
-             CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
+             CASE status WHEN 'in_progress' THEN 0 ELSE 1 END,
              CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
              id ASC",
     )?;
@@ -239,9 +225,6 @@ fn fetch_todos(
         {
             continue;
         }
-        if !include_done && item.status == TodoStatus::Done {
-            continue;
-        }
         rows.push(item);
     }
     Ok(rows)
@@ -252,13 +235,12 @@ fn format_todo_list(rows: &[TodoRow]) -> String {
         return "No tasks found for this workspace.".to_string();
     }
 
-    let done = rows.iter().filter(|r| r.status == TodoStatus::Done).count();
     let in_prog = rows
         .iter()
         .filter(|r| r.status == TodoStatus::InProgress)
         .count();
     let mut out = format!(
-        "Workspace tasks ({done}/{} done, {in_prog} in progress):\n",
+        "Workspace tasks ({} total, {in_prog} in progress):\n",
         rows.len()
     );
 
@@ -278,12 +260,12 @@ fn format_todo_list(rows: &[TodoRow]) -> String {
     out.trim_end().to_string()
 }
 
-/// Formats active (`pending` / `in_progress`) workspace tasks for injection into
-/// the system prompt so multi-step plans survive `/compact`.
+/// Formats active workspace tasks for injection into the system prompt so
+/// multi-step plans survive `/compact`.
 pub fn format_active_todos_for_prompt(config: &Config) -> Option<String> {
     let conn = open_todo_db(config).ok()?;
     let ws = canonical_workspace(config);
-    let active = fetch_todos(&conn, &ws, None, false).ok()?;
+    let active = fetch_todos(&conn, &ws, None).ok()?;
     if active.is_empty() {
         return None;
     }
@@ -313,7 +295,7 @@ pub fn format_active_todos_for_prompt(config: &Config) -> Option<String> {
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "todo";
-    const DESCRIPTION: &'static str = "Manage a persistent workspace task checklist (`list`, `add`, `update`, `complete`, `remove`, `clear`) to track multi-step plans across turns and compactions.";
+    const DESCRIPTION: &'static str = "Manage a persistent workspace task checklist (`list`, `add`, `update`, `remove`, `clear`) to track multi-step plans across turns and compactions.";
     type Args = TodoArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -323,7 +305,7 @@ impl BlockingTool for Tool {
 
         match args.action {
             TodoAction::List => {
-                let rows = fetch_todos(&conn, &ws, args.status, args.include_done)?;
+                let rows = fetch_todos(&conn, &ws, args.status)?;
                 Ok(format_todo_list(&rows))
             }
             TodoAction::Add => {
@@ -364,7 +346,7 @@ impl BlockingTool for Tool {
                     added_ids.push(conn.last_insert_rowid());
                 }
 
-                let rows = fetch_todos(&conn, &ws, None, true)?;
+                let rows = fetch_todos(&conn, &ws, None)?;
                 let id_list = added_ids
                     .iter()
                     .map(|id| format!("#{id}"))
@@ -404,35 +386,9 @@ impl BlockingTool for Tool {
                     params![new_title, new_status, new_priority, new_notes, now, id, ws],
                 )?;
 
-                let rows = fetch_todos(&conn, &ws, None, true)?;
+                let rows = fetch_todos(&conn, &ws, None)?;
                 Ok(format!(
                     "Updated task #{id}.\n\n{}",
-                    format_todo_list(&rows)
-                ))
-            }
-            TodoAction::Complete => {
-                let mut targets = args.ids;
-                if let Some(id) = args.id {
-                    targets.push(id);
-                }
-                if targets.is_empty() {
-                    bail!("`todo:complete` requires `id` or `ids`.");
-                }
-
-                let mut updated = 0usize;
-                for id in &targets {
-                    updated += conn.execute(
-                        "UPDATE todos SET status = 'done', updated_at = ?1 WHERE id = ?2 AND workspace = ?3",
-                        params![now, id, ws],
-                    )?;
-                }
-                if updated == 0 {
-                    bail!("No matching tasks found in this workspace.");
-                }
-
-                let rows = fetch_todos(&conn, &ws, None, true)?;
-                Ok(format!(
-                    "Marked {updated} task(s) done.\n\n{}",
                     format_todo_list(&rows)
                 ))
             }
@@ -445,23 +401,16 @@ impl BlockingTool for Tool {
                 if deleted == 0 {
                     bail!("Task #{id} not found in this workspace.");
                 }
-                let rows = fetch_todos(&conn, &ws, None, true)?;
+                let rows = fetch_todos(&conn, &ws, None)?;
                 Ok(format!(
                     "Removed task #{id}.\n\n{}",
                     format_todo_list(&rows)
                 ))
             }
             TodoAction::Clear => {
-                let deleted = if args.all {
-                    conn.execute("DELETE FROM todos WHERE workspace = ?1", params![ws])?
-                } else {
-                    conn.execute(
-                        "DELETE FROM todos WHERE workspace = ?1 AND status = 'done'",
-                        params![ws],
-                    )?
-                };
-                let scope = if args.all { "all" } else { "completed" };
-                Ok(format!("Cleared {deleted} {scope} task(s)."))
+                let deleted =
+                    conn.execute("DELETE FROM todos WHERE workspace = ?1", params![ws])?;
+                Ok(format!("Cleared {deleted} task(s)."))
             }
         }
     }
@@ -484,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn add_update_complete_and_clear_lifecycle() {
+    fn add_update_remove_and_clear_lifecycle() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&tmp);
 
@@ -492,7 +441,6 @@ mod tests {
             TodoArgs {
                 action: TodoAction::Add,
                 id: None,
-                ids: vec![],
                 title: None,
                 items: vec![
                     NewTodoItem {
@@ -511,8 +459,6 @@ mod tests {
                 status: None,
                 priority: None,
                 notes: None,
-                include_done: true,
-                all: false,
             },
             &ctx,
         )
@@ -524,40 +470,35 @@ mod tests {
         assert!(prompt_block.contains("<todos>"));
         assert!(prompt_block.contains("Add todo tool"));
 
-        let completed = Tool::execute(
+        let removed = Tool::execute(
             TodoArgs {
-                action: TodoAction::Complete,
+                action: TodoAction::Remove,
                 id: Some(1),
-                ids: vec![],
                 title: None,
                 items: vec![],
                 status: None,
                 priority: None,
                 notes: None,
-                include_done: true,
-                all: false,
             },
             &ctx,
         )
         .unwrap();
-        assert!(completed.contains("1/2 done"));
+        assert!(removed.contains("Removed task #1."));
+        assert!(removed.contains("1 total"));
 
         let cleared = Tool::execute(
             TodoArgs {
                 action: TodoAction::Clear,
                 id: None,
-                ids: vec![],
                 title: None,
                 items: vec![],
                 status: None,
                 priority: None,
                 notes: None,
-                include_done: true,
-                all: false,
             },
             &ctx,
         )
         .unwrap();
-        assert!(cleared.contains("Cleared 1 completed task(s)"));
+        assert!(cleared.contains("Cleared 1 task(s)."));
     }
 }
