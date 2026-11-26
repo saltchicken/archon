@@ -881,8 +881,10 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "read",
             "click",
             "type",
+            "paste",
             "eval",
             "extract",
+            "find",
             "screenshot",
             "snapshot",
             "status",
@@ -926,7 +928,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         }
         "process" => "[list|output|poll|kill|clean] [id=...] [tail_lines=N | wait_ms=N]",
         "browser" => {
-            "[goto|read|click|type|eval|extract|screenshot|snapshot|status|close] [url=...] [selector=...] [text=...] [script=...]"
+            "[goto|read|click|type|paste|eval|extract|find|screenshot|snapshot|status|close] [url=...] [selector=...] [text=...] [source=clipboard|workspace_snapshot|workspace_snapshot_tree] [script=...]"
         }
         "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",

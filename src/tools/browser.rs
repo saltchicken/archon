@@ -46,6 +46,8 @@ pub enum BrowserAction {
     Click,
     /// Type text into an input/textarea matching a CSS selector.
     Type,
+    /// Paste large text (or a `source` such as `clipboard`, `workspace_snapshot`, or `workspace_snapshot_tree`) instantaneously into an input, textarea, or contenteditable element.
+    Paste,
     /// Execute JavaScript in the page context and return its JSON result.
     Eval,
     /// Extract structured data (text, attributes, href) from elements matching a CSS selector, parsed server-side with the `scraper` crate.
@@ -63,19 +65,33 @@ pub enum BrowserAction {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PasteSource {
+    /// Read from the system clipboard (default when `text` is omitted).
+    Clipboard,
+    /// Generate a full `workspace_snapshot` in memory and paste it directly.
+    WorkspaceSnapshot,
+    /// Generate a `tree_only` `workspace_snapshot` in memory and paste it directly.
+    WorkspaceSnapshotTree,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct BrowserArgs {
     /// Action to perform.
     pub action: BrowserAction,
     /// Target URL (required for `goto`).
     #[serde(default)]
     pub url: Option<String>,
-    /// CSS selector to target (used by `read`, `click`, `type`, `extract`, `screenshot`, or as wait condition in `goto`).
+    /// CSS selector to target (used by `read`, `click`, `type`, `paste`, `extract`, `screenshot`, or as wait condition in `goto`).
     #[serde(default)]
     pub selector: Option<String>,
-    /// Text to type (required for `type`).
+    /// Text to type (required for `type`; optional for `paste`, which falls back to `source` when omitted).
     #[serde(default)]
     pub text: Option<String>,
-    /// Clear existing input before typing (default: true).
+    /// Source to read from for `paste` when `text` is omitted (`clipboard`, `workspace_snapshot`, or `workspace_snapshot_tree`; default: `clipboard`).
+    #[serde(default)]
+    pub source: Option<PasteSource>,
+    /// Clear existing input before typing or pasting (default: true).
     #[serde(default = "default_true")]
     pub clear: bool,
     /// JavaScript snippet to execute (required for `eval`).
@@ -525,6 +541,76 @@ impl CdpSession {
         self.send_cmd("Input.insertText", serde_json::json!({"text": text}))
             .await?;
         Ok(())
+    }
+
+    /// Paste text into an input, textarea, or contenteditable element by
+    /// setting the value directly (bypassing per-keystroke insertion), so
+    /// large payloads are inserted instantaneously.
+    ///
+    /// Returns `true` when the target was a contenteditable element: rich
+    /// editors track their own internal state and may ignore or revert the
+    /// programmatic change, so the caller should temper the confirmation.
+    async fn paste_text(
+        &self,
+        sel: &str,
+        text: &str,
+        clear: bool,
+        timeout: Duration,
+    ) -> Result<bool> {
+        self.wait_for_selector(sel, timeout).await?;
+        let escaped_sel = js_str(sel);
+        let escaped_text = js_str(text);
+        let clear_flag = if clear { "true" } else { "false" };
+
+        let expr = format!(
+            r#"(() => {{
+                const el = document.querySelector({escaped_sel});
+                if (!el) return false;
+                el.focus();
+                const text = {escaped_text};
+                const clear = {clear_flag};
+
+                if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {{
+                    const proto = el instanceof HTMLTextAreaElement
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    const next = clear ? text : (el.value + text);
+                    if (setter) {{
+                        setter.call(el, next);
+                    }} else {{
+                        el.value = next;
+                    }}
+                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    return 'input';
+                }}
+
+                if (el.isContentEditable) {{
+                    if (clear) {{
+                        el.textContent = text;
+                    }} else {{
+                        const span = document.createElement('span');
+                        span.textContent = text;
+                        el.appendChild(span);
+                    }}
+                    el.dispatchEvent(new InputEvent('input', {{
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: text,
+                    }}));
+                    return 'contenteditable';
+                }}
+
+                return false;
+            }})()"#
+        );
+
+        match self.evaluate_raw(&expr).await?.as_str() {
+            Some("input") => Ok(false),
+            Some("contenteditable") => Ok(true),
+            _ => bail!("Element '{sel}' is not an input, textarea, or contenteditable element"),
+        }
     }
 
     async fn evaluate(&self, script: &str) -> Result<serde_json::Value> {
@@ -1180,7 +1266,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, capture accessibility tree snapshots, and take screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
+    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, paste large text (explicit text, the clipboard, or a generated workspace snapshot) into input, textarea, and contenteditable fields, capture accessibility tree snapshots, and take screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1281,6 +1367,75 @@ impl AsyncTool for Tool {
                     "Typed {} chars into '{sel}'.",
                     text.chars().count()
                 ))
+            }
+
+            BrowserAction::Paste => {
+                let sel = args
+                    .selector
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .context("'selector' is required for browser:paste")?;
+                let (text, label) = match (args.text, args.source) {
+                    (Some(t), Some(_)) => (
+                        t,
+                        " [note: 'source' was ignored because 'text' was provided]",
+                    ),
+                    (Some(t), None) => (t, ""),
+                    (None, Some(PasteSource::WorkspaceSnapshot)) => {
+                        let ctx_clone = ctx.clone();
+                        let snap = tokio::task::spawn_blocking(move || {
+                            use super::BlockingTool;
+                            super::workspace_snapshot::Tool::execute(
+                                super::workspace_snapshot::WorkspaceSnapshotArgs {
+                                    tree_only: Some(false),
+                                },
+                                &ctx_clone,
+                            )
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Snapshot task panicked: {e}"))??;
+                        (snap, " (workspace_snapshot)")
+                    }
+                    (None, Some(PasteSource::WorkspaceSnapshotTree)) => {
+                        let ctx_clone = ctx.clone();
+                        let snap = tokio::task::spawn_blocking(move || {
+                            use super::BlockingTool;
+                            super::workspace_snapshot::Tool::execute(
+                                super::workspace_snapshot::WorkspaceSnapshotArgs {
+                                    tree_only: Some(true),
+                                },
+                                &ctx_clone,
+                            )
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Snapshot task panicked: {e}"))??;
+                        (snap, " (workspace_snapshot tree)")
+                    }
+                    (None, None | Some(PasteSource::Clipboard)) => {
+                        let clip = tokio::task::spawn_blocking(
+                            crate::core::attachments::read_text_from_clipboard,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Clipboard task panicked: {e}"))??;
+                        (clip, " from clipboard")
+                    }
+                };
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                let contenteditable = session
+                    .paste_text(sel, &text, args.clear, Duration::from_secs(wait_secs))
+                    .await?;
+                if contenteditable {
+                    Ok(format!(
+                        "Pasted {} chars{label} into contenteditable '{sel}' (verify the editor accepted it).",
+                        text.chars().count()
+                    ))
+                } else {
+                    Ok(format!(
+                        "Pasted {} chars{label} into '{sel}'.",
+                        text.chars().count()
+                    ))
+                }
             }
 
             BrowserAction::Eval => {
@@ -1485,6 +1640,45 @@ mod tests {
     fn browser_args_find_action() {
         let args: BrowserArgs = serde_json::from_str(r#"{"action":"find"}"#).unwrap();
         assert!(matches!(args.action, BrowserAction::Find));
+    }
+
+    #[test]
+    fn browser_args_paste_action() {
+        let with_text: BrowserArgs =
+            serde_json::from_str(r##"{"action":"paste","selector":"#inp","text":"hello"}"##)
+                .unwrap();
+        assert!(matches!(with_text.action, BrowserAction::Paste));
+        assert_eq!(with_text.text.as_deref(), Some("hello"));
+        assert!(with_text.source.is_none());
+        assert!(with_text.clear);
+
+        let from_clip: BrowserArgs =
+            serde_json::from_str(r##"{"action":"paste","selector":"#inp","clear":false}"##)
+                .unwrap();
+        assert!(matches!(from_clip.action, BrowserAction::Paste));
+        assert_eq!(from_clip.text, None);
+        assert!(from_clip.source.is_none());
+        assert!(!from_clip.clear);
+
+        let from_snap: BrowserArgs = serde_json::from_str(
+            r##"{"action":"paste","selector":"#inp","source":"workspace_snapshot"}"##,
+        )
+        .unwrap();
+        assert!(matches!(from_snap.action, BrowserAction::Paste));
+        assert!(matches!(
+            from_snap.source,
+            Some(PasteSource::WorkspaceSnapshot)
+        ));
+
+        let from_tree: BrowserArgs = serde_json::from_str(
+            r##"{"action":"paste","selector":"#inp","source":"workspace_snapshot_tree"}"##,
+        )
+        .unwrap();
+        assert!(matches!(from_tree.action, BrowserAction::Paste));
+        assert!(matches!(
+            from_tree.source,
+            Some(PasteSource::WorkspaceSnapshotTree)
+        ));
     }
 
     // ── selector-error diagnostic formatting tests ─────────────────────────

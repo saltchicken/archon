@@ -102,6 +102,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
                         | "read"
                         | "click"
                         | "type"
+                        | "paste"
                         | "eval"
                         | "extract"
                         | "find"
@@ -117,6 +118,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             "goto" => &["url", "selector"],
             "read" | "click" => &["selector"],
             "type" => &["selector", "text"],
+            "paste" => &["selector", "text", "source"],
             "eval" => &["script"],
             "screenshot" => &["selector", "path"],
             _ => &[],
@@ -232,6 +234,7 @@ mod tests {
             "read",
             "click",
             "type",
+            "paste",
             "eval",
             "extract",
             "find",
@@ -265,6 +268,38 @@ mod tests {
                 .get("selector")
                 .and_then(Value::as_str),
             Some("#main")
+        );
+    }
+
+    #[test]
+    fn manual_browser_positional_paste_maps_selector_text_source() {
+        let (call, _) =
+            parse_manual_tool_call("browser paste '#inp' hello workspace_snapshot_tree")
+                .expect("manual invocation should parse");
+        assert_eq!(
+            call.function
+                .arguments
+                .get("action")
+                .and_then(Value::as_str),
+            Some("paste")
+        );
+        assert_eq!(
+            call.function
+                .arguments
+                .get("selector")
+                .and_then(Value::as_str),
+            Some("#inp")
+        );
+        assert_eq!(
+            call.function.arguments.get("text").and_then(Value::as_str),
+            Some("hello")
+        );
+        assert_eq!(
+            call.function
+                .arguments
+                .get("source")
+                .and_then(Value::as_str),
+            Some("workspace_snapshot_tree")
         );
     }
 

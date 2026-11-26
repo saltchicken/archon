@@ -27,6 +27,26 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<()> {
         .context("Failed to copy text to clipboard")
 }
 
+pub fn read_text_from_clipboard() -> Result<String> {
+    if let Ok((mut pipe, _)) =
+        get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text)
+        && let Ok(text) = std::io::read_to_string(&mut pipe)
+    {
+        if text.is_empty() {
+            bail!("Clipboard is empty");
+        }
+        return Ok(text);
+    }
+
+    let text = arboard::Clipboard::new()
+        .and_then(|mut cb| cb.get_text())
+        .context("Failed to read text from clipboard")?;
+    if text.is_empty() {
+        bail!("Clipboard is empty");
+    }
+    Ok(text)
+}
+
 #[derive(Debug, Clone)]
 pub struct ImageAttachment {
     pub path: PathBuf,
