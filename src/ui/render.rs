@@ -20,6 +20,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
+use similar::{ChangeTag, TextDiff};
+use std::path::Path;
 use textwrap::core::display_width;
 
 /// Horizontal columns occupied by the leading `"  "` body indent before message text.
@@ -42,6 +44,102 @@ fn format_param_value(v: &serde_json::Value) -> String {
     }
 }
 
+fn fence_for_content(content: &str) -> String {
+    let mut max_run = 2usize;
+    let mut cur = 0usize;
+    for b in content.bytes() {
+        if b == b'`' {
+            cur += 1;
+            if cur > max_run {
+                max_run = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    "`".repeat(max_run + 1)
+}
+
+fn lang_for_path(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("rs") => "rs",
+        Some("toml") => "toml",
+        Some("json" | "jsonc" | "jsonl") => "json",
+        Some("yaml" | "yml") => "yaml",
+        Some("sh" | "bash" | "zsh" | "fish") => "sh",
+        Some("py") => "py",
+        Some("ts" | "tsx") => "ts",
+        Some("js" | "jsx") => "js",
+        Some("go") => "go",
+        Some("lua") => "lua",
+        Some("sql") => "sql",
+        Some("diff" | "patch") => "diff",
+        Some("c" | "h" | "cpp" | "hpp" | "cc" | "cxx") => "cpp",
+        Some("css" | "scss") => "css",
+        _ => "",
+    }
+}
+
+fn edit_hunk_stats(edits: &[serde_json::Value]) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for hunk in edits {
+        let search = hunk
+            .get("search_string")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let replace = hunk
+            .get("replace_string")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let diff = TextDiff::from_lines(search, replace);
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                ChangeTag::Insert => added += 1,
+                ChangeTag::Delete => removed += 1,
+                ChangeTag::Equal => {}
+            }
+        }
+    }
+    (added, removed)
+}
+
+fn format_edit_hunks_diff(edits: &[serde_json::Value]) -> String {
+    let mut sections = Vec::with_capacity(edits.len());
+    for (idx, hunk) in edits.iter().enumerate() {
+        let search = hunk
+            .get("search_string")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let replace = hunk
+            .get("replace_string")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        let mut hunk_lines = Vec::new();
+        if edits.len() > 1 {
+            hunk_lines.push(format!("@@ edit {}/{} @@", idx + 1, edits.len()));
+        }
+        let diff = TextDiff::from_lines(search, replace);
+        for change in diff.iter_all_changes() {
+            let prefix = match change.tag() {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => " ",
+            };
+            let line = change.value().trim_end_matches(['\r', '\n']);
+            hunk_lines.push(format!("{prefix}{line}"));
+        }
+        sections.push(hunk_lines.join("\n"));
+    }
+    sections.join("\n")
+}
+
 fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMessage) -> String {
     let body = sanitize_line(&m.content);
     let Some(call) = find_associated_tool_call(messages, tool_msg_idx) else {
@@ -56,17 +154,47 @@ fn format_tool_display(messages: &[ChatMessage], tool_msg_idx: usize, m: &ChatMe
         return body;
     };
 
-    let mut param_lines = vec![String::from("Parameters:")];
-    for (k, v) in obj {
-        let val_str = sanitize_line(&format_param_value(v));
-        param_lines.push(format!("  {k}: {val_str}"));
-    }
-    let params_block = param_lines.join("\n");
+    match call.function.name.as_str() {
+        "read_file" => {
+            if m.is_error || body.trim().is_empty() {
+                return body;
+            }
+            let path = obj
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let lang = lang_for_path(path);
+            let fence = fence_for_content(&body);
+            format!("{fence}{lang}\n{body}\n{fence}")
+        }
+        "edit_file" => {
+            let edits = obj.get("edits").and_then(serde_json::Value::as_array);
+            let Some(edits) = edits.filter(|e| !e.is_empty()) else {
+                return body;
+            };
+            let diff_body = sanitize_line(&format_edit_hunks_diff(edits));
+            let fence = fence_for_content(&diff_body);
+            let diff_block = format!("{fence}diff\n{diff_body}\n{fence}");
+            if m.is_error && !body.trim().is_empty() {
+                format!("{body}\n\n{diff_block}")
+            } else {
+                diff_block
+            }
+        }
+        _ => {
+            let mut param_lines = vec![String::from("Parameters:")];
+            for (k, v) in obj {
+                let val_str = sanitize_line(&format_param_value(v));
+                param_lines.push(format!("  {k}: {val_str}"));
+            }
+            let params_block = param_lines.join("\n");
 
-    if body.trim().is_empty() {
-        params_block
-    } else {
-        format!("{params_block}\n\n{body}")
+            if body.trim().is_empty() {
+                params_block
+            } else {
+                format!("{params_block}\n\n{body}")
+            }
+        }
     }
 }
 
@@ -201,42 +329,138 @@ impl TuiApp {
         false
     }
 
-    fn message_header(&self, idx: usize) -> (String, Color) {
+    fn message_header(&self, idx: usize) -> Vec<Span<'static>> {
         let m = &self.messages[idx];
+        let primary = |label: String, color: Color| {
+            vec![Span::styled(
+                format!("▸ {label} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )]
+        };
+
         match m.role.as_str() {
-            "user" => (format!("USER{}", image_badge(m)), theme::HEADER_USER),
-            "assistant" => ("ARCHON".to_string(), theme::HEADER_ASSISTANT),
-            "error" => ("⚠ ERROR".to_string(), theme::HEADER_ERROR),
+            "user" => primary(format!("USER{}", image_badge(m)), theme::HEADER_USER),
+            "assistant" => primary("ARCHON".to_string(), theme::HEADER_ASSISTANT),
+            "error" => primary("⚠ ERROR".to_string(), theme::HEADER_ERROR),
             "local" => {
                 let ctx_suffix = if m.include_in_context { " [+CTX]" } else { "" };
                 if let Some(ref summary) = m.tool_name {
-                    (
+                    primary(
                         sanitize_line(&format!("TOOL [{summary}]{ctx_suffix}")),
                         theme::HEADER_LOCAL,
                     )
                 } else {
-                    (format!("SHELL{ctx_suffix}"), theme::HEADER_LOCAL)
+                    primary(format!("SHELL{ctx_suffix}"), theme::HEADER_LOCAL)
                 }
             }
             "tool" => {
-                let summary = find_associated_tool_call(&self.messages, idx)
+                let call = find_associated_tool_call(&self.messages, idx);
+                let summary = call
                     .map(tools::call_signature)
                     .or_else(|| m.tool_name.clone())
                     .unwrap_or_else(|| "tool".to_string());
-                if m.is_error {
-                    (sanitize_line(&format!("⚠ {summary}")), theme::HEADER_ERROR)
+                let (glyph, color) = if m.is_error {
+                    ("⚠", theme::HEADER_ERROR)
                 } else {
-                    (sanitize_line(&format!("⚙ {summary}")), theme::HEADER_TOOL)
+                    ("⚙", theme::HEADER_TOOL)
+                };
+                let mut spans = vec![Span::styled(
+                    format!("  {glyph} {} ", sanitize_line(&summary)),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )];
+
+                if let Some(call) = call
+                    && let Some(obj) = call.function.arguments.as_object()
+                {
+                    let path_style = Style::default()
+                        .fg(theme::SIDEBAR_DIR)
+                        .add_modifier(Modifier::BOLD);
+                    match call.function.name.as_str() {
+                        "read_file" => {
+                            if let Some(path) =
+                                obj.get("file_path").and_then(serde_json::Value::as_str)
+                            {
+                                let start =
+                                    obj.get("start_line").and_then(serde_json::Value::as_u64);
+                                let end = obj.get("end_line").and_then(serde_json::Value::as_u64);
+                                let range = match (start, end) {
+                                    (Some(s), Some(e)) => format!(":{s}-{e}"),
+                                    (Some(s), None) => format!(":{s}-"),
+                                    (None, Some(e)) => format!(":1-{e}"),
+                                    (None, None) => String::new(),
+                                };
+                                spans.push(Span::styled(sanitize_line(path.trim()), path_style));
+                                if !range.is_empty() {
+                                    spans.push(Span::styled(
+                                        range,
+                                        Style::default().fg(theme::MODAL_MUTED),
+                                    ));
+                                }
+                                spans.push(Span::raw(" "));
+                            }
+                        }
+                        "edit_file" => {
+                            if let Some(path) =
+                                obj.get("file_path").and_then(serde_json::Value::as_str)
+                            {
+                                spans.push(Span::styled(sanitize_line(path.trim()), path_style));
+                                if let Some(edits) =
+                                    obj.get("edits").and_then(serde_json::Value::as_array)
+                                    && !edits.is_empty()
+                                {
+                                    let (added, removed) = edit_hunk_stats(edits);
+                                    if added > 0 || removed > 0 {
+                                        if added > 0 {
+                                            spans.push(Span::styled(
+                                                format!(" +{added}"),
+                                                Style::default()
+                                                    .fg(theme::DIFF_ADD)
+                                                    .add_modifier(Modifier::BOLD),
+                                            ));
+                                        }
+                                        if removed > 0 {
+                                            spans.push(Span::styled(
+                                                format!(" -{removed}"),
+                                                Style::default()
+                                                    .fg(theme::DIFF_DELETE)
+                                                    .add_modifier(Modifier::BOLD),
+                                            ));
+                                        }
+                                    } else {
+                                        let label = if edits.len() == 1 { "edit" } else { "edits" };
+                                        spans.push(Span::styled(
+                                            format!(" ({} {label})", edits.len()),
+                                            Style::default().fg(theme::MODAL_MUTED),
+                                        ));
+                                    }
+                                }
+                                spans.push(Span::raw(" "));
+                            }
+                        }
+                        "create_file" => {
+                            if let Some(path) =
+                                obj.get("file_path").and_then(serde_json::Value::as_str)
+                            {
+                                spans.push(Span::styled(sanitize_line(path.trim()), path_style));
+                                spans.push(Span::raw(" "));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+
+                spans
             }
             "hook" => {
                 let summary = m.tool_name.as_deref().unwrap_or("hook");
-                (
-                    sanitize_line(&format!("⚡ HOOK [{summary}]")),
-                    theme::HEADER_HOOK,
-                )
+                vec![Span::styled(
+                    format!("  ⚡ HOOK [{}] ", sanitize_line(summary)),
+                    Style::default()
+                        .fg(theme::HEADER_HOOK)
+                        .add_modifier(Modifier::BOLD),
+                )]
             }
-            _ => ("SYS".to_string(), theme::HEADER_SYSTEM),
+            _ => primary("SYS".to_string(), theme::HEADER_SYSTEM),
         }
     }
 
@@ -317,7 +541,12 @@ impl TuiApp {
             };
             self.render_message_block(
                 i,
-                ("ARCHON (...)", theme::HEADER_STREAMING),
+                vec![Span::styled(
+                    "▸ ARCHON (...) ",
+                    Style::default()
+                        .fg(theme::HEADER_STREAMING)
+                        .add_modifier(Modifier::BOLD),
+                )],
                 false,
                 &styled_stream,
                 lines,
@@ -488,7 +717,7 @@ impl TuiApp {
     fn render_message_block(
         &mut self,
         idx: usize,
-        (header_label, color): (&str, Color),
+        mut header_spans: Vec<Span<'static>>,
         truncated: bool,
         styled_content: &[Line<'static>],
         lines: &mut Vec<Line<'static>>,
@@ -502,15 +731,6 @@ impl TuiApp {
         } else {
             self.config.app.max_msg_lines
         };
-
-        let mut header_spans = vec![Span::styled(
-            if header_label.starts_with("⚙ ") || header_label.starts_with("⚡ HOOK") {
-                format!("  {header_label} ")
-            } else {
-                format!("▸ {header_label} ")
-            },
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )];
         if truncated {
             header_spans.push(Span::styled(
                 "⚠ TRUNCATED ",
@@ -1200,7 +1420,7 @@ impl TuiApp {
                 continue;
             }
 
-            let (header_label, color) = self.message_header(i);
+            let header_spans = self.message_header(i);
             let truncated = self.messages[i].truncated;
             let styled_content = self.styled_messages[i].clone();
 
@@ -1213,7 +1433,7 @@ impl TuiApp {
 
             self.render_message_block(
                 i,
-                (&header_label, color),
+                header_spans,
                 truncated,
                 &styled_content,
                 &mut lines,
@@ -1235,7 +1455,12 @@ impl TuiApp {
             );
             self.render_message_block(
                 block_idx,
-                (&header, theme::HEADER_QUEUED),
+                vec![Span::styled(
+                    format!("▸ {header} "),
+                    Style::default()
+                        .fg(theme::HEADER_QUEUED)
+                        .add_modifier(Modifier::BOLD),
+                )],
                 false,
                 &styled_queued,
                 &mut lines,
