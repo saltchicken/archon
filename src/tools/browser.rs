@@ -46,6 +46,8 @@ pub enum BrowserAction {
     Eval,
     /// Extract structured data (text, attributes, href) from elements matching a CSS selector, parsed server-side with the `scraper` crate.
     Extract,
+    /// List visible interactive elements (inputs, buttons, links, etc.) with their attributes and suggested CSS selectors.
+    Find,
     /// Capture a PNG screenshot of the current viewport (or element) to a file.
     Screenshot,
     /// Show current URL, title, and session status.
@@ -296,6 +298,51 @@ impl CdpSession {
         }
     }
 
+    /// List the first `limit` visible interactive elements with their attributes
+    /// and a suggested CSS selector. Used for diagnostics and the `find` action.
+    async fn list_interactive_elements(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        // NOTE: JS object braces are escaped as {{ }} for Rust's format! macro.
+        let expr = format!(
+            r#"Array.from(document.querySelectorAll(
+                'input, textarea, select, button, a[href], [role="button"], [role="link"], [role="combobox"], [contenteditable="true"]'
+            ))
+            .filter(el => {{
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            }})
+            .slice(0, {limit})
+            .map(el => ({{
+                tag: el.tagName.toLowerCase(),
+                id: el.id || '',
+                name: el.name || '',
+                type: el.type || '',
+                role: el.getAttribute('role') || '',
+                placeholder: el.placeholder || '',
+                label: (el.labels && el.labels[0] && el.labels[0].textContent) || '',
+                href: el.tagName === 'A' ? (el.getAttribute('href') || '').slice(0, 100) : '',
+                text: (el.textContent || el.value || '').trim().slice(0, 60),
+                suggested_selector: el.id ? '#' + el.id :
+                    (el.name ? el.tagName.toLowerCase() + '[name="' + el.name + '"]' :
+                        el.tagName.toLowerCase() === 'a' ? 'a[href="' + (el.getAttribute('href') || '') + '"]' :
+                            el.tagName.toLowerCase() + (el.type ? '[type="' + el.type + '"]' : ''))
+            }}))"#
+        );
+        let val = self.evaluate_raw(&expr).await?;
+        match val {
+            serde_json::Value::Array(items) => Ok(items),
+            other => {
+                // `evaluate_raw` may return a JSON-encoded array as a string
+                // (when the result isn't natively serializable).
+                if let Some(s) = other.as_str()
+                    && let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(s)
+                {
+                    return Ok(parsed);
+                }
+                Ok(vec![])
+            }
+        }
+    }
+
     async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()> {
         let escaped = js_str(sel);
         let expr = format!("document.querySelector({escaped}) !== null");
@@ -305,7 +352,23 @@ impl CdpSession {
                 return Ok(());
             }
             if Instant::now() > deadline {
-                bail!("Element '{sel}' not found within {}s", timeout.as_secs());
+                // Provide diagnostic info so the caller can self-correct.
+                let elements = self
+                    .list_interactive_elements(15)
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!("failed to enumerate elements for diagnostics: {e}");
+                        vec![]
+                    });
+                let el_list = serde_json::to_string_pretty(&elements)
+                    .unwrap_or_else(|_| "(unable to enumerate elements)".into());
+
+                bail!(
+                    "Element '{sel}' not found within {}s.\n\n\
+                     Available interactive elements (first 15):\n{}",
+                    timeout.as_secs(),
+                    el_list
+                );
             }
             sleep(Duration::from_millis(200)).await;
         }
@@ -847,7 +910,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
+    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, and capture screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -972,6 +1035,20 @@ impl AsyncTool for Tool {
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let source = session.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+
+            BrowserAction::Find => {
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                let elements = session.list_interactive_elements(30).await?;
+                let url = session.current_url().await.unwrap_or_default();
+                let title = session.title().await.unwrap_or_default();
+                let result = serde_json::json!({
+                    "url": url,
+                    "title": title,
+                    "count": elements.len(),
+                    "elements": elements
+                });
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
@@ -1126,6 +1203,12 @@ mod tests {
         assert!(args.clear, "clear should default to true");
     }
 
+    #[test]
+    fn browser_args_find_action() {
+        let args: BrowserArgs = serde_json::from_str(r#"{"action":"find"}"#).unwrap();
+        assert!(matches!(args.action, BrowserAction::Find));
+    }
+
     // ── js_str escaping tests ──────────────────────────────────────────────
 
     #[test]
@@ -1271,6 +1354,22 @@ mod tests {
         let extracted = extract_from_html(&html, "h1").expect("extract failed");
         assert_eq!(extracted["count"], 1);
         assert_eq!(extracted["items"][0]["text"], "Hello CDP");
+
+        // list_interactive_elements (page has <button id='btn'> and <input id='inp'>)
+        let elements = session
+            .list_interactive_elements(10)
+            .await
+            .expect("list_interactive_elements failed");
+        assert!(
+            !elements.is_empty(),
+            "page has <button> and <input>; should not be empty"
+        );
+        let inp = elements.iter().find(|e| e["id"] == "inp");
+        assert!(inp.is_some(), "input#inp should be in the list");
+        assert_eq!(inp.unwrap()["suggested_selector"], "#inp");
+        let btn = elements.iter().find(|e| e["id"] == "btn");
+        assert!(btn.is_some(), "button#btn should be in the list");
+        assert_eq!(btn.unwrap()["tag"], "button");
 
         // type_text (clear + type)
         session
