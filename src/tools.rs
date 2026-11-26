@@ -266,6 +266,30 @@ impl ToolContext {
         exclude_set: &GlobSet,
         neg_exclude_set: &GlobSet,
     ) -> Result<()> {
+        self.check_rel_path_allowed_impl(rel, exclude_set, neg_exclude_set, false)
+    }
+
+    /// Variant of [`check_rel_path_allowed`] for paths under explicitly
+    /// configured `read_roots`.  Skips the hidden-file check because
+    /// `read_roots` is an explicit permission grant — dot-named files and
+    /// directories under the root are readable without `app.allow_hidden`.
+    /// The `.git` and exclude-pattern checks still apply.
+    pub fn check_rel_path_allowed_read_root(
+        &self,
+        rel: &Path,
+        exclude_set: &GlobSet,
+        neg_exclude_set: &GlobSet,
+    ) -> Result<()> {
+        self.check_rel_path_allowed_impl(rel, exclude_set, neg_exclude_set, true)
+    }
+
+    fn check_rel_path_allowed_impl(
+        &self,
+        rel: &Path,
+        exclude_set: &GlobSet,
+        neg_exclude_set: &GlobSet,
+        skip_hidden: bool,
+    ) -> Result<()> {
         if rel.as_os_str().is_empty() || rel == Path::new(".") {
             return Ok(());
         }
@@ -278,7 +302,7 @@ impl ToolContext {
         if neg_exclude_set.is_match(rel) {
             return Ok(());
         }
-        if !self.config.app.allow_hidden && has_hidden_component(rel) {
+        if !skip_hidden && !self.config.app.allow_hidden && has_hidden_component(rel) {
             bail!(
                 "Security violation: '{}' is a hidden file or directory (set `app.allow_hidden = true` in config.toml to allow access)",
                 rel.display()
@@ -342,13 +366,13 @@ impl ToolContext {
             .iter()
             .find(|r| canon.starts_with(r))
         {
-            // Enforce the same policy as the workspace path (and what `search`
-            // already enforces on read roots): hidden-file and default-exclude
-            // checks on the path *relative* to the read root.
-            // `~/.cargo/registry/src/foo` is fine, but hidden files and secret
-            // patterns (`.env`, `*.key`, `secrets.json`, …) stay blocked
-            // unless `app.allow_hidden` (or a negated exclude) allows them.
-            self.ensure_not_excluded_under(&canon, root)?;
+            // Enforce `.git` and default-exclude checks on the path relative
+            // to the read root.  `read_roots` is an explicit permission grant,
+            // so hidden files/dirs under the root are readable without
+            // `app.allow_hidden = true`.
+            let rel = diff_paths(&canon, root).unwrap_or_else(|| canon.clone());
+            let (exclude_set, neg_exclude_set) = self.build_exclude_globsets(&[], true)?;
+            self.check_rel_path_allowed_read_root(&rel, &exclude_set, &neg_exclude_set)?;
             return Ok(canon);
         }
 
@@ -1302,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn read_file_hidden_file_in_read_root_blocked() {
+    fn read_file_hidden_file_in_read_root_allowed() {
         let root_dir = tempfile::tempdir().unwrap();
         let read_root = dunce::canonicalize(root_dir.path()).unwrap();
         // Create a hidden subdirectory with a file inside it.
@@ -1316,13 +1340,10 @@ mod tests {
         config.app.allow_hidden = false;
         let ctx = ToolContext::new(&config, None, 1024).unwrap();
 
-        let err = ctx
-            .resolve_readable_path(secret.to_str().unwrap())
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("hidden file"),
-            "unexpected error: {err}"
-        );
+        // `read_roots` is an explicit permission grant, so hidden files under
+        // the root are readable even without `app.allow_hidden`.
+        let resolved = ctx.resolve_readable_path(secret.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, secret);
     }
 
     #[test]
