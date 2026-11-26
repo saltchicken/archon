@@ -344,34 +344,72 @@ impl CdpSession {
     }
 
     async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()> {
+        // Tri-state probe: `found`, `missing` (valid selector, nothing yet — may
+        // render late, so keep waiting), or `invalid` (the selector itself is not
+        // parseable and can never match, so fail fast). Catching the throw in-page
+        // lets us tell the two failure modes apart and attach a useful diagnostic
+        // to both, instead of surfacing a raw CDP `SyntaxError`.
         let escaped = js_str(sel);
-        let expr = format!("document.querySelector({escaped}) !== null");
+        let expr = format!(
+            r#"(() => {{
+                try {{
+                    return {{kind: document.querySelector({escaped}) !== null ? 'found' : 'missing'}};
+                }} catch (e) {{
+                    return {{kind: 'invalid', detail: String(e)}};
+                }}
+            }})()"#
+        );
         let deadline = Instant::now() + timeout;
         loop {
-            if self.evaluate_raw(&expr).await?.as_bool() == Some(true) {
-                return Ok(());
+            let probe = self.evaluate_raw(&expr).await?;
+            match probe
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("missing")
+            {
+                "found" => return Ok(()),
+                "invalid" => {
+                    let detail = probe.get("detail").and_then(|v| v.as_str());
+                    return Err(self.selector_error(sel, true, detail, None).await);
+                }
+                // 'missing' (or unexpected) — the element may render late; wait.
+                _ => {
+                    if Instant::now() > deadline {
+                        return Err(self
+                            .selector_error(sel, false, None, Some(timeout.as_secs()))
+                            .await);
+                    }
+                    sleep(Duration::from_millis(200)).await;
+                }
             }
-            if Instant::now() > deadline {
-                // Provide diagnostic info so the caller can self-correct.
-                let elements = self
-                    .list_interactive_elements(15)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!("failed to enumerate elements for diagnostics: {e}");
-                        vec![]
-                    });
-                let el_list = serde_json::to_string_pretty(&elements)
-                    .unwrap_or_else(|_| "(unable to enumerate elements)".into());
-
-                bail!(
-                    "Element '{sel}' not found within {}s.\n\n\
-                     Available interactive elements (first 15):\n{}",
-                    timeout.as_secs(),
-                    el_list
-                );
-            }
-            sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Build a diagnostic `Error` for a failed selector lookup, appending a
+    /// bounded, best-effort menu of visible interactive elements so the caller
+    /// can self-correct. Enumeration failure never masks the real problem: the
+    /// menu degrades to a note while the original message is preserved.
+    async fn selector_error(
+        &self,
+        sel: &str,
+        invalid: bool,
+        detail: Option<&str>,
+        waited_secs: Option<u64>,
+    ) -> anyhow::Error {
+        let elements = match self.list_interactive_elements(15).await {
+            Ok(list) => Some(list),
+            Err(e) => {
+                warn!("failed to enumerate elements for selector diagnostics: {e}");
+                None
+            }
+        };
+        anyhow::anyhow!(format_selector_error(
+            sel,
+            invalid,
+            detail,
+            waited_secs,
+            elements.as_deref()
+        ))
     }
 
     async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String> {
@@ -396,7 +434,12 @@ impl CdpSession {
             .ok_or_else(|| anyhow::anyhow!("document outerHTML was not a string"))
     }
 
-    async fn click(&self, sel: &str) -> Result<()> {
+    async fn click(&self, sel: &str, timeout: Duration) -> Result<()> {
+        // Resolve the element first so an invalid selector or a missing one
+        // surfaces the same self-correcting diagnostic as `type`/`read`.
+        self.wait_for_selector(sel, timeout).await?;
+
+        // Scroll into view, then read the post-scroll center point to click.
         let escaped = js_str(sel);
         let expr = format!(
             r#"(() => {{
@@ -411,11 +454,11 @@ impl CdpSession {
         let x = coords
             .get("x")
             .and_then(|v| v.as_f64())
-            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' is no longer available to click"))?;
         let y = coords
             .get("y")
             .and_then(|v| v.as_f64())
-            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Element '{sel}' is no longer available to click"))?;
 
         self.send_cmd(
             "Input.dispatchMouseEvent",
@@ -636,7 +679,10 @@ impl BrowserRegistry {
 
         let profile = expand_tilde(profile_dir);
         std::fs::create_dir_all(&profile).with_context(|| {
-            format!("Failed to create CDP profile directory {}", profile.display())
+            format!(
+                "Failed to create CDP profile directory {}",
+                profile.display()
+            )
         })?;
 
         let args: Vec<String> = vec![
@@ -872,6 +918,40 @@ fn has_return_statement(script: &str) -> bool {
     false
 }
 
+/// Pure formatting of a selector-failure diagnostic, given an already-fetched
+/// interactive-element menu. Split out from the async `selector_error` helper so
+/// the wording (invalid-vs-missing, menu presence) is unit-testable without a
+/// live browser session. `elements` is `None` only when enumeration itself
+/// failed (a page that genuinely has no interactive elements is an empty list).
+fn format_selector_error(
+    sel: &str,
+    invalid: bool,
+    detail: Option<&str>,
+    waited_secs: Option<u64>,
+    elements: Option<&[serde_json::Value]>,
+) -> String {
+    let el_list = match elements {
+        Some(list) => serde_json::to_string_pretty(list)
+            .unwrap_or_else(|_| "(unable to enumerate elements)".into()),
+        None => "(unable to enumerate elements — the page may be restricted)".into(),
+    };
+
+    let head = if invalid {
+        let d = detail.unwrap_or("unparseable selector");
+        format!(
+            "Invalid CSS selector '{sel}': {d}.\n\
+             Tip: check selector syntax — e.g. attribute values with spaces must be quoted ([value=\"ok\"]).\n\n"
+        )
+    } else {
+        let waited = waited_secs
+            .map(|s| format!(" within {s}s"))
+            .unwrap_or_default();
+        format!("Element '{sel}' not found{waited}.\n\n")
+    };
+
+    format!("{head}Available interactive elements (first 15):\n{el_list}")
+}
+
 /// Extract structured data (inner text, all attributes, and a resolved
 /// `href`) from every element matching `selector` in an HTML `source`.
 ///
@@ -1004,7 +1084,7 @@ impl AsyncTool for Tool {
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
-                session.click(sel).await?;
+                session.click(sel, Duration::from_secs(wait_secs)).await?;
                 let url = session.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
             }
@@ -1226,6 +1306,47 @@ mod tests {
         assert!(matches!(args.action, BrowserAction::Find));
     }
 
+    // ── selector-error diagnostic formatting tests ─────────────────────────
+
+    #[test]
+    fn format_selector_error_distinguishes_invalid_and_missing() {
+        let menu: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"tag":"input","name":"btnK","suggested_selector":"input[name=\"btnK\"]","text":"Google Search"}]"#,
+        )
+        .unwrap();
+
+        let invalid = format_selector_error(
+            "input[value=Google Search]",
+            true,
+            Some("SyntaxError: 'input[value=Google Search]' is not a valid selector"),
+            None,
+            Some(menu.as_slice()),
+        );
+        assert!(invalid.contains("Invalid CSS selector 'input[value=Google Search]'"));
+        assert!(invalid.contains("is not a valid selector"));
+        assert!(invalid.contains("suggested_selector"));
+        assert!(invalid.contains("btnK"));
+        assert!(!invalid.contains("not found within"));
+
+        let missing = format_selector_error(
+            "button.kg-lcl",
+            false,
+            None,
+            Some(10),
+            Some(menu.as_slice()),
+        );
+        assert!(missing.contains("Element 'button.kg-lcl' not found within 10s"));
+        assert!(!missing.contains("Invalid CSS selector"));
+        assert!(missing.contains("Available interactive elements"));
+    }
+
+    #[test]
+    fn format_selector_error_degrades_when_menu_unavailable() {
+        let msg = format_selector_error(".x", true, None, None, None);
+        assert!(msg.contains("Invalid CSS selector"));
+        assert!(msg.contains("unable to enumerate"));
+    }
+
     // ── js_str escaping tests ──────────────────────────────────────────────
 
     #[test]
@@ -1388,6 +1509,30 @@ mod tests {
         assert!(btn.is_some(), "button#btn should be in the list");
         assert_eq!(btn.unwrap()["tag"], "button");
 
+        // wait_for_selector diagnostics: a valid-but-missing selector waits then
+        // reports "not found" with the interactive-element menu attached.
+        let missing_err = session
+            .wait_for_selector("#definitely-not-here", Duration::from_millis(500))
+            .await
+            .expect_err("should not find a missing element");
+        let missing_msg = missing_err.to_string();
+        assert!(missing_msg.contains("not found within"));
+        assert!(missing_msg.contains("Available interactive elements"));
+        assert!(
+            missing_msg.contains("#btn"),
+            "menu should list the page's <button id='btn'>"
+        );
+
+        // wait_for_selector diagnostics: an *invalid* CSS selector fails with a
+        // distinct "Invalid CSS selector" message, not a raw CDP SyntaxError.
+        let invalid_err = session
+            .wait_for_selector("input[value=Google Search]", Duration::from_millis(500))
+            .await
+            .expect_err("should reject an invalid CSS selector");
+        let invalid_msg = invalid_err.to_string();
+        assert!(invalid_msg.contains("Invalid CSS selector"));
+        assert!(!invalid_msg.contains("not found within"));
+
         // type_text (clear + type)
         session
             .type_text("#inp", "hello world", true, Duration::from_secs(3))
@@ -1400,10 +1545,7 @@ mod tests {
         assert_eq!(inp_val, serde_json::json!("hello world"));
 
         // screenshot (viewport)
-        let png = session
-            .screenshot(None)
-            .await
-            .expect("screenshot failed");
+        let png = session.screenshot(None).await.expect("screenshot failed");
         assert!(png.len() > 1000, "PNG too small: {} bytes", png.len());
         assert!(
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
