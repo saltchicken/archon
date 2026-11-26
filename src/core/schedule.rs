@@ -93,7 +93,7 @@ fn resolve_scope(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
-    Ok((format!("ws-{}", sanitize_unit_component(raw_name)), canon))
+    Ok((sanitize_unit_component(raw_name), canon))
 }
 
 pub fn unit_base_name(scope: &str, name: &str) -> String {

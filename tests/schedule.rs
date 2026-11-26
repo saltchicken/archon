@@ -9,8 +9,8 @@ fn sanitize_unit_component_normalizes_names() {
     assert_eq!(sanitize_unit_component("Daily_Audit!"), "daily-audit");
     assert_eq!(sanitize_unit_component("---"), "default");
     assert_eq!(
-        unit_base_name("ws-archon", "daily_check"),
-        "archon-sched-ws-archon--daily-check"
+        unit_base_name("archon", "daily_check"),
+        "archon-sched-archon--daily-check"
     );
 }
 
@@ -41,7 +41,7 @@ fn render_service_and_timer_produce_valid_systemd_units() {
 
     let service = render_service(
         &sched,
-        "ws-archon",
+        "archon",
         Path::new("/home/user/project"),
         Path::new("/usr/bin/archon"),
     );
@@ -53,11 +53,11 @@ fn render_service_and_timer_produce_valid_systemd_units() {
 
     let timer = render_timer(
         &sched,
-        "ws-archon",
+        "archon",
         Path::new("/home/user/project"),
-        "archon-sched-ws-archon--nightly-review.service",
+        "archon-sched-archon--nightly-review.service",
     );
     assert!(timer.contains("OnCalendar=*-*-* 02:00:00\n"));
     assert!(timer.contains("Persistent=true\n"));
-    assert!(timer.contains("Unit=archon-sched-ws-archon--nightly-review.service\n"));
+    assert!(timer.contains("Unit=archon-sched-archon--nightly-review.service\n"));
 }
