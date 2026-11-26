@@ -33,7 +33,6 @@ shlex = "2.0.1"
 similar = "3.2.1"
 tempfile = "3.27"
 textwrap = "0.16"
-thirtyfour = "0.38"
 tokio = { version = "1.54", features = ["full", "process"] }
 tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["codec", "io"] }

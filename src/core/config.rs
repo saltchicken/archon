@@ -166,29 +166,20 @@ impl Default for DotfilesSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserSettings {
-    /// Browser automation backend: `"webdriver"` (default) or `"cdp"`.
-    /// When `"cdp"`, Archon drives Chrome via the Chrome DevTools Protocol.
-    pub backend: String,
-    /// CDP port to connect to (only used when `backend = "cdp"`).
+    /// CDP port to connect to (or spawn Chrome on if none is listening).
     pub cdp_port: u16,
     /// Profile directory used when Archon has to spawn its own CDP Chrome
     /// instance (i.e. no Chrome with `--remote-debugging-port` is listening on
     /// `cdp_port` yet). A dedicated profile keeps it from clobbering your
     /// daily-driver Chrome session. Tilde is expanded.
     pub cdp_user_data_dir: String,
-    /// Launch the browser in headless mode (no visible window) by default.
-    /// Default is `false` — a visible browser window is used unless this is
-    /// set to `true`, or a browser tool call passes `headless: true` explicitly.
-    pub headless: bool,
 }
 
 impl Default for BrowserSettings {
     fn default() -> Self {
         Self {
-            backend: "webdriver".into(),
             cdp_port: 9222,
             cdp_user_data_dir: "~/.config/chrome-cdp".into(),
-            headless: false,
         }
     }
 }
@@ -522,9 +513,8 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
             "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"workspace_snapshot\"]\n\n",
             "[browser]\n",
-            "# backend = \"webdriver\"  # or \"cdp\" to attach to a running Chrome\n",
             "# cdp_port = 9222\n",
-            "# headless = false  # true to launch without a visible window\n\n",
+            "# cdp_user_data_dir = \"~/.config/chrome-cdp\"\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",
@@ -792,36 +782,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn browser_settings_default_is_visible() {
-        let settings = BrowserSettings::default();
-        assert!(
-            !settings.headless,
-            "browser.headless should default to false (visible window)"
-        );
-    }
-
-    #[test]
-    fn browser_settings_deserializes_headless() {
-        let toml_str = "backend = \"webdriver\"\ncdp_port = 9222\nheadless = true\n";
-        let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
-        assert!(settings.headless);
-    }
-
-    #[test]
-    fn browser_settings_missing_headless_defaults_false() {
-        let toml_str = "backend = \"cdp\"\ncdp_port = 9223\n";
-        let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
-        assert!(!settings.headless);
-    }
-
-    #[test]
     fn browser_settings_cdp_user_data_dir_default() {
         let settings = BrowserSettings::default();
+        assert_eq!(settings.cdp_port, 9222);
         assert_eq!(settings.cdp_user_data_dir, "~/.config/chrome-cdp");
 
         // Missing key falls back to the default via #[serde(default)].
-        let toml_str = "backend = \"cdp\"\ncdp_port = 9222\n";
+        let toml_str = "cdp_port = 9223\n";
         let deserialized: BrowserSettings = toml::from_str(toml_str).unwrap();
+        assert_eq!(deserialized.cdp_port, 9223);
         assert_eq!(deserialized.cdp_user_data_dir, "~/.config/chrome-cdp");
     }
 

@@ -3,7 +3,6 @@ use super::{
     utils::http::{SsrfPolicy, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
-use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use schemars::JsonSchema;
@@ -11,17 +10,11 @@ use scraper::{ElementRef, Html, Selector};
 use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    net::TcpListener,
     path::PathBuf,
-    process::Stdio,
     sync::{Arc, OnceLock},
     time::Duration,
 };
-use thirtyfour::{
-    By, ChromiumLikeCapabilities, DesiredCapabilities, WebDriver, prelude::ElementQueryable,
-};
 use tokio::{
-    process::{Child, Command},
     sync::Mutex,
     time::{Instant, sleep},
 };
@@ -29,12 +22,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 use crate::core::config::expand_tilde;
-#[cfg(unix)]
-use crate::core::processes::kill_process_group;
 use crate::core::processes::{ProcessRegistry, SpawnOptions};
 
 const DEFAULT_WAIT_SECS: u64 = 10;
-const DRIVER_START_TIMEOUT_SECS: u64 = 5;
 /// How long to wait for a spawned CDP Chrome to become ready.
 const CDP_START_TIMEOUT_SECS: u64 = 10;
 const MAX_EXTRACT_ELEMENTS: usize = 200;
@@ -89,282 +79,10 @@ pub struct BrowserArgs {
     /// Max seconds to wait for `selector` to appear (default: 10).
     #[serde(default)]
     pub wait_secs: Option<u64>,
-    /// Whether to run the browser in headless mode (no visible window).
-    /// Set to `true` for headless, or `false` for a visible window you can
-    /// observe and interact with.
-    ///
-    /// This is a *sticky* session setting: once a mode is established it persists
-    /// across subsequent calls, so only provide it when you want to (re)start the
-    /// session in a specific mode. When omitted, the current session's mode is
-    /// kept; if no session exists yet, the default comes from `browser.headless`
-    /// in config.toml (default: `false`, i.e. a visible window).
-    ///
-    /// Ignored when `browser.backend` is set to `"cdp"` and archon attaches to an
-    /// already-running browser; when archon spawns the CDP Chrome itself, it
-    /// controls that instance's `--headless` mode.
-    #[serde(default)]
-    pub headless: Option<bool>,
 }
 
 fn default_true() -> bool {
     true
-}
-
-/// Backend trait for browser automation.
-///
-/// Implementations can target different protocols (WebDriver, CDP) while
-/// sharing the same action surface exposed to the LLM.
-#[async_trait]
-pub trait BrowserBackend: Send + Sync {
-    /// Human-readable label for status display (e.g. `"managed chromedriver"`, `"CDP"`).
-    fn label(&self) -> String;
-
-    /// Navigate to a URL.
-    async fn goto(&self, url: &str) -> Result<()>;
-
-    /// Wait for a CSS selector to appear in the DOM.
-    async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()>;
-
-    /// Read visible text from the element matching `sel`.
-    async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String>;
-
-    /// Read visible text from the page `<body>`.
-    async fn read_page_text(&self) -> Result<String>;
-
-    /// Get the full rendered outer HTML of the document.
-    async fn get_outer_html(&self) -> Result<String>;
-
-    /// Click the element matching `sel`.
-    async fn click(&self, sel: &str, timeout: Duration) -> Result<()>;
-
-    /// Type `text` into the element matching `sel`.
-    async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()>;
-
-    /// Execute JavaScript in the page context and return the JSON result.
-    async fn evaluate(&self, script: &str) -> Result<serde_json::Value>;
-
-    /// Capture a PNG screenshot (viewport, or element if `sel` is `Some`).
-    async fn screenshot(&self, sel: Option<&str>, timeout: Duration) -> Result<Vec<u8>>;
-
-    /// Get the current page URL.
-    async fn current_url(&self) -> Result<String>;
-
-    /// Get the current page title.
-    async fn title(&self) -> Result<String>;
-
-    /// Check whether the browser session is still alive.
-    async fn is_alive(&self) -> bool;
-
-    /// Close the browser session and free resources.
-    async fn close(&self) -> Result<()>;
-}
-
-struct ManagedDriverProcess {
-    child: Child,
-    #[cfg(unix)]
-    pgid: Option<u32>,
-}
-
-impl ManagedDriverProcess {
-    fn spawn(port: u16) -> Result<Self> {
-        let mut cmd = Command::new("chromedriver");
-        cmd.arg(format!("--port={port}"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let child = cmd.spawn().context(
-            "Failed to spawn `chromedriver`. Ensure it is installed in PATH \
-             or set ARCHON_WEBDRIVER_URL to an existing WebDriver endpoint.",
-        )?;
-        #[cfg(unix)]
-        let pgid = child.id();
-
-        Ok(Self {
-            child,
-            #[cfg(unix)]
-            pgid,
-        })
-    }
-
-    async fn terminate(mut self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid.take() {
-            kill_process_group(pgid);
-        }
-        let _ = self.child.start_kill();
-        let _ = self.child.wait().await;
-    }
-}
-
-impl Drop for ManagedDriverProcess {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid.take() {
-            kill_process_group(pgid);
-        }
-        let _ = self.child.start_kill();
-    }
-}
-
-struct WebDriverBackend {
-    driver: WebDriver,
-    /// Present only when Archon spawned `chromedriver` itself.
-    driver_proc: Option<ManagedDriverProcess>,
-}
-
-#[async_trait]
-impl BrowserBackend for WebDriverBackend {
-    fn label(&self) -> String {
-        if self.driver_proc.is_some() {
-            "managed chromedriver".into()
-        } else {
-            "external WebDriver".into()
-        }
-    }
-
-    async fn goto(&self, url: &str) -> Result<()> {
-        self.driver
-            .goto(url)
-            .await
-            .with_context(|| format!("Failed to navigate to '{url}'"))?;
-        Ok(())
-    }
-
-    async fn wait_for_selector(&self, sel: &str, timeout: Duration) -> Result<()> {
-        find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
-        Ok(())
-    }
-
-    async fn read_selector_text(&self, sel: &str, timeout: Duration) -> Result<String> {
-        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
-        elem.text().await.context("Failed to read element text")
-    }
-
-    async fn read_page_text(&self) -> Result<String> {
-        let body = self
-            .driver
-            .find(By::Tag("body"))
-            .await
-            .context("Page has no <body>")?;
-        body.text().await.context("Failed to read page text")
-    }
-
-    async fn get_outer_html(&self) -> Result<String> {
-        let ret = self
-            .driver
-            .execute("return document.documentElement.outerHTML", vec![])
-            .await
-            .context("Failed to read rendered HTML")?;
-        ret.json()
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow::anyhow!("rendered HTML source was not a string"))
-    }
-
-    async fn click(&self, sel: &str, timeout: Duration) -> Result<()> {
-        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
-        elem.click()
-            .await
-            .with_context(|| format!("Failed to click '{sel}'"))?;
-        Ok(())
-    }
-
-    async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()> {
-        let elem = find_with_wait(&self.driver, sel, timeout.as_secs()).await?;
-        if clear {
-            let _ = elem.clear().await;
-        }
-        elem.send_keys(text)
-            .await
-            .with_context(|| format!("Failed to type into '{sel}'"))?;
-        Ok(())
-    }
-
-    async fn evaluate(&self, script: &str) -> Result<serde_json::Value> {
-        let ret = self
-            .driver
-            .execute(ensure_return(script), vec![])
-            .await
-            .context("JavaScript evaluation failed")?;
-        Ok(ret.json().clone())
-    }
-
-    async fn screenshot(&self, sel: Option<&str>, timeout: Duration) -> Result<Vec<u8>> {
-        match sel {
-            Some(s) => {
-                let elem = find_with_wait(&self.driver, s, timeout.as_secs()).await?;
-                Ok(elem
-                    .screenshot_as_png()
-                    .await
-                    .context("Failed to capture element screenshot")?)
-            }
-            None => Ok(self
-                .driver
-                .screenshot_as_png()
-                .await
-                .context("Failed to capture viewport screenshot")?),
-        }
-    }
-
-    async fn current_url(&self) -> Result<String> {
-        Ok(self.driver.current_url().await?.to_string())
-    }
-
-    async fn title(&self) -> Result<String> {
-        self.driver
-            .title()
-            .await
-            .context("Failed to get page title")
-    }
-
-    async fn is_alive(&self) -> bool {
-        self.driver.status().await.is_ok()
-    }
-
-    async fn close(&self) -> Result<()> {
-        let driver = self.driver.clone();
-        if let Err(e) = driver.quit().await {
-            debug!("WebDriver quit error during close: {e}");
-        }
-        Ok(())
-    }
-}
-
-// ─── CDP Backend ───────────────────────────────────────────────────────────────
-
-/// Which browser backend to use.
-#[derive(Debug, Clone)]
-enum BackendType {
-    WebDriver,
-    Cdp { port: u16 },
-}
-
-impl BackendType {
-    /// Resolve the backend from config:
-    /// - `browser.backend = "cdp"` enables CDP mode using `browser.cdp_port`
-    /// - anything else defaults to WebDriver (chromedriver)
-    fn resolve(backend: &str, cdp_port: u16) -> Self {
-        match backend {
-            "cdp" => Self::Cdp { port: cdp_port },
-            _ => Self::WebDriver,
-        }
-    }
-}
-
-/// Resolve the default headless mode used when a tool call does not pass
-/// `headless` explicitly and no session exists yet.
-///
-/// `ARCHON_BROWSER_HEADLESS` (a boolean string) overrides
-/// `browser.headless` from config.toml, which defaults to `false` (visible).
-fn resolve_headless_default(config_default: bool) -> bool {
-    std::env::var("ARCHON_BROWSER_HEADLESS")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(config_default)
 }
 
 /// Locate a Chrome/Chromium binary to spawn a managed CDP instance.
@@ -420,11 +138,10 @@ fn js_str(s: &str) -> String {
 ///
 /// Either attaches to an already-running Chrome (started with
 /// `--remote-debugging-port=<port>`), or — when nothing is listening on that
-/// port — one is spawned as a background job through the
-/// [`ProcessRegistry`] (the same mechanism the `notify` tool uses for
-/// `notify-send`). Only the managed instance is stopped by
-/// [`CdpBackend::close`]; the user's own browser is never killed.
-struct CdpBackend {
+/// port — spawns a visible Chrome instance as a background job through the
+/// [`ProcessRegistry`]. Only the managed instance is stopped by
+/// [`CdpSession::close`]; the user's own browser is never killed.
+struct CdpSession {
     ws: Mutex<
         tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -436,7 +153,7 @@ struct CdpBackend {
     managed_job: Option<String>,
 }
 
-impl CdpBackend {
+impl CdpSession {
     /// Discover a page target on `localhost:{port}` and connect via WebSocket.
     async fn connect(port: u16) -> Result<Self> {
         let targets_url = format!("http://127.0.0.1:{port}/json");
@@ -467,25 +184,25 @@ impl CdpBackend {
             .await
             .with_context(|| format!("WebSocket connection to CDP failed at {ws_url}"))?;
 
-        let backend = Self {
+        let session = Self {
             ws: Mutex::new(ws),
             next_id: AtomicU64::new(1),
             managed_job: None,
         };
 
         // Enable the CDP domains we need.
-        backend
+        session
             .send_cmd("Page.enable", serde_json::json!({}))
             .await?;
-        backend
+        session
             .send_cmd("Runtime.enable", serde_json::json!({}))
             .await?;
-        backend
+        session
             .send_cmd("DOM.enable", serde_json::json!({}))
             .await?;
 
-        info!("CDP backend connected and domains enabled");
-        Ok(backend)
+        info!("CDP session connected and domains enabled");
+        Ok(session)
     }
 
     /// Send a CDP command and wait for the matching response by `id`.
@@ -554,10 +271,7 @@ impl CdpBackend {
             .cloned()
             .unwrap_or(serde_json::Value::Null))
     }
-}
 
-#[async_trait]
-impl BrowserBackend for CdpBackend {
     fn label(&self) -> String {
         match &self.managed_job {
             Some(job_id) => format!("CDP (managed, job {job_id})"),
@@ -619,7 +333,7 @@ impl BrowserBackend for CdpBackend {
             .ok_or_else(|| anyhow::anyhow!("document outerHTML was not a string"))
     }
 
-    async fn click(&self, sel: &str, _timeout: Duration) -> Result<()> {
+    async fn click(&self, sel: &str) -> Result<()> {
         let escaped = js_str(sel);
         let expr = format!(
             r#"(() => {{
@@ -686,8 +400,7 @@ impl BrowserBackend for CdpBackend {
 
     async fn evaluate(&self, script: &str) -> Result<serde_json::Value> {
         // `Runtime.evaluate` runs in the global scope where `return` is a
-        // SyntaxError. If the script uses top-level `return` (the pattern
-        // required by WebDriver's `execute`), wrap it in an IIFE.
+        // SyntaxError. If the script uses top-level `return`, wrap it in an IIFE.
         let expr = if has_return_statement(script) {
             format!("(() => {{ {script} }})()")
         } else {
@@ -696,7 +409,7 @@ impl BrowserBackend for CdpBackend {
         self.evaluate_raw(&expr).await
     }
 
-    async fn screenshot(&self, sel: Option<&str>, _timeout: Duration) -> Result<Vec<u8>> {
+    async fn screenshot(&self, sel: Option<&str>) -> Result<Vec<u8>> {
         let params = if let Some(s) = sel {
             let escaped = js_str(s);
             let box_expr = format!(
@@ -757,7 +470,7 @@ impl BrowserBackend for CdpBackend {
             }
         } else {
             // Attached to the user's own browser — never kill it. The
-            // WebSocket connection closes when the CdpBackend is dropped.
+            // WebSocket connection closes when the CdpSession is dropped.
             debug!("CDP session closed (Chrome left running)");
         }
         Ok(())
@@ -765,8 +478,7 @@ impl BrowserBackend for CdpBackend {
 }
 
 pub struct BrowserRegistry {
-    session: Mutex<Option<Arc<dyn BrowserBackend>>>,
-    headless: Mutex<bool>,
+    session: Mutex<Option<Arc<CdpSession>>>,
 }
 
 impl BrowserRegistry {
@@ -776,45 +488,9 @@ impl BrowserRegistry {
             .get_or_init(|| {
                 Arc::new(Self {
                     session: Mutex::new(None),
-                    headless: Mutex::new(false),
                 })
             })
             .clone()
-    }
-
-    fn external_webdriver_url() -> Option<String> {
-        std::env::var("ARCHON_WEBDRIVER_URL")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    fn allocate_local_port() -> Result<u16> {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").context("Failed to bind ephemeral local port")?;
-        Ok(listener.local_addr()?.port())
-    }
-
-    async fn wait_for_driver_ready(wd_url: &str, proc: &mut ManagedDriverProcess) -> Result<()> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
-            .build()?;
-        let status_url = format!("{wd_url}/status");
-        let deadline = Instant::now() + Duration::from_secs(DRIVER_START_TIMEOUT_SECS);
-
-        while Instant::now() < deadline {
-            if let Some(exit) = proc.child.try_wait()? {
-                bail!("`chromedriver` exited prematurely with status {exit}");
-            }
-            if let Ok(resp) = client.get(&status_url).send().await
-                && resp.status().is_success()
-            {
-                return Ok(());
-            }
-            sleep(Duration::from_millis(50)).await;
-        }
-
-        bail!("Timed out waiting for `chromedriver` to become ready at {wd_url}");
     }
 
     /// `true` if a CDP endpoint is already serving on `port`.
@@ -859,20 +535,15 @@ impl BrowserRegistry {
         bail!("Timed out waiting for managed Chrome to serve CDP at {url}\n{out}");
     }
 
-    /// Connect the CDP backend on `port`.
+    /// Connect to Chrome over CDP on `port`.
     ///
     /// Attaches if a Chrome with remote debugging is already listening;
-    /// otherwise spawns one as a background job (via
-    /// [`ProcessRegistry::start_with`], the same purpose-built-tool mechanism
-    /// the `notify` tool uses) and attaches once it is ready.
-    async fn connect_cdp(
-        port: u16,
-        headless: bool,
-        profile_dir: &str,
-    ) -> Result<Arc<dyn BrowserBackend>> {
+    /// otherwise spawns a visible Chrome instance as a background job (via
+    /// [`ProcessRegistry::start_with`]) and attaches once it is ready.
+    async fn connect_cdp(port: u16, profile_dir: &str) -> Result<Arc<CdpSession>> {
         // Fast path: attach to an already-running Chrome.
         if Self::cdp_reachable(port).await {
-            return Ok(Arc::new(CdpBackend::connect(port).await?));
+            return Ok(Arc::new(CdpSession::connect(port).await?));
         }
 
         let chrome_bin = find_chrome_binary().with_context(|| {
@@ -888,19 +559,15 @@ impl BrowserRegistry {
             format!("Failed to create CDP profile directory {}", profile.display())
         })?;
 
-        let mut args: Vec<String> = vec![
+        let args: Vec<String> = vec![
             format!("--remote-debugging-port={port}"),
             format!("--user-data-dir={}", profile.display()),
             "--remote-allow-origins=*".into(),
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
             "--window-size=1440,900".into(),
+            "about:blank".into(),
         ];
-        if headless {
-            args.push("--headless=new".into());
-            args.push("--disable-gpu".into());
-        }
-        args.push("about:blank".into());
 
         let reg = ProcessRegistry::global();
         let job = reg
@@ -921,14 +588,14 @@ impl BrowserRegistry {
 
         let connected = async {
             Self::wait_for_cdp_ready(port, &job.id).await?;
-            CdpBackend::connect(port).await
+            CdpSession::connect(port).await
         }
         .await;
 
         match connected {
-            Ok(mut backend) => {
-                backend.managed_job = Some(job.id);
-                Ok(Arc::new(backend))
+            Ok(mut session) => {
+                session.managed_job = Some(job.id);
+                Ok(Arc::new(session))
             }
             Err(e) => {
                 // Don't leave a half-started Chrome running.
@@ -938,134 +605,41 @@ impl BrowserRegistry {
         }
     }
 
-    async fn connect_new(
-        headless: bool,
-        backend_type: &BackendType,
-        cdp_profile_dir: &str,
-    ) -> Result<Arc<dyn BrowserBackend>> {
-        match backend_type {
-            BackendType::Cdp { port } => Self::connect_cdp(*port, headless, cdp_profile_dir).await,
-            BackendType::WebDriver => Self::connect_webdriver(headless).await,
-        }
-    }
-
-    async fn connect_webdriver(headless: bool) -> Result<Arc<dyn BrowserBackend>> {
-        let (wd_url, mut driver_proc) = match Self::external_webdriver_url() {
-            Some(url) => (url, None),
-            None => {
-                let port = Self::allocate_local_port()?;
-                let url = format!("http://127.0.0.1:{port}");
-                info!("Spawning managed chromedriver on {url}");
-                let mut proc = ManagedDriverProcess::spawn(port)?;
-                if let Err(e) = Self::wait_for_driver_ready(&url, &mut proc).await {
-                    proc.terminate().await;
-                    return Err(e);
-                }
-                (url, Some(proc))
-            }
-        };
-
-        let mut caps = DesiredCapabilities::chrome();
-        if headless {
-            caps.add_arg("--headless=new")?;
-            caps.add_arg("--disable-gpu")?;
-        }
-        caps.add_arg("--window-size=1440,900")?;
-
-        let mode = if headless { "headless" } else { "visible" };
-        info!("Starting {mode} WebDriver session at {wd_url}");
-        match WebDriver::new(&wd_url, caps).await {
-            Ok(driver) => Ok(Arc::new(WebDriverBackend {
-                driver,
-                driver_proc,
-            })),
-            Err(e) => {
-                if let Some(proc) = driver_proc.take() {
-                    proc.terminate().await;
-                }
-                Err(e).with_context(|| format!("Failed to connect to WebDriver at {wd_url}"))
-            }
-        }
-    }
-
-    /// Returns a live WebDriver for the requested mode.
-    ///
-    /// `headless` is a *sticky* session setting:
-    /// - `Some(h)` establishes/overrides the mode, reconnecting only if it differs
-    ///   from the current session's mode.
-    /// - `None` keeps the current session's mode. When no session exists yet,
-    ///   `default_headless` applies — this comes from `browser.headless` in
-    ///   config.toml (default: `false`, i.e. a visible browser window).
-    ///
-    /// This means the mode only has to be specified once; omitting it on later calls
-    /// no longer forces a reconnect back to a default.
-    async fn get_or_init(
-        &self,
-        headless: Option<bool>,
-        default_headless: bool,
-        backend_type: &BackendType,
-        cdp_profile_dir: &str,
-    ) -> Result<Arc<dyn BrowserBackend>> {
-        let stored_headless = *self.headless.lock().await;
-
+    async fn get_or_init(&self, port: u16, cdp_profile_dir: &str) -> Result<Arc<CdpSession>> {
         let mut guard = self.session.lock().await;
-        let desired = match headless {
-            Some(h) => h,
-            None if guard.is_some() => stored_headless,
-            None => default_headless,
-        };
-        let mode_changed = desired != stored_headless;
 
         if let Some(ref existing) = *guard {
-            if !mode_changed && existing.is_alive().await {
+            if existing.is_alive().await {
                 return Ok(Arc::clone(existing));
             }
-            if mode_changed {
-                info!(
-                    "Browser mode changed (headless: {stored_headless} -> {desired}); reconnecting..."
-                );
-            } else {
-                warn!("Existing browser session is stale; reconnecting...");
-            }
+            warn!("Existing browser session is stale; reconnecting...");
             if let Some(stale) = guard.take() {
                 let _ = stale.close().await;
             }
         }
 
-        if mode_changed {
-            *self.headless.lock().await = desired;
-        }
-
-        let backend = Self::connect_new(desired, backend_type, cdp_profile_dir).await?;
-        let cloned = Arc::clone(&backend);
-        *guard = Some(backend);
+        let session = Self::connect_cdp(port, cdp_profile_dir).await?;
+        let cloned = Arc::clone(&session);
+        *guard = Some(session);
         Ok(cloned)
     }
 
-    /// The headless mode of the current (or most recently created) session.
-    pub async fn headless_mode(&self) -> bool {
-        *self.headless.lock().await
-    }
-
     pub async fn status(&self) -> String {
-        let headless = *self.headless.lock().await;
         let guard = self.session.lock().await;
-        let Some(ref backend) = *guard else {
-            let mode = if headless { "headless" } else { "visible" };
-            return format!("Browser status: inactive (no open session, mode: {mode}).");
+        let Some(ref session) = *guard else {
+            return "Browser status: inactive (no open session).".into();
         };
-        let url = backend.current_url().await.unwrap_or_default();
-        let title = backend.title().await.unwrap_or_default();
-        let label = backend.label();
-        let mode = if headless { "headless" } else { "visible" };
-        format!("Browser status: active ({mode}, {label})\nURL: {url}\nTitle: {title}")
+        let url = session.current_url().await.unwrap_or_default();
+        let title = session.title().await.unwrap_or_default();
+        let label = session.label();
+        format!("Browser status: active ({label})\nURL: {url}\nTitle: {title}")
     }
 
     pub async fn close(&self) -> Result<String> {
         let existing = self.session.lock().await.take();
         match existing {
-            Some(backend) => {
-                let _ = backend.close().await;
+            Some(session) => {
+                let _ = session.close().await;
                 Ok("Browser session closed.".into())
             }
             None => Ok("No active browser session.".into()),
@@ -1074,34 +648,10 @@ impl BrowserRegistry {
 
     /// Called by `CoreEngine::run` on shutdown.
     pub async fn shutdown(&self) {
-        if let Some(backend) = self.session.lock().await.take() {
+        if let Some(session) = self.session.lock().await.take() {
             info!("Shutting down active browser session...");
-            let _ = backend.close().await;
+            let _ = session.close().await;
         }
-    }
-}
-
-/// Ensure the script has an explicit `return` statement.
-///
-/// Chromedriver ≥ 157 wraps the script in a function body, so bare
-/// expressions evaluate to `undefined` (serialised as `null`) unless
-/// you use an explicit `return`.  Single-expression scripts get one
-/// auto-prepended; multi-statement scripts are passed through unchanged
-/// (the user is expected to include their own `return`).
-///
-/// Detection: only a *top-level* `return` (parenthesis depth 0 and brace
-/// depth 0) counts. `return`s nested inside a callback/function body, e.g.
-/// `[1,2,3].map(function (x) { return x * 2; })`, are deliberately ignored so
-/// that a `return` is still auto-prepended for the outer expression.
-/// String literals, template literals, and comments are skipped, so the
-/// substring "return" (e.g. in a CSS selector like `.return-btn`) never
-/// produces a false positive.
-fn ensure_return(script: &str) -> String {
-    let trimmed = script.trim();
-    if has_return_statement(trimmed) {
-        trimmed.to_string()
-    } else {
-        format!("return {trimmed}")
     }
 }
 
@@ -1242,19 +792,6 @@ fn has_return_statement(script: &str) -> bool {
     false
 }
 
-async fn find_with_wait(
-    driver: &WebDriver,
-    selector: &str,
-    wait_secs: u64,
-) -> Result<thirtyfour::WebElement> {
-    driver
-        .query(By::Css(selector))
-        .wait(Duration::from_secs(wait_secs), Duration::from_millis(150))
-        .first()
-        .await
-        .with_context(|| format!("Element '{selector}' not found within {wait_secs}s"))
-}
-
 /// Extract structured data (inner text, all attributes, and a resolved
 /// `href`) from every element matching `selector` in an HTML `source`.
 ///
@@ -1310,15 +847,14 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or drives Chrome via CDP when browser.backend is set to cdp in config.toml — attaching to a running Chrome, or spawning one on browser.cdp_port if none is listening. Runs with a visible window by default; set browser.headless = true in config.toml (or pass headless: true) for headless mode.";
+    const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let reg = BrowserRegistry::global();
         let wait_secs = args.wait_secs.unwrap_or(DEFAULT_WAIT_SECS).clamp(1, 60);
-        let backend_type =
-            BackendType::resolve(&ctx.config.browser.backend, ctx.config.browser.cdp_port);
-        let default_headless = resolve_headless_default(ctx.config.browser.headless);
+        let cdp_port = ctx.config.browser.cdp_port;
+        let profile_dir = &ctx.config.browser.cdp_user_data_dir;
 
         match args.action {
             BrowserAction::Close => reg.close().await,
@@ -1342,15 +878,8 @@ impl AsyncTool for Tool {
                 );
                 validate_public_url(&parsed, &policy).await?;
 
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
-                backend.goto(parsed.as_str()).await?;
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                session.goto(parsed.as_str()).await?;
 
                 if let Some(sel) = args
                     .selector
@@ -1358,44 +887,32 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    backend
+                    session
                         .wait_for_selector(sel, Duration::from_secs(wait_secs))
                         .await?;
                 }
 
-                let final_url = backend.current_url().await?;
-                let title = backend.title().await.unwrap_or_default();
-                let mode = if reg.headless_mode().await {
-                    "[headless]"
-                } else {
-                    "[visible]"
-                };
-                Ok(format!("Navigated to: {final_url}\nTitle: {title} {mode}"))
+                let final_url = session.current_url().await?;
+                let title = session.title().await.unwrap_or_default();
+                Ok(format!("Navigated to: {final_url}\nTitle: {title}"))
             }
 
             BrowserAction::Read => {
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let sel = args
                     .selector
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
                 let text = if let Some(s) = sel {
-                    backend
+                    session
                         .read_selector_text(s, Duration::from_secs(wait_secs))
                         .await?
                 } else {
-                    backend.read_page_text().await?
+                    session.read_page_text().await?
                 };
-                let url = backend.current_url().await.unwrap_or_default();
-                let title = backend.title().await.unwrap_or_default();
+                let url = session.current_url().await.unwrap_or_default();
+                let title = session.title().await.unwrap_or_default();
                 Ok(format!("URL: {url}\nTitle: {title}\n\n{}", text.trim()))
             }
 
@@ -1406,16 +923,9 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
-                backend.click(sel, Duration::from_secs(wait_secs)).await?;
-                let url = backend.current_url().await.unwrap_or_default();
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                session.click(sel).await?;
+                let url = session.current_url().await.unwrap_or_default();
                 Ok(format!("Clicked '{sel}'. Current URL: {url}"))
             }
 
@@ -1430,15 +940,8 @@ impl AsyncTool for Tool {
                     .text
                     .as_deref()
                     .context("'text' is required for browser:type")?;
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
-                backend
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                session
                     .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
                     .await?;
                 Ok(format!(
@@ -1454,15 +957,8 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
-                let result = backend.evaluate(script).await?;
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                let result = session.evaluate(script).await?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
@@ -1473,36 +969,20 @@ impl AsyncTool for Tool {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
-                let source = backend.get_outer_html().await?;
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
+                let source = session.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
 
             BrowserAction::Screenshot => {
-                let backend = reg
-                    .get_or_init(
-                        args.headless,
-                        default_headless,
-                        &backend_type,
-                        &ctx.config.browser.cdp_user_data_dir,
-                    )
-                    .await?;
+                let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let sel = args
                     .selector
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
-                let png = backend
-                    .screenshot(sel, Duration::from_secs(wait_secs))
-                    .await?;
+                let png = session.screenshot(sel).await?;
 
                 let out_path: PathBuf = match args
                     .path
@@ -1538,61 +1018,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_return_prepends_bare_expression() {
-        assert_eq!(ensure_return("document.title"), "return document.title");
-    }
-
-    #[test]
-    fn ensure_return_keeps_existing_return() {
-        assert_eq!(
-            ensure_return("return document.title"),
-            "return document.title"
-        );
-    }
-
-    #[test]
-    fn ensure_return_handles_multiline_with_return() {
-        let script = "let el = document.body;\nreturn el.textContent;";
-        assert_eq!(ensure_return(script), script);
-    }
-
-    #[test]
-    fn ensure_return_detects_return_after_semicolon() {
-        assert_eq!(
-            ensure_return("let x = 1; return x;"),
-            "let x = 1; return x;"
-        );
-    }
-
-    #[test]
-    fn ensure_return_detects_return_inside_block() {
-        let script = "if (true) { return 'yes'; }";
-        assert_eq!(ensure_return(script), script);
-    }
-
-    #[test]
-    fn ensure_return_false_positive_css_selector() {
-        // This should NOT be treated as having a return statement.
-        let script = "document.querySelector('.return-btn').textContent";
-        assert_eq!(
-            ensure_return(script),
-            "return document.querySelector('.return-btn').textContent"
-        );
-    }
-
-    #[test]
-    fn ensure_return_false_positive_variable_name() {
-        let script = "return_value";
-        // 'return_value' is a single identifier, not a return statement.
-        assert_eq!(ensure_return(script), "return return_value");
-    }
-
-    #[test]
-    fn ensure_return_handles_return_semicolon_only() {
-        assert_eq!(ensure_return("return;"), "return;");
-    }
-
-    #[test]
     fn has_return_statement_negative_cases() {
         assert!(!has_return_statement(
             "document.querySelector('.return-btn')"
@@ -1608,25 +1033,6 @@ mod tests {
         assert!(has_return_statement("let x = 1; return x;"));
         assert!(has_return_statement("{ return 'a'; }"));
         assert!(has_return_statement("if (x) return y; else return z;"));
-    }
-
-    #[test]
-    fn ensure_return_fixes_callback_false_positive() {
-        // A `return` inside a callback must not suppress the top-level `return`
-        // (this is the real-world bug that produced `null` from
-        // `[1,2,3].map(function (x) { return x * 2; }).length`).
-        assert_eq!(
-            ensure_return("[1,2,3].map(function (x) { return x * 2; }).length"),
-            "return [1,2,3].map(function (x) { return x * 2; }).length"
-        );
-    }
-
-    #[test]
-    fn ensure_return_fixes_arrow_callback_false_positive() {
-        assert_eq!(
-            ensure_return("[1,2,3].map((x) => x * 2).length"),
-            "return [1,2,3].map((x) => x * 2).length"
-        );
     }
 
     #[test]
@@ -1718,21 +1124,6 @@ mod tests {
         assert!(matches!(args.action, BrowserAction::Status));
         assert_eq!(args.url, None);
         assert!(args.clear, "clear should default to true");
-        assert!(
-            args.headless.is_none(),
-            "headless should default to None (sticky)"
-        );
-    }
-
-    #[test]
-    fn browser_args_headless_false() {
-        let json = r#"{"action":"goto","url":"https://example.com","headless":false}"#;
-        let args: BrowserArgs = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            args.headless,
-            Some(false),
-            "headless should be Some(false) when explicitly set"
-        );
     }
 
     // ── js_str escaping tests ──────────────────────────────────────────────
@@ -1788,9 +1179,8 @@ mod tests {
         assert!(!has_return_statement("[1,2,3].map((x) => x * 2).length"));
     }
 
-    // ── CDP integration test ──────────────────────────────────────────────
-    // Requires Chrome installed. Run with:
-    //   cargo test cdp_backend_full_lifecycle -- --ignored
+    // ── CDP integration tests ─────────────────────────────────────────────
+    // Requires Chrome installed.
 
     #[tokio::test]
     async fn cdp_backend_full_lifecycle() {
@@ -1802,7 +1192,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        // Spawn headless Chrome with CDP enabled.
+        // Spawn Chrome with CDP enabled.
         let mut chrome_proc = tokio::process::Command::new(&chrome)
             .arg("--headless")
             .arg(format!("--remote-debugging-port={port}"))
@@ -1834,24 +1224,24 @@ mod tests {
 
         // Connect via the registry's CDP entry point — this hits the
         // "attach to an already-running Chrome" fast path.
-        let backend = BrowserRegistry::connect_cdp(port, true, "/tmp/archon-cdp-attach-test")
+        let session = BrowserRegistry::connect_cdp(port, "/tmp/archon-cdp-attach-test")
             .await
             .expect("connect_cdp failed");
 
         // Navigate to a data URL (no network needed).
         let page = "data:text/html,<html><head><title>CDP Test Page</title></head><body><h1>Hello CDP</h1><p id='para'>Test paragraph text</p><button id='btn'>Click me</button><input id='inp' type='text' value='initial'></body></html>";
-        backend.goto(page).await.expect("goto failed");
+        session.goto(page).await.expect("goto failed");
 
         // title
-        let title = backend.title().await.expect("title failed");
+        let title = session.title().await.expect("title failed");
         assert!(title.contains("CDP Test Page"), "title: {title}");
 
         // current_url
-        let current = backend.current_url().await.expect("current_url failed");
+        let current = session.current_url().await.expect("current_url failed");
         assert!(current.starts_with("data:"), "url: {current}");
 
         // read_page_text
-        let text = backend
+        let text = session
             .read_page_text()
             .await
             .expect("read_page_text failed");
@@ -1859,18 +1249,18 @@ mod tests {
         assert!(text.contains("Test paragraph text"), "page text: {text}");
 
         // read_selector_text
-        let para = backend
+        let para = session
             .read_selector_text("#para", Duration::from_secs(3))
             .await
             .expect("read_selector_text failed");
         assert_eq!(para.trim(), "Test paragraph text");
 
         // evaluate
-        let val = backend.evaluate("2 + 3").await.expect("evaluate failed");
+        let val = session.evaluate("2 + 3").await.expect("evaluate failed");
         assert_eq!(val, serde_json::json!(5));
 
         // get_outer_html + extract_from_html
-        let html = backend
+        let html = session
             .get_outer_html()
             .await
             .expect("get_outer_html failed");
@@ -1883,19 +1273,19 @@ mod tests {
         assert_eq!(extracted["items"][0]["text"], "Hello CDP");
 
         // type_text (clear + type)
-        backend
+        session
             .type_text("#inp", "hello world", true, Duration::from_secs(3))
             .await
             .expect("type_text failed");
-        let inp_val = backend
+        let inp_val = session
             .evaluate("document.querySelector('#inp').value")
             .await
             .expect("read input value failed");
         assert_eq!(inp_val, serde_json::json!("hello world"));
 
         // screenshot (viewport)
-        let png = backend
-            .screenshot(None, Duration::from_secs(5))
+        let png = session
+            .screenshot(None)
             .await
             .expect("screenshot failed");
         assert!(png.len() > 1000, "PNG too small: {} bytes", png.len());
@@ -1905,8 +1295,8 @@ mod tests {
         );
 
         // screenshot (element)
-        let el_png = backend
-            .screenshot(Some("h1"), Duration::from_secs(5))
+        let el_png = session
+            .screenshot(Some("h1"))
             .await
             .expect("element screenshot failed");
         assert!(
@@ -1916,17 +1306,17 @@ mod tests {
         );
 
         // is_alive
-        assert!(backend.is_alive().await, "backend should be alive");
+        assert!(session.is_alive().await, "session should be alive");
 
         // label
-        let label = backend.label();
+        let label = session.label();
         assert!(
             label.contains("CDP"),
             "label should mention CDP, got: {label}"
         );
 
         // close (should NOT kill Chrome)
-        backend.close().await.expect("close failed");
+        session.close().await.expect("close failed");
 
         // Verify Chrome is still running (CDP close doesn't kill the browser).
         let still_up = reqwest::get(&targets_url)
@@ -1950,19 +1340,19 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let profile = std::env::temp_dir().join(format!("archon-cdp-spawn-test-{}", std::process::id()));
+        let profile =
+            std::env::temp_dir().join(format!("archon-cdp-spawn-test-{}", std::process::id()));
 
         // connect_cdp must spawn its own Chrome since nothing listens on this port.
-        let backend =
-            BrowserRegistry::connect_cdp(port, true, &profile.to_string_lossy())
-                .await
-                .expect("connect_cdp failed (should have spawned a managed Chrome)");
+        let session = BrowserRegistry::connect_cdp(port, &profile.to_string_lossy())
+            .await
+            .expect("connect_cdp failed (should have spawned a managed Chrome)");
 
-        // The backend reports a managed instance with its job id.
-        let label = backend.label();
+        // The session reports a managed instance with its job id.
+        let label = session.label();
         let job_id = label
             .rsplit_once("job ")
-            .map(|(_, id)| id.trim_end().to_string())
+            .map(|(_, id)| id.trim_end_matches(')').trim_end().to_string())
             .unwrap_or_else(|| panic!("label should contain the managed job id, got: {label}"));
 
         let reg = ProcessRegistry::global();
@@ -1976,11 +1366,11 @@ mod tests {
         assert_eq!(job.source, "browser", "job source should be the browser tool");
 
         // Basic sanity: we can drive the page.
-        let val = backend.evaluate("1 + 1").await.expect("evaluate failed");
+        let val = session.evaluate("1 + 1").await.expect("evaluate failed");
         assert_eq!(val, serde_json::json!(2));
 
         // Close must stop the managed Chrome (unlike an attached session).
-        backend.close().await.expect("close failed");
+        session.close().await.expect("close failed");
 
         let job = reg
             .list()
@@ -1988,7 +1378,10 @@ mod tests {
             .into_iter()
             .find(|j| j.id == job_id)
             .expect("managed Chrome job should still be listed");
-        assert!(job.finished, "managed Chrome job should be finished after close");
+        assert!(
+            job.finished,
+            "managed Chrome job should be finished after close"
+        );
 
         // The CDP endpoint should stop serving shortly after the kill.
         let mut gone = false;
@@ -1999,7 +1392,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        assert!(gone, "CDP endpoint should be down after closing the managed session");
+        assert!(
+            gone,
+            "CDP endpoint should be down after closing the managed session"
+        );
 
         // Best-effort cleanup of the throwaway profile.
         let _ = std::fs::remove_dir_all(&profile);
