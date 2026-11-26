@@ -34,7 +34,7 @@ similar = "3.2.1"
 tempfile = "3.27"
 textwrap = "0.16"
 tokio = { version = "1.54", features = ["full", "process"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 toml = "1.2.1"
 tracing = "0.1"

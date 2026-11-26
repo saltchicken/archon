@@ -239,7 +239,7 @@ impl CdpSession {
         });
 
         let mut ws = self.ws.lock().await;
-        ws.send(Message::Text(msg.to_string()))
+        ws.send(Message::text(msg.to_string()))
             .await
             .with_context(|| format!("Failed to send CDP command {method}"))?;
 
