@@ -433,7 +433,24 @@ impl CdpSession {
             }),
         )
         .await?;
-        Ok(())
+
+        // Wait for any navigation triggered by the click to settle.
+        // Give the browser a moment to start the transition, then poll
+        // document.readyState until the new page is fully loaded.
+        sleep(Duration::from_millis(150)).await;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let state = self.evaluate_raw("document.readyState").await?;
+            if state.as_str() == Some("complete") {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                // Not necessarily an error — the click may not have
+                // triggered a full navigation. Return Ok regardless.
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
     }
 
     async fn type_text(&self, sel: &str, text: &str, clear: bool, timeout: Duration) -> Result<()> {
