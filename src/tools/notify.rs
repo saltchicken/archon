@@ -44,7 +44,7 @@ pub struct Tool;
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "notify";
-    const DESCRIPTION: &'static str = "Send a desktop notification via notify-send (mako). Useful for alerting the user when a task, check, or scheduled job finishes.";
+    const DESCRIPTION: &'static str = "Send a desktop notification via notify-send (dunst). Useful for alerting the user when a task, check, or scheduled job finishes.";
     type Args = NotifyArgs;
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {

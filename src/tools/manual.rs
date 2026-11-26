@@ -91,16 +91,12 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
             if !map.contains_key("action")
                 && matches!(
                     token,
-                    "start" | "list" | "output" | "poll" | "kill" | "clean"
+                    "list" | "output" | "poll" | "kill" | "clean"
                 ) =>
         {
             &["action"]
         }
-        "process" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
-            "start" => &["command"],
-            "output" | "poll" | "kill" => &["id"],
-            _ => &["id"],
-        },
+        "process" => &["id"],
         "browser"
             if !map.contains_key("action")
                 && matches!(

@@ -317,7 +317,6 @@ impl Default for AppSettings {
                 "process:list",
                 "process:output",
                 "process:poll",
-                "process:clean",
                 "dotfiles:list",
                 "dotfiles:read",
                 "dotfiles:search",

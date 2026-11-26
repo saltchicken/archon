@@ -1,25 +1,26 @@
-//! `process` tool: run long-running commands in the background and follow or
-//! stop them across turns.
+//! `process` tool: manage background jobs started by other tools.
 //!
 //! Delegates to the process-lifetime [`crate::core::processes::ProcessRegistry`],
-//! which owns the spawned children. `start` and `kill` are gated behind
-//! approval; `list`, `output`, `poll`, and `clean` are read-only / follow
-//! actions (auto-approved by default).
+//! which owns the spawned children. This tool is **management-only** —
+//! the LLM can `list`, `output`, `poll`, `kill`, and `clean` jobs, but
+//! cannot start new ones. Spawning is reserved for purpose-built tools that
+//! call [`ProcessRegistry::start_with`] directly, ensuring the LLM never
+//! specifies arbitrary shell commands.
+//!
+//! `kill` and `clean` are gated behind approval; `list`, `output`, and `poll`
+//! are read-only / follow actions (auto-approved by default).
 
 use super::{AsyncTool, ToolContext};
 use crate::core::processes::ProcessRegistry;
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 pub struct Tool;
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ProcessAction {
-    /// Start a long-running command in the background and get its job id.
-    Start,
     /// List all background jobs (running and finished) with their status.
     List,
     /// Peek at the last N lines of a job's recorded output (does not consume it).
@@ -36,22 +37,7 @@ enum ProcessAction {
 pub struct ProcessArgs {
     /// The process action to run.
     action: ProcessAction,
-    /// Executable to run (action=start). No shell is involved; pass `args` separately. e.g. `"node"`, `"cargo"`.
-    #[serde(default)]
-    command: String,
-    /// Arguments for the executable (action=start). e.g. `["server.js"]` or `["watch", "-w", ".", "run"]`.
-    #[serde(
-        default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
-    )]
-    args: Vec<String>,
-    /// Working directory (action=start); relative to the workspace root, or absolute. Defaults to the workspace root.
-    #[serde(default)]
-    cwd: String,
-    /// Extra environment variables to set (action=start), as `{NAME: value}`. The ambient environment (PATH, HOME, …) is inherited.
-    #[serde(default)]
-    env: HashMap<String, String>,
-    /// Job id (action=output|poll|kill). Get ids from `start` or `list`.
+    /// Job id (action=output|poll|kill). Get ids from `list`.
     #[serde(default)]
     id: String,
     /// Number of trailing output lines to return (action=output). 0 = the entire recorded output. Default 50.
@@ -72,34 +58,12 @@ fn require_id(args: &ProcessArgs) -> Result<String> {
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "process";
-    const DESCRIPTION: &'static str = "Run long-running commands in the background (a dev server, a build, a watcher, a soak test) and follow or stop them across turns: start, list, output (peek at the tail), poll (wait + new output), kill, clean.";
+    const DESCRIPTION: &'static str = "Manage background jobs started by purpose-built tools (list, peek at output, poll for new output, kill, clean). This tool cannot start new processes.";
     type Args = ProcessArgs;
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {
         let reg = ProcessRegistry::global();
         match args.action {
-            ProcessAction::Start => {
-                if args.command.trim().is_empty() {
-                    bail!("'command' is required for process:start");
-                }
-                let cwd = if args.cwd.trim().is_empty() {
-                    None
-                } else {
-                    Some(args.cwd.trim())
-                };
-                let env: Vec<(String, String)> = args.env.into_iter().collect();
-                let spawned = reg.start(&args.command, &args.args, cwd, &env).await?;
-                let argv = if args.args.is_empty() {
-                    args.command.trim().to_string()
-                } else {
-                    format!("{} {}", args.command.trim(), args.args.join(" "))
-                };
-                let cwd_line = cwd.map(|c| format!("\n  cwd: {c}")).unwrap_or_default();
-                Ok(format!(
-                    "Started background job {} (pid {}): {}{}\nFollow it with action=\"poll\" (id=\"{}\", wait_ms≈5000) or peek with action=\"output\" (id=\"{}\", tail_lines≈50). Stop it with action=\"kill\" (id=\"{}\"), or action=\"clean\" to stop all.",
-                    spawned.id, spawned.pid, argv, cwd_line, spawned.id, spawned.id, spawned.id
-                ))
-            }
             ProcessAction::List => {
                 let jobs = reg.list().await;
                 if jobs.is_empty() {
@@ -128,8 +92,8 @@ impl AsyncTool for Tool {
                         String::new()
                     };
                     out.push_str(&format!(
-                        "  {} (pid {}) — {}{}\n    cmd: {}",
-                        j.id, j.pid, state, unserved, argv
+                        "  {} (pid {}) — {}{}\n    cmd: {}\n    src: {}",
+                        j.id, j.pid, state, unserved, argv, j.source
                     ));
                 }
                 Ok(out)

@@ -1,9 +1,14 @@
 //! Background process management.
 //!
-//! Lets the agent start a long-running command in the background — a dev server,
-//! a build, a watcher, a soak test — and then *follow* it across turns with
-//! [`ProcessRegistry::poll`] / [`ProcessRegistry::output`], or stop it with
-//! [`ProcessRegistry::kill`] / [`ProcessRegistry::clean`].
+//! Owns long-running child processes spawned through
+//! [`ProcessRegistry::start_with`] and lets the agent *follow* them across
+//! turns with [`ProcessRegistry::poll`] / [`ProcessRegistry::output`], or
+//! stop them with [`ProcessRegistry::kill`] / [`ProcessRegistry::clean`].
+//!
+//! Spawning is a purpose-built-tool API: in-process tools call
+//! [`ProcessRegistry::start_with`] directly, while the LLM-facing `process`
+//! tool is management-only, so the LLM never specifies arbitrary shell
+//! commands.
 //!
 //! There is exactly one [`ProcessRegistry`] per `archon` invocation. Background
 //! jobs live for the lifetime of the binary (one OS process = one job table), so
@@ -57,6 +62,7 @@ pub struct JobInfo {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
+    pub source: String,
     pub elapsed_secs: u64,
     pub finished: bool,
     /// Exit code if the process exited normally; `None` if killed by a signal.
@@ -67,11 +73,22 @@ pub struct JobInfo {
     pub truncated: bool,
 }
 
-/// Handle returned by [`ProcessRegistry::start`].
+/// Handle returned by [`ProcessRegistry::start_with`].
 #[derive(Debug, Clone)]
 pub struct SpawnedJob {
     pub id: String,
     pub pid: u32,
+}
+
+/// Parameters for spawning a background job via [`ProcessRegistry::start_with`].
+#[derive(Debug, Clone)]
+pub struct SpawnOptions {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+    /// Which tool/feature spawned this job (e.g. the tool's `NAME`).
+    pub source: String,
 }
 
 #[cfg(unix)]
@@ -97,6 +114,7 @@ struct Job {
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
+    source: String,
     started: Instant,
     /// Recorded (capped) combined output: stdout, then `\n`, then stderr.
     out: Vec<u8>,
@@ -119,6 +137,7 @@ impl Job {
             command: self.command.clone(),
             args: self.args.clone(),
             cwd: self.cwd.clone(),
+            source: self.source.clone(),
             elapsed_secs: self.started.elapsed().as_secs(),
             finished: self.finished,
             exit_code: self.exit.and_then(|s| s.code()),
@@ -185,26 +204,24 @@ impl ProcessRegistry {
             .clone()
     }
 
-    /// Start `command` with `args` in the background and return its handle.
+    /// Start a background job with the given options and return its handle.
+    ///
+    /// Reserved for purpose-built tools that need to manage long-running
+    /// child processes. The LLM never calls this directly — the `process`
+    /// tool is management-only (list, output, poll, kill, clean).
     ///
     /// The working directory defaults to the workspace root and is validated to
     /// stay within it. The command inherits the ambient environment (so `PATH`
     /// and `HOME` work) with any `env` overrides applied on top.
-    pub async fn start(
-        self: &Arc<Self>,
-        command: &str,
-        args: &[String],
-        cwd: Option<&str>,
-        env: &[(String, String)],
-    ) -> Result<SpawnedJob> {
-        let cmd = command.trim();
+    pub async fn start_with(self: &Arc<Self>, opts: &SpawnOptions) -> Result<SpawnedJob> {
+        let cmd = opts.command.trim();
         if cmd.is_empty() {
-            bail!("'command' is required for process:start");
+            bail!("'command' is required to spawn a background job");
         }
 
         // Resolve + validate the working directory (default to the workspace root).
         let root = workspace_root()?;
-        let workdir: PathBuf = match cwd {
+        let workdir: PathBuf = match &opts.cwd {
             Some(raw) if !raw.trim().is_empty() => {
                 let raw = raw.trim();
                 let expanded = expand_tilde(raw);
@@ -234,7 +251,7 @@ impl ProcessRegistry {
         }
 
         let mut c = Command::new(cmd);
-        c.args(args)
+        c.args(&opts.args)
             .current_dir(&workdir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -242,7 +259,7 @@ impl ProcessRegistry {
             .kill_on_drop(true);
         #[cfg(unix)]
         c.process_group(0);
-        for (k, v) in env {
+        for (k, v) in &opts.env {
             c.env(k, v);
         }
 
@@ -260,8 +277,9 @@ impl ProcessRegistry {
                     id: id.clone(),
                     pid,
                     command: cmd.to_string(),
-                    args: args.to_vec(),
+                    args: opts.args.clone(),
                     cwd: Some(workdir.to_string_lossy().into_owned()),
+                    source: opts.source.clone(),
                     started: Instant::now(),
                     out: Vec::new(),
                     truncated: false,
@@ -283,7 +301,7 @@ impl ProcessRegistry {
         let reg = Arc::clone(self);
         tokio::spawn(drain_task(reg, id.clone(), pid, child, out_pipe, err_pipe));
 
-        debug!("Started background job {id}: {cmd} {args:?} (pid {pid})");
+        debug!("Started background job {id} [{}]: {cmd} {:?} (pid {pid})", opts.source, opts.args);
         Ok(SpawnedJob { id, pid })
     }
 
@@ -468,7 +486,13 @@ mod tests {
 
         // 1. start + poll: a quick command finishes; stdout and stderr captured.
         let a_args = vec!["-c".to_string(), "echo hello; echo bye >&2".to_string()];
-        let a = reg.start("sh", &a_args, None, &[]).await.expect("start sh");
+        let a = reg.start_with(&SpawnOptions {
+            command: "sh".into(),
+            args: a_args,
+            cwd: None,
+            env: vec![],
+            source: "test".into(),
+        }).await.expect("start sh");
         let out = reg.poll(&a.id, 2000).await.unwrap();
         assert!(out.contains("finished"), "expected finished, got: {out}");
         assert!(out.contains("hello"), "expected stdout, got: {out}");
@@ -480,7 +504,13 @@ mod tests {
             "-c".to_string(),
             "printf 'line1\\n'; sleep 1; printf 'line2\\n'".to_string(),
         ];
-        let b = reg.start("sh", &b_args, None, &[]).await.expect("start sh");
+        let b = reg.start_with(&SpawnOptions {
+            command: "sh".into(),
+            args: b_args,
+            cwd: None,
+            env: vec![],
+            source: "test".into(),
+        }).await.expect("start sh");
         let first = reg.poll(&b.id, 100).await.unwrap();
         assert!(
             first.contains("line1"),
@@ -504,7 +534,13 @@ mod tests {
 
         // 3. kill stops a running job.
         let c = reg
-            .start("sleep", &["5".to_string()], None, &[])
+            .start_with(&SpawnOptions {
+                command: "sleep".into(),
+                args: vec!["5".to_string()],
+                cwd: None,
+                env: vec![],
+                source: "test".into(),
+            })
             .await
             .expect("start sleep");
         let kill_res = reg.kill(&c.id).await.unwrap();

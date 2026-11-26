@@ -269,7 +269,7 @@ impl ToolContext {
         self.check_rel_path_allowed_impl(rel, exclude_set, neg_exclude_set, false)
     }
 
-    /// Variant of [`check_rel_path_allowed`] for paths under explicitly
+    /// Variant of [`Self::check_rel_path_allowed`] for paths under explicitly
     /// configured `read_roots`.  Skips the hidden-file check because
     /// `read_roots` is an explicit permission grant — dot-named files and
     /// directories under the root are readable without `app.allow_hidden`.
@@ -875,7 +875,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "btrfs",
             "packages",
         ],
-        "process" => &["start", "list", "output", "poll", "kill", "clean"],
+        "process" => &["list", "output", "poll", "kill", "clean"],
         "browser" => &[
             "goto",
             "read",
@@ -924,7 +924,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
         }
         "process" => {
-            "[start|list|output|poll|kill|clean] [command=... args=...] [id=...] [tail_lines=N | wait_ms=N]"
+            "[list|output|poll|kill|clean] [id=...] [tail_lines=N | wait_ms=N]"
         }
         "browser" => {
             "[goto|read|click|type|eval|extract|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...] [headless=true|false]"
