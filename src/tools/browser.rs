@@ -1428,3 +1428,4 @@ mod tests {
         chrome_proc.kill().await.ok();
         chrome_proc.wait().await.ok();
     }
+}
