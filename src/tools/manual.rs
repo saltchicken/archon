@@ -89,10 +89,7 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
         "curl" => &["url", "method", "body", "json"],
         "process"
             if !map.contains_key("action")
-                && matches!(
-                    token,
-                    "list" | "output" | "poll" | "kill" | "clean"
-                ) =>
+                && matches!(token, "list" | "output" | "poll" | "kill" | "clean") =>
         {
             &["action"]
         }

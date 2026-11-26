@@ -28,11 +28,15 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
+use crate::core::config::expand_tilde;
 #[cfg(unix)]
 use crate::core::processes::kill_process_group;
+use crate::core::processes::{ProcessRegistry, SpawnOptions};
 
 const DEFAULT_WAIT_SECS: u64 = 10;
 const DRIVER_START_TIMEOUT_SECS: u64 = 5;
+/// How long to wait for a spawned CDP Chrome to become ready.
+const CDP_START_TIMEOUT_SECS: u64 = 10;
 const MAX_EXTRACT_ELEMENTS: usize = 200;
 
 pub struct Tool;
@@ -95,7 +99,9 @@ pub struct BrowserArgs {
     /// kept; if no session exists yet, the default comes from `browser.headless`
     /// in config.toml (default: `false`, i.e. a visible window).
     ///
-    /// Ignored when `browser.backend` is set to `"cdp"` in config.toml (attaching to an existing browser).
+    /// Ignored when `browser.backend` is set to `"cdp"` and archon attaches to an
+    /// already-running browser; when archon spawns the CDP Chrome itself, it
+    /// controls that instance's `--headless` mode.
     #[serde(default)]
     pub headless: Option<bool>,
 }
@@ -361,11 +367,46 @@ fn resolve_headless_default(config_default: bool) -> bool {
         .unwrap_or(config_default)
 }
 
-/// Attaches to an already-running Chrome via the Chrome DevTools Protocol.
+/// Locate a Chrome/Chromium binary to spawn a managed CDP instance.
 ///
-/// Chrome must be launched with `--remote-debugging-port=<port>`.
-/// This backend does **not** spawn or kill Chrome — it connects to the user's
-/// live browser session over WebSocket.
+/// Resolution order: `CHROME_BIN` env var, then the first match on `PATH`,
+/// then a couple of common install directories.
+fn find_chrome_binary() -> Option<PathBuf> {
+    const NAMES: &[&str] = &[
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+    ];
+    if let Ok(raw) = std::env::var("CHROME_BIN")
+        && !raw.trim().is_empty()
+    {
+        let path = PathBuf::from(raw.trim());
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for name in NAMES {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    for name in NAMES {
+        for dir in ["/usr/bin", "/usr/local/bin"] {
+            let candidate = PathBuf::from(dir).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Encode a string as a safe JavaScript string literal (double-quoted).
 ///
 /// Uses JSON string escaping, which is a strict subset of valid JS string
@@ -375,6 +416,14 @@ fn js_str(s: &str) -> String {
     serde_json::to_string(s).expect("&str always serializes to JSON")
 }
 
+/// Drives Chrome over the Chrome DevTools Protocol (CDP).
+///
+/// Either attaches to an already-running Chrome (started with
+/// `--remote-debugging-port=<port>`), or — when nothing is listening on that
+/// port — one is spawned as a background job through the
+/// [`ProcessRegistry`] (the same mechanism the `notify` tool uses for
+/// `notify-send`). Only the managed instance is stopped by
+/// [`CdpBackend::close`]; the user's own browser is never killed.
 struct CdpBackend {
     ws: Mutex<
         tokio_tungstenite::WebSocketStream<
@@ -382,6 +431,9 @@ struct CdpBackend {
         >,
     >,
     next_id: AtomicU64,
+    /// Id of the background job for the Chrome instance Archon spawned
+    /// itself (`None` when attached to a user-launched browser).
+    managed_job: Option<String>,
 }
 
 impl CdpBackend {
@@ -418,6 +470,7 @@ impl CdpBackend {
         let backend = Self {
             ws: Mutex::new(ws),
             next_id: AtomicU64::new(1),
+            managed_job: None,
         };
 
         // Enable the CDP domains we need.
@@ -506,7 +559,10 @@ impl CdpBackend {
 #[async_trait]
 impl BrowserBackend for CdpBackend {
     fn label(&self) -> String {
-        "CDP (attached)".into()
+        match &self.managed_job {
+            Some(job_id) => format!("CDP (managed, job {job_id})"),
+            None => "CDP (attached)".into(),
+        }
     }
 
     async fn goto(&self, url: &str) -> Result<()> {
@@ -693,9 +749,17 @@ impl BrowserBackend for CdpBackend {
     }
 
     async fn close(&self) -> Result<()> {
-        // Don't kill Chrome — it's the user's daily driver.
-        // The WebSocket connection closes when the CdpBackend is dropped.
-        debug!("CDP session closed (WebSocket will drop on cleanup)");
+        if let Some(job_id) = &self.managed_job {
+            // Archon owns this Chrome instance — stop it with the session.
+            match ProcessRegistry::global().kill(job_id).await {
+                Ok(msg) => debug!("Stopped managed CDP Chrome: {msg}"),
+                Err(e) => debug!("Failed to stop managed CDP Chrome job {job_id}: {e}"),
+            }
+        } else {
+            // Attached to the user's own browser — never kill it. The
+            // WebSocket connection closes when the CdpBackend is dropped.
+            debug!("CDP session closed (Chrome left running)");
+        }
         Ok(())
     }
 }
@@ -753,15 +817,134 @@ impl BrowserRegistry {
         bail!("Timed out waiting for `chromedriver` to become ready at {wd_url}");
     }
 
+    /// `true` if a CDP endpoint is already serving on `port`.
+    async fn cdp_reachable(port: u16) -> bool {
+        reqwest::get(format!("http://127.0.0.1:{port}/json"))
+            .await
+            .is_ok_and(|r| r.status().is_success())
+    }
+
+    /// Wait for a freshly spawned Chrome to expose its CDP endpoint on `port`.
+    /// Bails early if the Chrome job exited before it was ready.
+    async fn wait_for_cdp_ready(port: u16, job_id: &str) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()?;
+        let url = format!("http://127.0.0.1:{port}/json");
+        let deadline = Instant::now() + Duration::from_secs(CDP_START_TIMEOUT_SECS);
+        let reg = ProcessRegistry::global();
+
+        while Instant::now() < deadline {
+            let job_finished = reg
+                .list()
+                .await
+                .into_iter()
+                .find(|j| j.id == job_id)
+                .is_some_and(|j| j.finished);
+            if job_finished {
+                let out = reg.output(job_id, 20).await.unwrap_or_default();
+                bail!(
+                    "Managed Chrome exited before its CDP endpoint was ready (job {job_id}).\n{out}"
+                );
+            }
+            if let Ok(resp) = client.get(&url).send().await
+                && resp.status().is_success()
+            {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        let out = reg.output(job_id, 20).await.unwrap_or_default();
+        bail!("Timed out waiting for managed Chrome to serve CDP at {url}\n{out}");
+    }
+
+    /// Connect the CDP backend on `port`.
+    ///
+    /// Attaches if a Chrome with remote debugging is already listening;
+    /// otherwise spawns one as a background job (via
+    /// [`ProcessRegistry::start_with`], the same purpose-built-tool mechanism
+    /// the `notify` tool uses) and attaches once it is ready.
+    async fn connect_cdp(
+        port: u16,
+        headless: bool,
+        profile_dir: &str,
+    ) -> Result<Arc<dyn BrowserBackend>> {
+        // Fast path: attach to an already-running Chrome.
+        if Self::cdp_reachable(port).await {
+            return Ok(Arc::new(CdpBackend::connect(port).await?));
+        }
+
+        let chrome_bin = find_chrome_binary().with_context(|| {
+            format!(
+                "Nothing is listening on CDP port {port} and no Chrome/Chromium binary was found. \n\
+                 Install one (e.g. google-chrome-stable), set CHROME_BIN, or start Chrome manually \n\
+                 with --remote-debugging-port={port}"
+            )
+        })?;
+
+        let profile = expand_tilde(profile_dir);
+        std::fs::create_dir_all(&profile).with_context(|| {
+            format!("Failed to create CDP profile directory {}", profile.display())
+        })?;
+
+        let mut args: Vec<String> = vec![
+            format!("--remote-debugging-port={port}"),
+            format!("--user-data-dir={}", profile.display()),
+            "--remote-allow-origins=*".into(),
+            "--no-first-run".into(),
+            "--no-default-browser-check".into(),
+            "--window-size=1440,900".into(),
+        ];
+        if headless {
+            args.push("--headless=new".into());
+            args.push("--disable-gpu".into());
+        }
+        args.push("about:blank".into());
+
+        let reg = ProcessRegistry::global();
+        let job = reg
+            .start_with(&SpawnOptions {
+                command: chrome_bin.to_string_lossy().into_owned(),
+                args: args.clone(),
+                cwd: None,
+                env: vec![],
+                source: "browser".into(),
+            })
+            .await?;
+        info!(
+            "Spawning managed Chrome for CDP (job {}): {} {}",
+            job.id,
+            chrome_bin.display(),
+            args.join(" ")
+        );
+
+        let connected = async {
+            Self::wait_for_cdp_ready(port, &job.id).await?;
+            CdpBackend::connect(port).await
+        }
+        .await;
+
+        match connected {
+            Ok(mut backend) => {
+                backend.managed_job = Some(job.id);
+                Ok(Arc::new(backend))
+            }
+            Err(e) => {
+                // Don't leave a half-started Chrome running.
+                let _ = reg.kill(&job.id).await;
+                Err(e)
+            }
+        }
+    }
+
     async fn connect_new(
         headless: bool,
         backend_type: &BackendType,
+        cdp_profile_dir: &str,
     ) -> Result<Arc<dyn BrowserBackend>> {
         match backend_type {
-            BackendType::Cdp { port } => {
-                let backend = CdpBackend::connect(*port).await?;
-                Ok(Arc::new(backend))
-            }
+            BackendType::Cdp { port } => Self::connect_cdp(*port, headless, cdp_profile_dir).await,
             BackendType::WebDriver => Self::connect_webdriver(headless).await,
         }
     }
@@ -821,6 +1004,7 @@ impl BrowserRegistry {
         headless: Option<bool>,
         default_headless: bool,
         backend_type: &BackendType,
+        cdp_profile_dir: &str,
     ) -> Result<Arc<dyn BrowserBackend>> {
         let stored_headless = *self.headless.lock().await;
 
@@ -852,7 +1036,7 @@ impl BrowserRegistry {
             *self.headless.lock().await = desired;
         }
 
-        let backend = Self::connect_new(desired, backend_type).await?;
+        let backend = Self::connect_new(desired, backend_type, cdp_profile_dir).await?;
         let cloned = Arc::clone(&backend);
         *guard = Some(backend);
         Ok(cloned)
@@ -1126,7 +1310,7 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
-    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or attaches to a running Chrome via CDP when browser.backend is set to cdp in config.toml. Runs with a visible window by default; set browser.headless = true in config.toml (or pass headless: true) for headless mode.";
+    const DESCRIPTION: &'static str = "Controls a browser to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data via CSS selectors, and capture screenshots. Uses chromedriver (WebDriver) by default, or drives Chrome via CDP when browser.backend is set to cdp in config.toml — attaching to a running Chrome, or spawning one on browser.cdp_port if none is listening. Runs with a visible window by default; set browser.headless = true in config.toml (or pass headless: true) for headless mode.";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -1159,7 +1343,12 @@ impl AsyncTool for Tool {
                 validate_public_url(&parsed, &policy).await?;
 
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 backend.goto(parsed.as_str()).await?;
 
@@ -1186,7 +1375,12 @@ impl AsyncTool for Tool {
 
             BrowserAction::Read => {
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 let sel = args
                     .selector
@@ -1213,7 +1407,12 @@ impl AsyncTool for Tool {
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:click")?;
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 backend.click(sel, Duration::from_secs(wait_secs)).await?;
                 let url = backend.current_url().await.unwrap_or_default();
@@ -1232,7 +1431,12 @@ impl AsyncTool for Tool {
                     .as_deref()
                     .context("'text' is required for browser:type")?;
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 backend
                     .type_text(sel, text, args.clear, Duration::from_secs(wait_secs))
@@ -1251,7 +1455,12 @@ impl AsyncTool for Tool {
                     .filter(|s| !s.is_empty())
                     .context("'script' is required for browser:eval")?;
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 let result = backend.evaluate(script).await?;
                 Ok(serde_json::to_string_pretty(&result)?)
@@ -1265,7 +1474,12 @@ impl AsyncTool for Tool {
                     .filter(|s| !s.is_empty())
                     .context("'selector' is required for browser:extract")?;
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 let source = backend.get_outer_html().await?;
                 let result = extract_from_html(&source, selector)?;
@@ -1274,7 +1488,12 @@ impl AsyncTool for Tool {
 
             BrowserAction::Screenshot => {
                 let backend = reg
-                    .get_or_init(args.headless, default_headless, &backend_type)
+                    .get_or_init(
+                        args.headless,
+                        default_headless,
+                        &backend_type,
+                        &ctx.config.browser.cdp_user_data_dir,
+                    )
                     .await?;
                 let sel = args
                     .selector
@@ -1573,31 +1792,7 @@ mod tests {
     // Requires Chrome installed. Run with:
     //   cargo test cdp_backend_full_lifecycle -- --ignored
 
-    fn find_chrome_binary() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("CHROME_BIN") {
-            let path = PathBuf::from(p);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-        for name in [
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-        ] {
-            for dir in ["/usr/bin", "/usr/local/bin"] {
-                let path = PathBuf::from(dir).join(name);
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-        }
-        None
-    }
-
     #[tokio::test]
-    #[ignore = "requires Chrome browser installed; run with --ignored"]
     async fn cdp_backend_full_lifecycle() {
         let chrome = find_chrome_binary()
             .expect("Chrome not found. Set CHROME_BIN=/path/to/chrome or install google-chrome.");
@@ -1637,10 +1832,11 @@ mod tests {
         }
         assert!(ready, "CDP endpoint not ready within 10s");
 
-        // Connect via CdpBackend.
-        let backend = CdpBackend::connect(port)
+        // Connect via the registry's CDP entry point — this hits the
+        // "attach to an already-running Chrome" fast path.
+        let backend = BrowserRegistry::connect_cdp(port, true, "/tmp/archon-cdp-attach-test")
             .await
-            .expect("CdpBackend::connect failed");
+            .expect("connect_cdp failed");
 
         // Navigate to a data URL (no network needed).
         let page = "data:text/html,<html><head><title>CDP Test Page</title></head><body><h1>Hello CDP</h1><p id='para'>Test paragraph text</p><button id='btn'>Click me</button><input id='inp' type='text' value='initial'></body></html>";
@@ -1742,5 +1938,70 @@ mod tests {
         // Cleanup: kill the spawned Chrome.
         chrome_proc.kill().await.ok();
         chrome_proc.wait().await.ok();
+    }
+
+    #[tokio::test]
+    async fn cdp_connect_spawns_and_cleans_up_managed_chrome() {
+        let _chrome = find_chrome_binary()
+            .expect("Chrome not found. Set CHROME_BIN=/path/to/chrome or install google-chrome.");
+
+        // Pick a free port that is NOT currently serving CDP.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let profile = std::env::temp_dir().join(format!("archon-cdp-spawn-test-{}", std::process::id()));
+
+        // connect_cdp must spawn its own Chrome since nothing listens on this port.
+        let backend =
+            BrowserRegistry::connect_cdp(port, true, &profile.to_string_lossy())
+                .await
+                .expect("connect_cdp failed (should have spawned a managed Chrome)");
+
+        // The backend reports a managed instance with its job id.
+        let label = backend.label();
+        let job_id = label
+            .rsplit_once("job ")
+            .map(|(_, id)| id.trim_end().to_string())
+            .unwrap_or_else(|| panic!("label should contain the managed job id, got: {label}"));
+
+        let reg = ProcessRegistry::global();
+        let job = reg
+            .list()
+            .await
+            .into_iter()
+            .find(|j| j.id == job_id)
+            .expect("managed Chrome job should exist in the ProcessRegistry");
+        assert!(!job.finished, "managed Chrome job should be running");
+        assert_eq!(job.source, "browser", "job source should be the browser tool");
+
+        // Basic sanity: we can drive the page.
+        let val = backend.evaluate("1 + 1").await.expect("evaluate failed");
+        assert_eq!(val, serde_json::json!(2));
+
+        // Close must stop the managed Chrome (unlike an attached session).
+        backend.close().await.expect("close failed");
+
+        let job = reg
+            .list()
+            .await
+            .into_iter()
+            .find(|j| j.id == job_id)
+            .expect("managed Chrome job should still be listed");
+        assert!(job.finished, "managed Chrome job should be finished after close");
+
+        // The CDP endpoint should stop serving shortly after the kill.
+        let mut gone = false;
+        for _ in 0..20 {
+            if !BrowserRegistry::cdp_reachable(port).await {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(gone, "CDP endpoint should be down after closing the managed session");
+
+        // Best-effort cleanup of the throwaway profile.
+        let _ = std::fs::remove_dir_all(&profile);
     }
 }

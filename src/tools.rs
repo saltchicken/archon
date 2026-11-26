@@ -923,9 +923,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "system" => {
             "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
         }
-        "process" => {
-            "[list|output|poll|kill|clean] [id=...] [tail_lines=N | wait_ms=N]"
-        }
+        "process" => "[list|output|poll|kill|clean] [id=...] [tail_lines=N | wait_ms=N]",
         "browser" => {
             "[goto|read|click|type|eval|extract|screenshot|status|close] [url=...] [selector=...] [text=...] [script=...] [headless=true|false]"
         }

@@ -167,11 +167,15 @@ impl Default for DotfilesSettings {
 #[serde(default)]
 pub struct BrowserSettings {
     /// Browser automation backend: `"webdriver"` (default) or `"cdp"`.
-    /// When `"cdp"`, Archon attaches to an already-running Chrome via the
-    /// Chrome DevTools Protocol instead of spawning chromedriver.
+    /// When `"cdp"`, Archon drives Chrome via the Chrome DevTools Protocol.
     pub backend: String,
     /// CDP port to connect to (only used when `backend = "cdp"`).
     pub cdp_port: u16,
+    /// Profile directory used when Archon has to spawn its own CDP Chrome
+    /// instance (i.e. no Chrome with `--remote-debugging-port` is listening on
+    /// `cdp_port` yet). A dedicated profile keeps it from clobbering your
+    /// daily-driver Chrome session. Tilde is expanded.
+    pub cdp_user_data_dir: String,
     /// Launch the browser in headless mode (no visible window) by default.
     /// Default is `false` — a visible browser window is used unless this is
     /// set to `true`, or a browser tool call passes `headless: true` explicitly.
@@ -183,6 +187,7 @@ impl Default for BrowserSettings {
         Self {
             backend: "webdriver".into(),
             cdp_port: 9222,
+            cdp_user_data_dir: "~/.config/chrome-cdp".into(),
             headless: false,
         }
     }
@@ -807,5 +812,23 @@ mod tests {
         let toml_str = "backend = \"cdp\"\ncdp_port = 9223\n";
         let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
         assert!(!settings.headless);
+    }
+
+    #[test]
+    fn browser_settings_cdp_user_data_dir_default() {
+        let settings = BrowserSettings::default();
+        assert_eq!(settings.cdp_user_data_dir, "~/.config/chrome-cdp");
+
+        // Missing key falls back to the default via #[serde(default)].
+        let toml_str = "backend = \"cdp\"\ncdp_port = 9222\n";
+        let deserialized: BrowserSettings = toml::from_str(toml_str).unwrap();
+        assert_eq!(deserialized.cdp_user_data_dir, "~/.config/chrome-cdp");
+    }
+
+    #[test]
+    fn browser_settings_cdp_user_data_dir_overridable() {
+        let toml_str = "cdp_user_data_dir = \"/tmp/my-chrome-profile\"\n";
+        let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
+        assert_eq!(settings.cdp_user_data_dir, "/tmp/my-chrome-profile");
     }
 }

@@ -301,7 +301,10 @@ impl ProcessRegistry {
         let reg = Arc::clone(self);
         tokio::spawn(drain_task(reg, id.clone(), pid, child, out_pipe, err_pipe));
 
-        debug!("Started background job {id} [{}]: {cmd} {:?} (pid {pid})", opts.source, opts.args);
+        debug!(
+            "Started background job {id} [{}]: {cmd} {:?} (pid {pid})",
+            opts.source, opts.args
+        );
         Ok(SpawnedJob { id, pid })
     }
 
@@ -454,9 +457,13 @@ async fn drain_task(
 
     let status = child.wait().await;
 
-    // Reap any stragglers left in the job's own process group.
+    // Only reap stragglers if the process failed or was killed; a launcher
+    // script that forks a daemon and exits 0 intentionally leaves its child
+    // running in the process group until `kill` / `clean` / `shutdown` is called.
     #[cfg(unix)]
-    kill_process_group(pid);
+    if !status.as_ref().is_ok_and(|s| s.success()) {
+        kill_process_group(pid);
+    }
 
     let mut map = reg.jobs.lock().await;
     if let Some(job) = map.get_mut(&id) {
