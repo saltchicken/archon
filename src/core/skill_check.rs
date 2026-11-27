@@ -2,6 +2,7 @@ use crate::{
     cli::SkillCommand,
     core::{
         config::{Config, MemoryScope, expand_tilde, format_tilde_path},
+        schema_utils,
         skills::{
             DetailedSkillParse, HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType,
             SkillDefinition, SkillHook, TemplateContext, inspect_template, interpolate_hook_args,
@@ -213,22 +214,6 @@ fn value_matches_json_type(val: &Value, expected: &str) -> bool {
     }
 }
 
-fn extract_const_or_enum_strings(branches: &[Value]) -> Option<Vec<String>> {
-    let mut vals = Vec::new();
-    for b in branches {
-        let obj = b.as_object()?;
-        if let Some(c) = obj.get("const").and_then(Value::as_str) {
-            vals.push(c.to_string());
-        } else {
-            let arr = obj.get("enum").and_then(Value::as_array)?;
-            for item in arr {
-                vals.push(item.as_str()?.to_string());
-            }
-        }
-    }
-    (!vals.is_empty()).then_some(vals)
-}
-
 pub fn validate_value_against_schema(
     value: &Value,
     schema: &Value,
@@ -253,18 +238,14 @@ pub fn validate_value_against_schema(
     };
 
     // Resolve `$ref`
-    if let Some(ref_str) = obj.get("$ref").and_then(Value::as_str) {
-        let ref_name = ref_str
-            .strip_prefix("#/$defs/")
-            .or_else(|| ref_str.strip_prefix("#/definitions/"));
-        if let Some(name) = ref_name
-            && let Some(target) = defs.get(name)
-        {
-            validate_value_against_schema(value, target, defs, path, errors, depth + 1);
-            // If there are sibling keywords besides `$ref`, validate them too.
-            if obj.len() == 1 {
-                return;
-            }
+    if let Some(ref_str) = obj.get("$ref").and_then(Value::as_str)
+        && let Some(name) = schema_utils::resolve_ref_name(ref_str)
+        && let Some(target) = defs.get(name)
+    {
+        validate_value_against_schema(value, target, defs, path, errors, depth + 1);
+        // If there are sibling keywords besides `$ref`, validate them too.
+        if obj.len() == 1 {
+            return;
         }
     }
 
@@ -297,7 +278,7 @@ pub fn validate_value_against_schema(
                 }
             }
             if !matched {
-                if let Some(choices) = extract_const_or_enum_strings(branches) {
+                if let Some(choices) = schema_utils::extract_enum_strings(branches) {
                     errors.push(format!(
                         "{path}: invalid value {value}; expected one of: {}",
                         choices.join(", ")
@@ -455,14 +436,7 @@ pub fn validate_tool_args_against_schema(tool_name: &str, args: &Value) -> Vec<S
         return Vec::new();
     };
 
-    let mut defs = Map::new();
-    if let Some(obj) = params_schema.as_object() {
-        for key in ["$defs", "definitions"] {
-            if let Some(Value::Object(d)) = obj.get(key) {
-                defs.extend(d.clone());
-            }
-        }
-    }
+    let defs = schema_utils::extract_root_defs(params_schema);
 
     let mut errors = Vec::new();
     validate_value_against_schema(args, params_schema, &defs, "args", &mut errors, 0);

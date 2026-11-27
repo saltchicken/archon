@@ -5,6 +5,7 @@ use crate::{
     core::{
         EngineEvent, TurnConfig,
         config::{Config, EndpointSettings},
+        schema_utils,
         session::ChatMessage,
     },
     tools,
@@ -59,9 +60,7 @@ fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) 
             if let Some(ref_str) = obj
                 .remove("$ref")
                 .and_then(|v| v.as_str().map(String::from))
-                && let Some(name) = ref_str
-                    .strip_prefix("#/$defs/")
-                    .or_else(|| ref_str.strip_prefix("#/definitions/"))
+                && let Some(name) = schema_utils::resolve_ref_name(&ref_str)
                 && let Some(Value::Object(target_obj)) = defs.get(name).cloned()
             {
                 for (k, v) in target_obj {
@@ -87,23 +86,6 @@ fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) 
         }
         _ => {}
     }
-}
-
-fn extract_string_enum_variants(items: &[Value]) -> Option<Vec<Value>> {
-    let mut variants = Vec::new();
-    for item in items {
-        let obj = item.as_object()?;
-        if let Some(c) = obj.get("const").and_then(Value::as_str) {
-            variants.push(Value::String(c.to_string()));
-        } else {
-            let arr = obj.get("enum").and_then(Value::as_array)?;
-            if !arr.iter().all(Value::is_string) {
-                return None;
-            }
-            variants.extend_from_slice(arr);
-        }
-    }
-    (!variants.is_empty()).then_some(variants)
 }
 
 fn flatten_schema_node(val: &mut Value, strip_keys: &[&str], mark_nullable: bool) {
@@ -162,10 +144,14 @@ fn flatten_schema_node(val: &mut Value, strip_keys: &[&str], mark_nullable: bool
                         .collect();
                     let had_null = non_null.len() < orig_len;
 
-                    let replaced = if let Some(enum_vals) = extract_string_enum_variants(&non_null)
+                    let replaced = if let Some(enum_vals) =
+                        schema_utils::extract_enum_strings(&non_null)
                     {
                         obj.insert("type".into(), json!("string"));
-                        obj.insert("enum".into(), Value::Array(enum_vals));
+                        obj.insert(
+                            "enum".into(),
+                            Value::Array(enum_vals.into_iter().map(Value::String).collect()),
+                        );
                         true
                     } else if non_null.len() == 1
                         && let Some(Value::Object(inner)) = non_null.into_iter().next()
@@ -221,14 +207,7 @@ fn flatten_schema_node(val: &mut Value, strip_keys: &[&str], mark_nullable: bool
 }
 
 pub(crate) fn flatten_tool_schema(val: &mut Value, strip_keys: &[&str], mark_nullable: bool) {
-    let mut root_defs = Map::new();
-    if let Some(obj) = val.as_object_mut() {
-        for key in ["$defs", "definitions"] {
-            if let Some(Value::Object(d)) = obj.remove(key) {
-                root_defs.extend(d);
-            }
-        }
-    }
+    let root_defs = schema_utils::take_root_defs(val);
     if !root_defs.is_empty() {
         inline_schema_refs(val, &root_defs, 0);
     }

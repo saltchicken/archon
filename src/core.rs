@@ -6,6 +6,7 @@ pub mod processes;
 pub mod protocol;
 pub mod provider;
 pub mod schedule;
+pub(crate) mod schema_utils;
 pub mod session;
 mod session_ops;
 pub mod skill_check;
