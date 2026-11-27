@@ -170,7 +170,7 @@ impl CoreEngine {
                 self.abort_active_state();
                 self.session.auto_approve.clear();
                 self.session.executed_skill_hooks.clear();
-                self.session.auto_todo_turns = 0;
+                self.session.auto_task_turns = 0;
                 self.session.sent_images.extend(restored_staging_paths);
                 let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
@@ -247,7 +247,7 @@ impl CoreEngine {
         self.abort_active_state();
         self.session.auto_approve.clear();
         self.session.executed_skill_hooks.clear();
-        self.session.auto_todo_turns = 0;
+        self.session.auto_task_turns = 0;
 
         self.session.messages.truncate(msg_idx + 1);
         if let Some(last) = self.session.messages.last_mut() {
@@ -262,6 +262,14 @@ impl CoreEngine {
         self.session.id = new_session_id;
         self.session.is_fork = true;
         self.session.is_pinned = false;
+
+        let cfg = self.config.clone();
+        let from_id = old_session_id.clone();
+        let to_id = self.session.id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::tools::task::clone_session_tasks(&cfg, &from_id, &to_id)
+        })
+        .await;
 
         let all_image_names: Vec<String> = self
             .session
@@ -341,6 +349,12 @@ impl CoreEngine {
             self.session.is_pinned = false;
             self.emit_chat();
         }
+        let cfg = self.config.clone();
+        let del_id = session_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::tools::task::delete_session_tasks(&cfg, &del_id)
+        })
+        .await;
         self.emit_sessions(Some(session_id)).await;
     }
 

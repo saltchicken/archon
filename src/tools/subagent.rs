@@ -48,6 +48,7 @@ impl AsyncTool for Tool {
                 None,
                 None,
                 &std::collections::BTreeMap::new(),
+                None,
                 &ctx.config,
             )
         } else {

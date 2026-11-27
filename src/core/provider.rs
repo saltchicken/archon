@@ -108,6 +108,7 @@ impl Provider {
         config: &Config,
         messages: Vec<ChatMessage>,
         turn: &TurnConfig,
+        session_id: Option<&str>,
     ) -> (String, Vec<ChatMessage>, Value) {
         let active_skill = turn.active_skill.as_deref();
         let skill_args = turn.skill_args.as_deref();
@@ -124,6 +125,7 @@ impl Provider {
             skill_args,
             raw_skill_args,
             &turn.skill_inputs,
+            session_id,
             config,
         );
 
@@ -355,6 +357,7 @@ impl Provider {
                         &call,
                         &config_clone,
                         skill_ref,
+                        None,
                         max_out,
                         full_cap,
                     ))
@@ -468,6 +471,7 @@ impl Provider {
         Ok((summary, prompt_tokens, eval_tokens))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn stream_turn(
         &self,
         client: Client,
@@ -475,10 +479,11 @@ impl Provider {
         config: Config,
         messages: Vec<ChatMessage>,
         turn: TurnConfig,
+        session_id: Option<String>,
         tx: UnboundedSender<EngineEvent>,
     ) {
         let (effective_system_prompt, sanitized_msgs, payload) =
-            self.build_turn_payload(&model, &config, messages, &turn);
+            self.build_turn_payload(&model, &config, messages, &turn, session_id.as_deref());
 
         let inspection = format_payload_inspection(
             *self,

@@ -253,6 +253,7 @@ impl CoreEngine {
 
         let cfg = self.config.clone();
         let active_skill = self.active_turn_skill().map(String::from);
+        let session_id = self.session.id.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
         let source = ToolExecSource::Model {
@@ -261,8 +262,15 @@ impl CoreEngine {
         };
 
         self.spawn_with_tx(move |tx| async move {
-            let mut res =
-                tools::execute(&call, &cfg, active_skill.as_deref(), max_out, full_cap).await;
+            let mut res = tools::execute(
+                &call,
+                &cfg,
+                active_skill.as_deref(),
+                Some(session_id.as_str()),
+                max_out,
+                full_cap,
+            )
+            .await;
             if let Some(fb) = feedback.filter(|s| !s.is_empty()) {
                 let suffix = format!("\n\n[User attached a message]: {fb}");
                 res.truncated_output.push_str(&suffix);
@@ -506,6 +514,7 @@ impl CoreEngine {
 
         let cfg = self.config.clone();
         let active_skill = self.active_turn_skill().map(String::from);
+        let session_id = self.session.id.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
         let source = ToolExecSource::ManualTool {
@@ -515,9 +524,15 @@ impl CoreEngine {
         };
 
         self.spawn_with_tx(move |tx| async move {
-            let res =
-                tools::execute_manual(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
-                    .await;
+            let res = tools::execute_manual(
+                &call,
+                &cfg,
+                active_skill.as_deref(),
+                Some(session_id.as_str()),
+                max_out,
+                full_cap,
+            )
+            .await;
             let _ = tx.send(EngineEvent::ToolExecFinished(source, res));
         });
     }

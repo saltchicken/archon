@@ -42,6 +42,7 @@ pub fn compose_system_prompt(
     skill_args: Option<&str>,
     raw_skill_args: Option<&str>,
     skill_inputs: &BTreeMap<String, Value>,
+    session_id: Option<&str>,
     config: &Config,
 ) -> String {
     let mut sections = Vec::new();
@@ -53,8 +54,10 @@ pub fn compose_system_prompt(
         sections.push(mem_block);
     }
 
-    if let Some(todo_block) = crate::tools::todo::format_active_todos_for_prompt(config) {
-        sections.push(todo_block);
+    if let Some(sid) = session_id
+        && let Some(task_block) = crate::tools::task::format_active_tasks_for_prompt(config, sid)
+    {
+        sections.push(task_block);
     }
 
     if let Some(skill_name) = active_skill

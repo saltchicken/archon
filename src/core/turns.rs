@@ -91,7 +91,7 @@ impl CoreEngine {
         }
         self.save_and_emit_chat(new_images).await;
         if has_valid_prompt {
-            self.session.auto_todo_turns = 0;
+            self.session.auto_task_turns = 0;
             let turn = self.turn.clone();
             self.start_user_turn(&turn).await;
         }
@@ -108,6 +108,7 @@ impl CoreEngine {
         let phase = if after_turn { "after-turn" } else { "pre-turn" };
         info!("Running {total} {phase} skill hook(s)");
         let cfg = self.config.clone();
+        let session_id = self.session.id.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
 
@@ -118,9 +119,15 @@ impl CoreEngine {
                     index: idx + 1,
                     total,
                 });
-                let res =
-                    tools::execute_hook(&call, &cfg, active_skill.as_deref(), max_out, full_cap)
-                        .await;
+                let res = tools::execute_hook(
+                    &call,
+                    &cfg,
+                    active_skill.as_deref(),
+                    Some(session_id.as_str()),
+                    max_out,
+                    full_cap,
+                )
+                .await;
                 let _ = tx.send(EngineEvent::HookCompleted {
                     tool_name: call.function.name,
                     summary,
@@ -183,10 +190,19 @@ impl CoreEngine {
         let model = self.model.clone();
         let config = self.config.clone();
         let turn_cfg = turn.clone();
+        let session_id_for_turn = self.session.id.clone();
 
         self.spawn_with_tx(move |internal_tx| async move {
             provider
-                .stream_turn(client, model, config, hydrated_msgs, turn_cfg, internal_tx)
+                .stream_turn(
+                    client,
+                    model,
+                    config,
+                    hydrated_msgs,
+                    turn_cfg,
+                    Some(session_id_for_turn),
+                    internal_tx,
+                )
                 .await;
         });
     }
@@ -233,7 +249,7 @@ impl CoreEngine {
             warn!("Auto-declined {skipped} unresolved tool call(s) before new prompt");
         }
 
-        self.session.auto_todo_turns = 0;
+        self.session.auto_task_turns = 0;
         self.turn = turn.clone();
         self.session.messages.push(user_msg);
 
@@ -252,7 +268,7 @@ impl CoreEngine {
         }
 
         info!("User interrupted active turn");
-        self.session.auto_todo_turns = 0;
+        self.session.auto_task_turns = 0;
         self.inflight.pending_stream_done = None;
         let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
         let closed = self.close_unresolved_tool_calls("Cancelled by user.");
@@ -361,9 +377,13 @@ impl CoreEngine {
             None
         };
 
-        let (effective_sys, sanitized_msgs, payload) =
-            self.provider
-                .build_turn_payload(&self.model, &self.config, preview_msgs, &turn);
+        let (effective_sys, sanitized_msgs, payload) = self.provider.build_turn_payload(
+            &self.model,
+            &self.config,
+            preview_msgs,
+            &turn,
+            Some(self.session.id.as_str()),
+        );
         let formatted = provider::format_payload_inspection(
             self.provider,
             &self.model,
@@ -413,33 +433,34 @@ impl CoreEngine {
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else if has_response {
-            let max_turns = self.config.app.todo_autoloop_max_turns;
-            if self.config.app.todo_autoloop
+            let max_turns = self.config.app.task_autoloop_max_turns;
+            if self.config.app.task_autoloop
                 && self.turn.enable_tools
-                && tools::is_tool_enabled_for_turn("todo", &self.config, self.active_turn_skill())
+                && tools::is_tool_enabled_for_turn("task", &self.config, self.active_turn_skill())
                 && self.inflight.queued_interjections.is_empty()
-                && self.session.auto_todo_turns < max_turns
+                && self.session.auto_task_turns < max_turns
             {
                 let cfg = self.config.clone();
+                let sid = self.session.id.clone();
                 let should_continue = tokio::task::spawn_blocking(move || {
-                    tools::todo::should_autoloop(&cfg)
+                    tools::task::should_autoloop(&cfg, &sid)
                 })
                 .await
                 .unwrap_or(false);
 
                 if should_continue {
-                    self.session.auto_todo_turns += 1;
+                    self.session.auto_task_turns += 1;
                     info!(
-                        "Active todos remain; auto-continuing todo loop ({}/{max_turns})",
-                        self.session.auto_todo_turns
+                        "Active tasks remain; auto-continuing task loop ({}/{max_turns})",
+                        self.session.auto_task_turns
                     );
                     let _ = self
                         .tx
                         .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
-                    let prompt = if self.config.app.todo_autoloop_ignore_blocked {
-                        "Continue working through `<todos>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `todo` (`action: \"remove\"`) once finished."
+                    let prompt = if self.config.app.task_autoloop_ignore_blocked {
+                        "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished."
                     } else {
-                        "Continue working through `<todos>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `todo` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
+                        "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
                     };
                     self.session
                         .messages
@@ -450,7 +471,7 @@ impl CoreEngine {
                     return;
                 }
             }
-            self.session.auto_todo_turns = 0;
+            self.session.auto_task_turns = 0;
 
             let last_response = self
                 .session

@@ -169,6 +169,7 @@ Inspect `{{target}}` (min severity: {{severity}}).
         Some(&inv.remaining_prompt),
         Some(&inv.raw_args),
         &inv.inputs,
+        None,
         &cfg,
     );
     assert!(sys.contains("Inspect `src/core` (min severity: high)."));
@@ -317,6 +318,7 @@ Raw={{raw_args}} | Args={{args}} | Focus={{focus}}"#;
         Some(&inv2.remaining_prompt),
         Some(&inv2.raw_args),
         &inv2.inputs,
+        None,
         &cfg,
     );
     assert!(sys.contains(

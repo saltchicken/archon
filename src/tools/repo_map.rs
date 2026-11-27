@@ -1813,6 +1813,7 @@ bootstrap()
             root: root.clone(),
             max_output_size: 65536,
             active_skill: None,
+            session_id: None,
             config: crate::core::config::Config::default(),
         };
         // Neutralize the default `!.gitignore` negation so the `.gitignore`

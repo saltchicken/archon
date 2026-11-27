@@ -216,15 +216,15 @@ pub struct AppSettings {
     /// `http_allow_private` is ignored.
     pub http_allowed_cidrs: Vec<String>,
     /// When `true`, automatically continue into the next model turn when a
-    /// response finishes with no tool calls while active workspace todos remain.
+    /// response finishes with no tool calls while active session tasks remain.
     /// Default is `false`.
-    pub todo_autoloop: bool,
-    /// When `true`, `todo_autoloop` ignores `blocked` tasks and keeps running
-    /// through the todo list instead of pausing for user input. Default is `false`.
-    pub todo_autoloop_ignore_blocked: bool,
-    /// Maximum number of consecutive auto-todo-loop turns before the loop stops.
+    pub task_autoloop: bool,
+    /// When `true`, `task_autoloop` ignores `blocked` tasks and keeps running
+    /// through the task list instead of pausing for user input. Default is `false`.
+    pub task_autoloop_ignore_blocked: bool,
+    /// Maximum number of consecutive auto-task-loop turns before the loop stops.
     /// Default is `25`.
-    pub todo_autoloop_max_turns: usize,
+    pub task_autoloop_max_turns: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,6 +344,7 @@ impl Default for AppSettings {
                 "sqlite:tables",
                 "sqlite:schema",
                 "sqlite:query",
+                "task:*",
                 "todo:*",
             ]
             .map(String::from)
@@ -351,9 +352,9 @@ impl Default for AppSettings {
             http_allow_private: false,
             read_roots: Vec::new(),
             http_allowed_cidrs: Vec::new(),
-            todo_autoloop: false,
-            todo_autoloop_ignore_blocked: false,
-            todo_autoloop_max_turns: 25,
+            task_autoloop: false,
+            task_autoloop_ignore_blocked: false,
+            task_autoloop_max_turns: 25,
         }
     }
 }
@@ -525,7 +526,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# allow_hidden = false\n",
             "# http_allow_private = false\n",
             "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
-            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"todo\", \"workspace_snapshot\"]\n\n",
+            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"task\", \"todo\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",

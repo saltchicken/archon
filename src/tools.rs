@@ -23,6 +23,7 @@ mod skill;
 mod sqlite;
 mod subagent;
 mod system;
+pub mod task;
 pub mod todo;
 pub(crate) mod utils;
 pub mod workspace_snapshot;
@@ -172,15 +173,22 @@ pub struct ToolContext {
     pub root: PathBuf,
     pub max_output_size: usize,
     pub active_skill: Option<String>,
+    pub session_id: Option<String>,
     pub config: Config,
 }
 
 impl ToolContext {
-    fn new(config: &Config, active_skill: Option<&str>, max_output_size: usize) -> Result<Self> {
+    fn new(
+        config: &Config,
+        active_skill: Option<&str>,
+        session_id: Option<&str>,
+        max_output_size: usize,
+    ) -> Result<Self> {
         Ok(Self {
             root: workspace_root()?,
             max_output_size,
             active_skill: active_skill.map(String::from),
+            session_id: session_id.map(String::from),
             config: config.clone(),
         })
     }
@@ -893,7 +901,8 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "schedule" => &["list", "logs", "run", "sync", "clean"],
         "sqlite" => &["tables", "schema", "query"],
-        "todo" => &["list", "add", "update", "remove", "clear"],
+        "task" => &["list", "add", "update", "remove", "clear"],
+        "todo" => &["list", "add", "update", "done", "remove", "clear"],
         _ => &[],
     }
 }
@@ -934,8 +943,11 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         }
         "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
-        "todo" => {
+        "task" => {
             "[list|add|update|remove|clear] [id=N] [title=...] [status=pending|in_progress|blocked] [priority=low|medium|high]"
+        }
+        "todo" => {
+            "[list|add|update|done|remove|clear] [scope=workspace|global] [id=N] [title=...] [status=pending|in_progress|done] [include_done=true]"
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
@@ -1044,6 +1056,7 @@ macro_rules! register_tools {
             args: &Value,
             config: &Config,
             active_skill: Option<&str>,
+            session_id: Option<&str>,
             max_output_size: usize,
             filter: ToolFilter,
         ) -> Result<String> {
@@ -1055,7 +1068,7 @@ macro_rules! register_tools {
             if !allowed {
                 bail!("Unknown tool: '{name}'");
             }
-            let ctx = ToolContext::new(config, active_skill, max_output_size)?;
+            let ctx = ToolContext::new(config, active_skill, session_id, max_output_size)?;
             match name {
                 $( $mod::Tool::NAME => register_tools!(@run $kind, $mod::Tool, args, ctx), )*
                 _ => bail!("Unknown tool: '{name}'"),
@@ -1105,6 +1118,7 @@ register_tools! {
     blocking: sqlite,
     async: subagent,
     async: system,
+    blocking: task,
     blocking: todo,
     blocking: workspace_snapshot,
 }
@@ -1166,7 +1180,7 @@ pub async fn run_manual_command(
     full_cap: usize,
 ) -> ToolExecutionOutput {
     let capture_limit = full_cap.max(max_size);
-    let ctx = match ToolContext::new(config, None, capture_limit) {
+    let ctx = match ToolContext::new(config, None, None, capture_limit) {
         Ok(c) => c,
         Err(e) => {
             return ToolExecutionOutput::error(format!("Error resolving workspace root: {e}"));
@@ -1193,6 +1207,7 @@ async fn execute_with_filter(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
+    session_id: Option<&str>,
     max_size: usize,
     full_cap: usize,
     filter: ToolFilter,
@@ -1203,7 +1218,17 @@ async fn execute_with_filter(
     info!("Executing tool: {name}");
     debug!("Tool arguments: {args}");
 
-    match dispatch_tool(name, args, config, active_skill, capture_limit, filter).await {
+    match dispatch_tool(
+        name,
+        args,
+        config,
+        active_skill,
+        session_id,
+        capture_limit,
+        filter,
+    )
+    .await
+    {
         Ok(out) => {
             let packaged = package_tool_output(out, max_size, full_cap);
             info!(
@@ -1232,6 +1257,7 @@ pub async fn execute(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
+    session_id: Option<&str>,
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
@@ -1239,6 +1265,7 @@ pub async fn execute(
         call,
         config,
         active_skill,
+        session_id,
         max_size,
         full_cap,
         ToolFilter::Turn,
@@ -1250,6 +1277,7 @@ pub async fn execute_hook(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
+    session_id: Option<&str>,
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
@@ -1257,6 +1285,7 @@ pub async fn execute_hook(
         call,
         config,
         active_skill,
+        session_id,
         max_size,
         full_cap,
         ToolFilter::Enabled,
@@ -1268,6 +1297,7 @@ pub async fn execute_manual(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
+    session_id: Option<&str>,
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
@@ -1275,6 +1305,7 @@ pub async fn execute_manual(
         call,
         config,
         active_skill,
+        session_id,
         max_size,
         full_cap,
         ToolFilter::Manual,
@@ -1298,7 +1329,7 @@ mod tests {
 
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         // A single file under a read root must resolve with a non-empty relative
         // path: `base_root` anchors at the read root, not the file itself.
@@ -1328,7 +1359,7 @@ mod tests {
 
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         let resolved = ctx.resolve_readable_path(f.to_str().unwrap()).unwrap();
         assert_eq!(resolved, f);
@@ -1347,7 +1378,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = false;
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         // `read_roots` is an explicit permission grant, so hidden files under
         // the root are readable even without `app.allow_hidden`.
@@ -1367,7 +1398,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = true;
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         let resolved = ctx.resolve_readable_path(secret.to_str().unwrap()).unwrap();
         assert_eq!(resolved, secret);
@@ -1385,7 +1416,7 @@ mod tests {
         let other_root = dunce::canonicalize(other_dir.path()).unwrap();
         let mut config = Config::default();
         config.app.read_roots = vec![other_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         let err = ctx
             .resolve_scan_roots(&outside_file.to_string_lossy(), "label")
@@ -1408,7 +1439,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = false;
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         let err = ctx
             .resolve_readable_path(secret.to_str().unwrap())
@@ -1430,7 +1461,7 @@ mod tests {
         let broken = base.path().join("missing-root");
         let mut config = Config::default();
         config.app.read_roots = vec![broken.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, 1024).unwrap();
+        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
 
         // `read_file`: an absolute path outside the workspace is rejected, and
         // the misconfigured entry is named in the message.
