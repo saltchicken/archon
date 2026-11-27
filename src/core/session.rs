@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::{fs, sync::Mutex};
+use std::sync::Mutex;
 
 pub fn truncate_str(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
@@ -193,9 +193,6 @@ pub struct SessionManager {
 
 impl SessionManager {
     pub fn new(raw_dir: &str, workspace: Option<&str>) -> Result<Self> {
-        let history_dir = expand_tilde(raw_dir);
-        fs::create_dir_all(&history_dir)?;
-
         let workspace = workspace
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -209,16 +206,10 @@ impl SessionManager {
             })
             .unwrap_or_default();
 
-        let db_path = history_dir.join("archon.db");
-        let conn = Connection::open(&db_path)
-            .with_context(|| format!("Failed to open SQLite database at {}", db_path.display()))?;
+        let conn = crate::core::db::open_archon_db(raw_dir)?;
 
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;
-
-             CREATE TABLE IF NOT EXISTS sessions (
+            "CREATE TABLE IF NOT EXISTS sessions (
                  id TEXT PRIMARY KEY,
                  workspace TEXT NOT NULL DEFAULT '',
                  title TEXT NOT NULL,
@@ -237,6 +228,9 @@ impl SessionManager {
              CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated_at
                  ON sessions(workspace, updated_at DESC);
 
+             CREATE INDEX IF NOT EXISTS idx_sessions_workspace_pinned_updated_at
+                 ON sessions(workspace, pinned, updated_at DESC);
+
              CREATE TABLE IF NOT EXISTS session_images (
                  session_id TEXT NOT NULL,
                  name TEXT NOT NULL,
@@ -246,17 +240,6 @@ impl SessionManager {
              );",
         )
         .context("Failed to initialize database schema")?;
-
-        // Migrate existing databases that predate the `pinned` column.
-        let _ = conn.execute(
-            "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
-            [],
-        );
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_pinned_updated_at
-             ON sessions(workspace, pinned, updated_at DESC)",
-            [],
-        );
 
         Ok(Self {
             conn: Mutex::new(conn),

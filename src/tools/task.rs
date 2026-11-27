@@ -1,11 +1,11 @@
 use super::{BlockingTool, ToolContext};
-use crate::core::config::{Config, expand_tilde};
+use crate::core::config::Config;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use rusqlite::{Connection, params};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::{fmt::Write as _, fs, path::PathBuf};
+use std::fmt::Write as _;
 
 pub struct Tool;
 
@@ -17,7 +17,7 @@ pub enum TaskAction {
     List,
     /// Add a single task (`title`) or batch-add multiple tasks (`items`).
     Add,
-    /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`. (Use `remove` when finished; there is no `done` status.)
+    /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`.
     Update,
     /// Remove a finished or unneeded task by `id`.
     Remove,
@@ -54,11 +54,11 @@ impl TaskStatus {
         }
     }
 
-    fn glyph(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Pending => "[ ]",
-            Self::InProgress => "[~]",
-            Self::Blocked => "[!]",
+            Self::Pending => "[pending]",
+            Self::InProgress => "[in_progress]",
+            Self::Blocked => "[blocked]",
         }
     }
 }
@@ -148,17 +148,10 @@ struct TaskRow {
 }
 
 fn open_task_db(config: &Config) -> Result<Connection> {
-    let history_dir: PathBuf = expand_tilde(&config.app.history_dir);
-    fs::create_dir_all(&history_dir)?;
-    let db_path = history_dir.join("archon.db");
-    let conn = Connection::open(&db_path)
-        .with_context(|| format!("Failed to open SQLite database at {}", db_path.display()))?;
+    let conn = crate::core::db::open_archon_db(&config.app.history_dir)?;
 
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-
-         CREATE TABLE IF NOT EXISTS tasks (
+        "CREATE TABLE IF NOT EXISTS tasks (
              session_id TEXT NOT NULL,
              id INTEGER NOT NULL,
              title TEXT NOT NULL,
@@ -243,7 +236,7 @@ fn format_task_list(rows: &[TaskRow]) -> String {
             out,
             "  #{} {} [{}] {}",
             r.id,
-            r.status.glyph(),
+            r.status.label(),
             r.priority.badge(),
             r.title
         );
@@ -276,7 +269,7 @@ pub fn format_active_tasks_for_prompt(config: &Config, session_id: &str) -> Opti
         lines.push(format!(
             "- #{} {} [{}] {}{}",
             r.id,
-            r.status.glyph(),
+            r.status.label(),
             r.priority.badge(),
             r.title,
             note_suffix
@@ -521,8 +514,8 @@ mod tests {
             &ctx_a,
         )
         .unwrap();
-        assert!(added.contains("#1 [~] [HIGH] Implement task tool"));
-        assert!(added.contains("#2 [ ] [med] Register in tools.rs"));
+        assert!(added.contains("#1 [in_progress] [HIGH] Implement task tool"));
+        assert!(added.contains("#2 [pending] [med] Register in tools.rs"));
 
         let prompt_a = format_active_tasks_for_prompt(&ctx_a.config, "sess-a").unwrap();
         assert!(prompt_a.contains("<tasks>"));
