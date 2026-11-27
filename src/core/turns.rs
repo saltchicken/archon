@@ -413,13 +413,12 @@ impl CoreEngine {
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else if has_response {
-            // TODO: Extract the magic number for MAX_AUTO_TODO_TURNS. Should be set in config
-            const MAX_AUTO_TODO_TURNS: usize = 25;
+            let max_turns = self.config.app.todo_autoloop_max_turns;
             if self.config.app.todo_autoloop
                 && self.turn.enable_tools
                 && tools::is_tool_enabled_for_turn("todo", &self.config, self.active_turn_skill())
                 && self.inflight.queued_interjections.is_empty()
-                && self.session.auto_todo_turns < MAX_AUTO_TODO_TURNS
+                && self.session.auto_todo_turns < max_turns
             {
                 let cfg = self.config.clone();
                 let should_continue = tokio::task::spawn_blocking(move || {
@@ -431,7 +430,7 @@ impl CoreEngine {
                 if should_continue {
                     self.session.auto_todo_turns += 1;
                     info!(
-                        "Active todos remain; auto-continuing todo loop ({}/{MAX_AUTO_TODO_TURNS})",
+                        "Active todos remain; auto-continuing todo loop ({}/{max_turns})",
                         self.session.auto_todo_turns
                     );
                     let _ = self

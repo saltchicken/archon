@@ -222,6 +222,9 @@ pub struct AppSettings {
     /// When `true`, `todo_autoloop` ignores `blocked` tasks and keeps running
     /// through the todo list instead of pausing for user input. Default is `false`.
     pub todo_autoloop_ignore_blocked: bool,
+    /// Maximum number of consecutive auto-todo-loop turns before the loop stops.
+    /// Default is `25`.
+    pub todo_autoloop_max_turns: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +353,7 @@ impl Default for AppSettings {
             http_allowed_cidrs: Vec::new(),
             todo_autoloop: false,
             todo_autoloop_ignore_blocked: false,
+            todo_autoloop_max_turns: 25,
         }
     }
 }
