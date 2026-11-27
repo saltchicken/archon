@@ -560,6 +560,321 @@ Run checks and notify."#;
     assert_eq!(due_with_after_msg[0].0, "cargo:metadata");
 }
 
+use archon::tools::{ToolCall, ToolFunction};
+
+#[test]
+fn skill_auto_approve_inheritance_negation_and_matching() {
+    let make_call = |name: &str, action: Option<&str>| ToolCall {
+        function: ToolFunction {
+            name: name.to_string(),
+            arguments: match action {
+                Some(a) => json!({ "action": a }),
+                None => json!({}),
+            },
+        },
+        thought_signature: None,
+    };
+
+    // Root skill trims, deduplicates, and strips stray `!` negations.
+    let root = parse_skill_markdown(
+        r#"+++
+name = "root"
+tools = ["edit_file", "cargo", "read_file"]
+auto_approve = [" edit_file ", "edit_file", "!read_file", "cargo:check", "cargo:test"]
++++
+Root."#,
+        Path::new("/tmp/root"),
+    )
+    .unwrap();
+
+    // Parent with wildcard `*` and subaction rules.
+    let base_wild = parse_skill_markdown(
+        r#"+++
+name = "base-wild"
+abstract = true
+auto_approve = ["*"]
++++
+Wild."#,
+        Path::new("/tmp/base-wild"),
+    )
+    .unwrap();
+
+    // Child negates a tool family (`!cargo`) and a single tool (`!edit_file`) against `*`.
+    let child_neg_wild = parse_skill_markdown(
+        r#"+++
+name = "child-neg-wild"
+extends = "base-wild"
+auto_approve = ["!cargo", "!edit_file"]
++++
+Child."#,
+        Path::new("/tmp/child-neg-wild"),
+    )
+    .unwrap();
+
+    // Grandchild re-enables a single subaction (`cargo:check`) after `!cargo`.
+    let grandchild_sub = parse_skill_markdown(
+        r#"+++
+name = "grandchild-sub"
+extends = "child-neg-wild"
+auto_approve = ["cargo:check"]
++++
+Grandchild."#,
+        Path::new("/tmp/grandchild-sub"),
+    )
+    .unwrap();
+
+    // Child negating inherited `cargo:check`/`cargo:test` via `!cargo:*`, plus `!*` on wildcard.
+    let child_clear_prefix = parse_skill_markdown(
+        r#"+++
+name = "child-clear-prefix"
+extends = "root"
+auto_approve = ["!cargo:*"]
++++
+Clear prefix."#,
+        Path::new("/tmp/child-clear-prefix"),
+    )
+    .unwrap();
+
+    let child_clear_wild = parse_skill_markdown(
+        r#"+++
+name = "child-clear-wild"
+extends = "base-wild"
+auto_approve = ["!*"]
++++
+Clear wild."#,
+        Path::new("/tmp/child-clear-wild"),
+    )
+    .unwrap();
+
+    // Child negating one subaction (`!cargo:fmt`) from parent `cargo`.
+    let base_cargo = parse_skill_markdown(
+        r#"+++
+name = "base-cargo"
+abstract = true
+tools = ["cargo"]
+auto_approve = ["cargo"]
++++
+Base cargo."#,
+        Path::new("/tmp/base-cargo"),
+    )
+    .unwrap();
+    let child_no_fmt = parse_skill_markdown(
+        r#"+++
+name = "child-no-fmt"
+extends = "base-cargo"
+auto_approve = ["!cargo:fmt"]
++++
+No fmt."#,
+        Path::new("/tmp/child-no-fmt"),
+    )
+    .unwrap();
+
+    let resolved = resolve_skills(vec![
+        root,
+        base_wild,
+        child_neg_wild,
+        grandchild_sub,
+        child_clear_prefix,
+        child_clear_wild,
+        base_cargo,
+        child_no_fmt,
+    ]);
+    let find = |n: &str| resolved.iter().find(|s| s.name == n).unwrap();
+
+    let r_root = find("root");
+    assert_eq!(
+        r_root.auto_approve,
+        vec!["edit_file", "cargo:check", "cargo:test"]
+    );
+    assert!(r_root.auto_approve_allows(&make_call("edit_file", None)));
+    assert!(r_root.auto_approve_allows(&make_call("cargo", Some("check"))));
+    assert!(!r_root.auto_approve_allows(&make_call("cargo", Some("fmt"))));
+    assert!(!r_root.auto_approve_allows(&make_call("read_file", None)));
+
+    let r_child_wild = find("child-neg-wild");
+    assert!(r_child_wild.auto_approve_allows(&make_call("read_file", None)));
+    assert!(!r_child_wild.auto_approve_allows(&make_call("edit_file", None)));
+    assert!(!r_child_wild.auto_approve_allows(&make_call("cargo", Some("check"))));
+
+    let r_grand = find("grandchild-sub");
+    assert!(r_grand.auto_approve_allows(&make_call("cargo", Some("check"))));
+    assert!(!r_grand.auto_approve_allows(&make_call("cargo", Some("fmt"))));
+    assert!(!r_grand.auto_approve_allows(&make_call("edit_file", None)));
+
+    let r_clear_prefix = find("child-clear-prefix");
+    assert_eq!(r_clear_prefix.auto_approve, vec!["edit_file"]);
+    assert!(!r_clear_prefix.auto_approve_allows(&make_call("cargo", Some("check"))));
+    assert!(!r_clear_prefix.auto_approve_allows(&make_call("cargo", Some("test"))));
+
+    let r_clear_wild = find("child-clear-wild");
+    assert!(r_clear_wild.auto_approve.is_empty());
+    assert!(!r_clear_wild.auto_approve_allows(&make_call("read_file", None)));
+
+    let r_no_fmt = find("child-no-fmt");
+    assert!(r_no_fmt.auto_approve_allows(&make_call("cargo", Some("check"))));
+    assert!(!r_no_fmt.auto_approve_allows(&make_call("cargo", Some("fmt"))));
+}
+
+#[test]
+fn skill_auto_approve_multi_parent_explicit_allow_wins_regardless_of_order() {
+    let make_call = |name: &str, action: Option<&str>| ToolCall {
+        function: ToolFunction {
+            name: name.to_string(),
+            arguments: match action {
+                Some(a) => json!({ "action": a }),
+                None => json!({}),
+            },
+        },
+        thought_signature: None,
+    };
+
+    let base_wild = parse_skill_markdown(
+        "+++\nname = \"base-wild\"\nabstract = true\nauto_approve = [\"*\"]\n+++\nBase.",
+        Path::new("/tmp/base-wild"),
+    )
+    .unwrap();
+    let p_no_cargo = parse_skill_markdown(
+        "+++\nname = \"p-no-cargo\"\nextends = \"base-wild\"\nabstract = true\nauto_approve = [\"!cargo\"]\n+++\nNo cargo.",
+        Path::new("/tmp/p-no-cargo"),
+    )
+    .unwrap();
+    let p_no_fmt = parse_skill_markdown(
+        "+++\nname = \"p-no-fmt\"\nextends = \"base-wild\"\nabstract = true\nauto_approve = [\"!cargo:fmt\"]\n+++\nNo fmt.",
+        Path::new("/tmp/p-no-fmt"),
+    )
+    .unwrap();
+    let p_no_edit = parse_skill_markdown(
+        "+++\nname = \"p-no-edit\"\nextends = \"base-wild\"\nabstract = true\nauto_approve = [\"!edit_file\"]\n+++\nNo edit.",
+        Path::new("/tmp/p-no-edit"),
+    )
+    .unwrap();
+    let p_cargo_star = parse_skill_markdown(
+        "+++\nname = \"p-cargo-star\"\nabstract = true\nauto_approve = [\"cargo:*\"]\n+++\nCargo star.",
+        Path::new("/tmp/p-cargo-star"),
+    )
+    .unwrap();
+    let p_cargo_bare = parse_skill_markdown(
+        "+++\nname = \"p-cargo-bare\"\nabstract = true\nauto_approve = [\"cargo\"]\n+++\nCargo bare.",
+        Path::new("/tmp/p-cargo-bare"),
+    )
+    .unwrap();
+
+    // `cargo:*` vs `!cargo` in both orders.
+    let ab_star = parse_skill_markdown(
+        "+++\nname = \"ab-star\"\nextends = [\"p-no-cargo\", \"p-cargo-star\"]\n+++\nAB.",
+        Path::new("/tmp/ab-star"),
+    )
+    .unwrap();
+    let ba_star = parse_skill_markdown(
+        "+++\nname = \"ba-star\"\nextends = [\"p-cargo-star\", \"p-no-cargo\"]\n+++\nBA.",
+        Path::new("/tmp/ba-star"),
+    )
+    .unwrap();
+
+    // `cargo` vs `!cargo:fmt` in both orders.
+    let ab_fmt = parse_skill_markdown(
+        "+++\nname = \"ab-fmt\"\nextends = [\"p-no-fmt\", \"p-cargo-bare\"]\n+++\nAB.",
+        Path::new("/tmp/ab-fmt"),
+    )
+    .unwrap();
+    let ba_fmt = parse_skill_markdown(
+        "+++\nname = \"ba-fmt\"\nextends = [\"p-cargo-bare\", \"p-no-fmt\"]\n+++\nBA.",
+        Path::new("/tmp/ba-fmt"),
+    )
+    .unwrap();
+
+    // `["*", "!cargo"]` + `["*", "!cargo:fmt"]`: cargo:check is allowed by p-no-fmt, cargo:fmt blocked by both.
+    let ab_narrow = parse_skill_markdown(
+        "+++\nname = \"ab-narrow\"\nextends = [\"p-no-cargo\", \"p-no-fmt\"]\n+++\nAB.",
+        Path::new("/tmp/ab-narrow"),
+    )
+    .unwrap();
+    let ba_narrow = parse_skill_markdown(
+        "+++\nname = \"ba-narrow\"\nextends = [\"p-no-fmt\", \"p-no-cargo\"]\n+++\nBA.",
+        Path::new("/tmp/ba-narrow"),
+    )
+    .unwrap();
+
+    // `["*", "!cargo"]` + `["*", "!edit_file"]`: each parent explicitly allows what the other excluded.
+    let ab_disjoint = parse_skill_markdown(
+        "+++\nname = \"ab-disjoint\"\nextends = [\"p-no-cargo\", \"p-no-edit\"]\n+++\nAB.",
+        Path::new("/tmp/ab-disjoint"),
+    )
+    .unwrap();
+    let ba_disjoint = parse_skill_markdown(
+        "+++\nname = \"ba-disjoint\"\nextends = [\"p-no-edit\", \"p-no-cargo\"]\n+++\nBA.",
+        Path::new("/tmp/ba-disjoint"),
+    )
+    .unwrap();
+
+    let resolved = resolve_skills(vec![
+        base_wild,
+        p_no_cargo,
+        p_no_fmt,
+        p_no_edit,
+        p_cargo_star,
+        p_cargo_bare,
+        ab_star,
+        ba_star,
+        ab_fmt,
+        ba_fmt,
+        ab_narrow,
+        ba_narrow,
+        ab_disjoint,
+        ba_disjoint,
+    ]);
+    let find = |n: &str| resolved.iter().find(|s| s.name == n).unwrap();
+
+    for name in ["ab-star", "ba-star"] {
+        let s = find(name);
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("check"))),
+            "{name}"
+        );
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("fmt"))),
+            "{name}"
+        );
+        assert!(
+            s.auto_approve_allows(&make_call("read_file", None)),
+            "{name}"
+        );
+    }
+    for name in ["ab-fmt", "ba-fmt"] {
+        let s = find(name);
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("fmt"))),
+            "{name}"
+        );
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("check"))),
+            "{name}"
+        );
+    }
+    for name in ["ab-narrow", "ba-narrow"] {
+        let s = find(name);
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("check"))),
+            "{name}"
+        );
+        assert!(
+            !s.auto_approve_allows(&make_call("cargo", Some("fmt"))),
+            "{name}"
+        );
+    }
+    for name in ["ab-disjoint", "ba-disjoint"] {
+        let s = find(name);
+        assert!(
+            s.auto_approve_allows(&make_call("cargo", Some("check"))),
+            "{name}"
+        );
+        assert!(
+            s.auto_approve_allows(&make_call("edit_file", None)),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn hooks_interpolate_last_response_in_string_args() {
     let raw = r#"+++

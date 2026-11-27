@@ -77,14 +77,21 @@ impl CoreEngine {
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
-        let all_rules = self
-            .config
-            .app
-            .auto_approve
-            .iter()
-            .chain(self.session.auto_approve.iter())
-            .map(String::as_str);
-        tools::is_auto_approved(call, all_rules)
+        let global_or_session = tools::is_auto_approved(
+            call,
+            self.config
+                .app
+                .auto_approve
+                .iter()
+                .chain(self.session.auto_approve.iter())
+                .map(String::as_str),
+        );
+        if global_or_session {
+            return true;
+        }
+        self.active_turn_skill()
+            .and_then(|name| crate::core::skills::find_skill(&self.config, name))
+            .is_some_and(|s| s.auto_approve_allows(call))
     }
 
     pub(super) fn tool_batch_progress(&self) -> (usize, usize) {
@@ -629,5 +636,80 @@ impl CoreEngine {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::skills::parse_skill_markdown;
+    use crate::tools::ToolFunction;
+    use serde_json::json;
+    use std::path::Path;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    #[test]
+    fn skill_auto_approve_applies_only_when_skill_is_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = config::Config::default();
+        cfg.app.history_dir = tmp.path().to_string_lossy().into_owned();
+        cfg.app.auto_approve = vec!["read_file".to_string()];
+
+        let coder = parse_skill_markdown(
+            r#"+++
+name = "coder"
+command = "coder"
+tools = ["edit_file", "read_file", "cargo"]
+auto_approve = ["edit_file", "cargo:check"]
++++
+Coder."#,
+            Path::new("/tmp/coder"),
+        )
+        .unwrap();
+        cfg.skills = crate::core::skills::resolve_skills(vec![coder]);
+
+        let (tx, _rx) = unbounded_channel();
+        let mut engine = CoreEngine::new("test-model".to_string(), cfg, tx).unwrap();
+
+        let edit_call = ToolCall {
+            function: ToolFunction {
+                name: "edit_file".to_string(),
+                arguments: json!({}),
+            },
+            thought_signature: None,
+        };
+        let read_call = ToolCall {
+            function: ToolFunction {
+                name: "read_file".to_string(),
+                arguments: json!({}),
+            },
+            thought_signature: None,
+        };
+        let cargo_check = ToolCall {
+            function: ToolFunction {
+                name: "cargo".to_string(),
+                arguments: json!({ "action": "check" }),
+            },
+            thought_signature: None,
+        };
+        let cargo_fmt = ToolCall {
+            function: ToolFunction {
+                name: "cargo".to_string(),
+                arguments: json!({ "action": "fmt" }),
+            },
+            thought_signature: None,
+        };
+
+        // Without active skill, only global `auto_approve` (`read_file`) applies.
+        assert!(engine.is_call_auto_approved(&read_call));
+        assert!(!engine.is_call_auto_approved(&edit_call));
+        assert!(!engine.is_call_auto_approved(&cargo_check));
+
+        // With `coder` active, skill-level `auto_approve` applies alongside global rules.
+        engine.turn.active_skill = Some("coder".to_string());
+        assert!(engine.is_call_auto_approved(&read_call));
+        assert!(engine.is_call_auto_approved(&edit_call));
+        assert!(engine.is_call_auto_approved(&cargo_check));
+        assert!(!engine.is_call_auto_approved(&cargo_fmt));
     }
 }

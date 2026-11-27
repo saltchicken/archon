@@ -532,10 +532,21 @@ mod tests {
         assert!(schema.get("title").is_none());
         // Property-level `title` (string value) should also be stripped.
         let name_schema = schema["properties"]["name"].as_object().unwrap();
-        assert!(name_schema.get("title").is_none(), "inner title should be stripped");
-        assert!(name_schema.get("default").is_none(), "inner default should be stripped");
+        assert!(
+            name_schema.get("title").is_none(),
+            "inner title should be stripped"
+        );
+        assert!(
+            name_schema.get("default").is_none(),
+            "inner default should be stripped"
+        );
         // The `name` property must still exist.
-        assert!(schema["properties"].as_object().unwrap().contains_key("name"));
+        assert!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("name")
+        );
     }
 
     #[test]

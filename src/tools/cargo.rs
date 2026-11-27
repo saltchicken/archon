@@ -262,7 +262,7 @@ fn build_command_args(args: &CargoArgs) -> Result<(Vec<String>, &'static str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_command_args, CargoArgs};
+    use super::{CargoArgs, build_command_args};
 
     fn cargo_args(
         action: &str,
@@ -313,8 +313,15 @@ mod tests {
         assert_eq!(
             argv,
             vec![
-                "add", "--color", "never", "serde@1.0", "--dev",
-                "--features", "derive", "--features", "alloc",
+                "add",
+                "--color",
+                "never",
+                "serde@1.0",
+                "--dev",
+                "--features",
+                "derive",
+                "--features",
+                "alloc",
             ]
         );
         assert_eq!(empty_msg, "Dependency added.");
@@ -338,7 +345,14 @@ mod tests {
         let precise = cargo_args("update", "serde", "1.0.200", false, false, "");
         assert_eq!(
             build_command_args(&precise).unwrap().0,
-            vec!["update", "--color", "never", "serde", "--precise", "1.0.200"]
+            vec![
+                "update",
+                "--color",
+                "never",
+                "serde",
+                "--precise",
+                "1.0.200"
+            ]
         );
     }
 

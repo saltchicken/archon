@@ -978,24 +978,37 @@ pub fn matching_tool_triggers(prefix_mark: &str, query: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn auto_approve_match_specificity(call: &ToolCall, rule: &str) -> Option<u8> {
+    let r = rule.trim();
+    if r.is_empty() {
+        return None;
+    }
+    let name = call.function.name.as_str();
+    let sig = call_signature(call);
+
+    if r == "*" {
+        Some(1)
+    } else if r == sig {
+        Some(3)
+    } else if r == name {
+        // When `sig != name`, the call has a subaction, so bare `name` matches the whole tool family.
+        Some(if sig == name { 3 } else { 2 })
+    } else if let Some(p) = r.strip_suffix(":*")
+        && (name == p || sig.starts_with(&format!("{p}:")))
+    {
+        Some(2)
+    } else {
+        None
+    }
+}
+
 pub fn is_auto_approved<'a, I>(call: &ToolCall, rules: I) -> bool
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let name = call.function.name.as_str();
-    let sig = call_signature(call);
-
     rules
         .into_iter()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-        .any(|r| {
-            r == "*"
-                || r == name
-                || r == sig
-                || r.strip_suffix(":*")
-                    .is_some_and(|p| name == p || sig.starts_with(&format!("{p}:")))
-        })
+        .any(|r| auto_approve_match_specificity(call, r).is_some())
 }
 
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {

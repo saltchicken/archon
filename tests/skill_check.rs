@@ -220,6 +220,118 @@ Use {{super}} without extends."#,
 }
 
 #[test]
+fn skill_check_validates_auto_approve_rules() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    fs::create_dir_all(dir.join("base-aa")).unwrap();
+    fs::write(
+        dir.join("base-aa/SKILL.md"),
+        "+++\nname = \"base-aa\"\nabstract = true\ntools = [\"cargo\", \"edit_file\"]\nauto_approve = [\"*\"]\n+++\nBase.",
+    )
+    .unwrap();
+
+    // Valid child using `!*` and `cargo:check`.
+    fs::create_dir_all(dir.join("valid-child")).unwrap();
+    fs::write(
+        dir.join("valid-child/SKILL.md"),
+        "+++\nname = \"valid-child\"\nextends = \"base-aa\"\nauto_approve = [\"!*\", \"cargo:check\", \"edit_file\"]\n+++\nValid.",
+    )
+    .unwrap();
+
+    // Invalid rules: unknown tool, unsupported subaction, unknown subaction, whitespace around `:`.
+    fs::create_dir_all(dir.join("bad-rules")).unwrap();
+    fs::write(
+        dir.join("bad-rules/SKILL.md"),
+        "+++\nname = \"bad-rules\"\ntools = [\"read_file\", \"cargo\"]\nauto_approve = [\"no_such_tool\", \"read_file:sub\", \"cargo:bogus\", \"cargo : check\"]\n+++\nBad.",
+    )
+    .unwrap();
+
+    // Warnings: negation without `extends`, and rule targeting tool excluded from skill's `tools`.
+    fs::create_dir_all(dir.join("warn-rules")).unwrap();
+    fs::write(
+        dir.join("warn-rules/SKILL.md"),
+        "+++\nname = \"warn-rules\"\ntools = [\"read_file\"]\nauto_approve = [\"!edit_file\", \"edit_file\"]\n+++\nWarn.",
+    )
+    .unwrap();
+
+    let cfg = Config::default();
+    let report = check_skills_in_dir(dir, "test", &cfg, false, None);
+
+    let valid_child = report
+        .results
+        .iter()
+        .find(|r| r.name == "valid-child")
+        .unwrap();
+    assert!(
+        valid_child.is_ok(true),
+        "valid-child should pass strict skill check: {:?}",
+        valid_child.diagnostics
+    );
+
+    let bad_rules = report
+        .results
+        .iter()
+        .find(|r| r.name == "bad-rules")
+        .unwrap();
+    assert!(!bad_rules.is_ok(false));
+    let bad_msgs: Vec<&str> = bad_rules
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        bad_msgs
+            .iter()
+            .any(|m| m.contains("Unknown tool 'no_such_tool'")),
+        "{bad_msgs:?}"
+    );
+    assert!(
+        bad_msgs
+            .iter()
+            .any(|m| m.contains("does not support subactions")),
+        "{bad_msgs:?}"
+    );
+    assert!(
+        bad_msgs
+            .iter()
+            .any(|m| m.contains("Unknown subaction 'bogus'")),
+        "{bad_msgs:?}"
+    );
+    assert!(
+        bad_msgs
+            .iter()
+            .any(|m| m.contains("Unexpected whitespace around ':'")),
+        "{bad_msgs:?}"
+    );
+
+    let warn_rules = report
+        .results
+        .iter()
+        .find(|r| r.name == "warn-rules")
+        .unwrap();
+    assert!(warn_rules.is_ok(false));
+    assert!(!warn_rules.is_ok(true));
+    let warn_msgs: Vec<&str> = warn_rules
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(
+        warn_msgs
+            .iter()
+            .any(|m| m.contains("has no effect on a skill without `extends`")),
+        "{warn_msgs:?}"
+    );
+    assert!(
+        warn_msgs
+            .iter()
+            .any(|m| m.contains("not enabled by this skill's `tools`")),
+        "{warn_msgs:?}"
+    );
+}
+
+#[test]
 fn repo_skills_directory_passes_skill_check() {
     let repo_skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
     if repo_skills.is_dir() {

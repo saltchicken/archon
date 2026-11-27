@@ -442,11 +442,10 @@ impl CoreEngine {
             {
                 let cfg = self.config.clone();
                 let sid = self.session.id.clone();
-                let should_continue = tokio::task::spawn_blocking(move || {
-                    tools::task::should_autoloop(&cfg, &sid)
-                })
-                .await
-                .unwrap_or(false);
+                let should_continue =
+                    tokio::task::spawn_blocking(move || tools::task::should_autoloop(&cfg, &sid))
+                        .await
+                        .unwrap_or(false);
 
                 if should_continue {
                     self.session.auto_task_turns += 1;
@@ -462,9 +461,7 @@ impl CoreEngine {
                     } else {
                         "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
                     };
-                    self.session
-                        .messages
-                        .push(ChatMessage::new("user", prompt));
+                    self.session.messages.push(ChatMessage::new("user", prompt));
                     self.save_and_emit_chat(Vec::new()).await;
                     let turn = self.turn.clone();
                     self.spawn_model_turn(&turn).await;

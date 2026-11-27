@@ -49,6 +49,7 @@ struct SkillFrontmatter {
     #[serde(default, rename = "abstract")]
     is_abstract: bool,
     tools: Vec<String>,
+    auto_approve: Vec<String>,
     hooks: Vec<SkillHook>,
     args: Vec<SkillArgDef>,
 }
@@ -61,6 +62,7 @@ pub struct DetailedSkillParse {
     pub frontmatter_error: Option<String>,
     pub unknown_frontmatter_keys: Vec<String>,
     pub raw_tools: Vec<String>,
+    pub raw_auto_approve: Vec<String>,
     pub raw_hooks: Vec<SkillHook>,
 }
 
@@ -134,6 +136,7 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
             frontmatter_error,
             unknown_frontmatter_keys,
             raw_tools: Vec::new(),
+            raw_auto_approve: Vec::new(),
             raw_hooks: Vec::new(),
         };
     }
@@ -153,6 +156,7 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
     };
 
     let raw_tools = fm.tools.clone();
+    let raw_auto_approve = fm.auto_approve.clone();
     let raw_hooks = fm.hooks.clone();
 
     let hooks = fm
@@ -203,6 +207,8 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
             tools: fm.tools,
             excluded_tools: Vec::new(),
             tools_restricted: false,
+            auto_approve: fm.auto_approve,
+            excluded_auto_approve: Vec::new(),
             hooks,
             args,
             prompt,
@@ -216,6 +222,7 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
         frontmatter_error,
         unknown_frontmatter_keys,
         raw_tools,
+        raw_auto_approve,
         raw_hooks,
     }
 }

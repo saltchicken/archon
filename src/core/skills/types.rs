@@ -16,6 +16,7 @@ pub const KNOWN_FRONTMATTER_KEYS: &[&str] = &[
     "extends",
     "abstract",
     "tools",
+    "auto_approve",
     "hooks",
     "args",
 ];
@@ -174,6 +175,8 @@ pub struct SkillDefinition {
     pub tools: Vec<String>,
     pub excluded_tools: Vec<String>,
     pub tools_restricted: bool,
+    pub auto_approve: Vec<String>,
+    pub excluded_auto_approve: Vec<String>,
     pub hooks: Vec<SkillHook>,
     pub args: Vec<SkillArgDef>,
     pub prompt: String,
@@ -209,6 +212,23 @@ impl SkillDefinition {
             .map(String::as_str)
             .map(str::trim)
             .any(|t| t == "*" || t == name)
+    }
+
+    pub fn auto_approve_allows(&self, call: &crate::tools::ToolCall) -> bool {
+        let Some(incl) = self
+            .auto_approve
+            .iter()
+            .filter_map(|r| crate::tools::auto_approve_match_specificity(call, r))
+            .max()
+        else {
+            return false;
+        };
+        let excl = self
+            .excluded_auto_approve
+            .iter()
+            .filter_map(|r| crate::tools::auto_approve_match_specificity(call, r))
+            .max();
+        excl.is_none_or(|e| incl > e)
     }
 
     pub fn all_dirs(&self) -> impl Iterator<Item = &Path> {

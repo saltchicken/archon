@@ -187,13 +187,7 @@ fn format_task_list(rows: &[TaskRow]) -> String {
     );
 
     for r in rows {
-        let _ = writeln!(
-            out,
-            "  #{} {} {}",
-            r.id,
-            r.status.label(),
-            r.title
-        );
+        let _ = writeln!(out, "  #{} {} {}", r.id, r.status.label(), r.title);
         if !r.notes.trim().is_empty() {
             let _ = writeln!(out, "      note: {}", r.notes.trim());
         }
@@ -281,7 +275,10 @@ pub fn clone_session_tasks(
 /// Removes all tasks belonging to a deleted session.
 pub fn delete_session_tasks(config: &Config, session_id: &str) -> Result<()> {
     let conn = open_task_db(config)?;
-    conn.execute("DELETE FROM tasks WHERE session_id = ?1", params![session_id])?;
+    conn.execute(
+        "DELETE FROM tasks WHERE session_id = ?1",
+        params![session_id],
+    )?;
     Ok(())
 }
 
@@ -404,8 +401,10 @@ impl BlockingTool for Tool {
                 ))
             }
             TaskAction::Clear => {
-                let deleted =
-                    conn.execute("DELETE FROM tasks WHERE session_id = ?1", params![session_id])?;
+                let deleted = conn.execute(
+                    "DELETE FROM tasks WHERE session_id = ?1",
+                    params![session_id],
+                )?;
                 Ok(format!("Cleared {deleted} task(s)."))
             }
         }

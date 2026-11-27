@@ -34,7 +34,7 @@ pub enum SkillAction {
     Read,
     /// Create a new skill (`SKILL.md` with `+++` TOML frontmatter and markdown prompt).
     Create,
-    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `extends`, `abstract`, `tools`, `hooks`, `args`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md`.
+    /// Modify an existing skill by updating its frontmatter fields (`description`, `command`, `extends`, `abstract`, `tools`, `auto_approve`, `hooks`, `args`), replacing its `prompt`/`content`, or applying disjoint search/replace `edits` hunks to `SKILL.md`.
     #[serde(alias = "edit", alias = "update")]
     Modify,
     /// Validate skills (`SKILL.md` frontmatter, `extends` chains, tool names, hook argument JSON Schemas, typed `[[args]]`, and template variables).
@@ -84,6 +84,12 @@ pub struct SkillArgs {
         deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
     )]
     pub tools: Option<Vec<String>>,
+    /// Optional list of auto-approval rules active while this skill is running (for `create` or `modify` frontmatter, e.g. `["edit_file", "cargo:check"]`; prefix with `!` to negate an inherited rule).
+    #[serde(
+        default,
+        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+    )]
+    pub auto_approve: Option<Vec<String>>,
     /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}`, `{{args}}`, or declared `{{arg_name}}` placeholders).
     #[serde(default)]
     pub hooks: Option<Vec<SkillHook>>,
@@ -115,6 +121,7 @@ impl SkillArgs {
             || self.extends.is_some()
             || self.is_abstract.is_some()
             || self.tools.is_some()
+            || self.auto_approve.is_some()
             || self.hooks.is_some()
             || self.args.is_some()
     }
@@ -232,6 +239,7 @@ fn format_skill_document(
     extends: &[String],
     is_abstract: bool,
     tools: &[String],
+    auto_approve: &[String],
     hooks: &[SkillHook],
     skill_args: &[SkillArgDef],
     extra: Option<&toml::Table>,
@@ -275,6 +283,19 @@ fn format_skill_document(
         .collect();
     if !clean_tools.is_empty() || extends.is_empty() {
         table.insert("tools".into(), toml::Value::Array(clean_tools));
+    }
+
+    let clean_auto_approve: Vec<toml::Value> = auto_approve
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty())
+        .map(|r| toml::Value::String(r.to_string()))
+        .collect();
+    if !clean_auto_approve.is_empty() {
+        table.insert(
+            "auto_approve".into(),
+            toml::Value::Array(clean_auto_approve),
+        );
     }
 
     let mut clean_args = Vec::new();
@@ -328,6 +349,7 @@ fn format_skill_document(
                     | "extends"
                     | "abstract"
                     | "tools"
+                    | "auto_approve"
                     | "hooks"
                     | "args"
             ) {
@@ -445,6 +467,7 @@ fn merge_and_format_skill_doc(
     fallback_extends: &[String],
     fallback_abstract: bool,
     fallback_tools: &[String],
+    fallback_auto_approve: &[String],
     fallback_hooks: &[SkillHook],
     fallback_args: &[SkillArgDef],
     body: &str,
@@ -478,6 +501,11 @@ fn merge_and_format_skill_doc(
         .clone()
         .or_else(|| table_string_vec(table, "tools"))
         .unwrap_or_else(|| fallback_tools.to_vec());
+    let auto_approve = args
+        .auto_approve
+        .clone()
+        .or_else(|| table_string_vec(table, "auto_approve"))
+        .unwrap_or_else(|| fallback_auto_approve.to_vec());
     let hooks = args
         .hooks
         .clone()
@@ -495,6 +523,7 @@ fn merge_and_format_skill_doc(
         &extends,
         is_abstract,
         &tools,
+        &auto_approve,
         &hooks,
         &skill_args,
         Some(table),
@@ -552,6 +581,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
                 &[],
                 &[],
                 &[],
+                &[],
                 prompt_body,
                 false,
             )?
@@ -595,6 +625,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
         }
         let extends = args.extends.as_deref().unwrap_or(&[]);
         let tools = args.tools.as_deref().unwrap_or(&[]);
+        let auto_approve = args.auto_approve.as_deref().unwrap_or(&[]);
         let hooks = args.hooks.as_deref().unwrap_or(&[]);
         let skill_args = args.args.as_deref().unwrap_or(&[]);
         format_skill_document(
@@ -604,6 +635,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
             extends,
             is_abstract,
             tools,
+            auto_approve,
             hooks,
             skill_args,
             None,
@@ -636,7 +668,7 @@ pub fn preview_modify(
 
     if args.edits.is_empty() && !has_field_updates {
         bail!(
-            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'extends', 'abstract', 'tools', 'hooks', 'args', 'prompt', or 'content'",
+            "Nothing to modify for skill '{}': provide 'edits' hunks or at least one of 'description', 'command', 'extends', 'abstract', 'tools', 'auto_approve', 'hooks', 'args', 'prompt', or 'content'",
             resolved.definition.name
         );
     }
@@ -667,6 +699,7 @@ pub fn preview_modify(
             &def.extends,
             def.is_abstract,
             &def.tools,
+            &def.auto_approve,
             &def.hooks,
             &def.args,
             body,
@@ -802,6 +835,11 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
             let _ = writeln!(out, "  extends:     {}", skill.extends.join(", "));
         }
         let _ = writeln!(out, "  tools:       {tools_str}");
+        if !skill.auto_approve.is_empty() || !skill.excluded_auto_approve.is_empty() {
+            let mut aa_parts = skill.auto_approve.clone();
+            aa_parts.extend(skill.excluded_auto_approve.iter().map(|r| format!("!{r}")));
+            let _ = writeln!(out, "  auto_approve: {}", aa_parts.join(", "));
+        }
         if !skill.args.is_empty() {
             let _ = writeln!(out, "  args:        {}", skill.args_usage_hint());
         }

@@ -12,6 +12,50 @@ fn push_unique_string(vec: &mut Vec<String>, item: &str) {
     }
 }
 
+fn auto_approve_rule_covers(broad: &str, target: &str) -> bool {
+    if broad == "*" || broad.eq_ignore_ascii_case(target) {
+        return true;
+    }
+    let broad_tool = broad.strip_suffix(":*").unwrap_or(broad);
+    let target_tool = target.split_once(':').map_or(target, |(t, _)| t);
+    (!broad.contains(':') || broad.ends_with(":*")) && broad_tool.eq_ignore_ascii_case(target_tool)
+}
+
+fn apply_positive_auto_approve(merged: &mut Vec<String>, excluded: &mut Vec<String>, rule: &str) {
+    let r = rule.trim();
+    if r.is_empty() {
+        return;
+    }
+    if r == "*" {
+        push_unique_string(merged, "*");
+        excluded.clear();
+        return;
+    }
+    push_unique_string(merged, r);
+    excluded.retain(|ex| !auto_approve_rule_covers(r, ex));
+}
+
+fn apply_negative_auto_approve(merged: &mut Vec<String>, excluded: &mut Vec<String>, neg: &str) {
+    let n = neg.trim();
+    if n.is_empty() {
+        return;
+    }
+    if n == "*" {
+        merged.retain(|r| r != "*");
+        excluded.retain(|ex| merged.iter().any(|m| auto_approve_rule_covers(m, ex)));
+        return;
+    }
+    merged.retain(|r| !auto_approve_rule_covers(n, r));
+    excluded.retain(|ex| !auto_approve_rule_covers(n, ex));
+    let canonical_ex = n.strip_suffix(":*").unwrap_or(n);
+    if merged
+        .iter()
+        .any(|m| auto_approve_rule_covers(m, canonical_ex))
+    {
+        push_unique_string(excluded, canonical_ex);
+    }
+}
+
 fn merge_arg_def(vec: &mut Vec<SkillArgDef>, incoming: SkillArgDef) {
     if let Some(existing) = vec
         .iter_mut()
@@ -46,6 +90,15 @@ fn resolve_skill_at(
             .filter(|t| !t.is_empty() && !t.starts_with('!'))
             .map(String::from)
             .collect();
+        let mut deduped_auto_approve = Vec::new();
+        for rule in &resolved.auto_approve {
+            let r = rule.trim();
+            if !r.is_empty() && !r.starts_with('!') {
+                push_unique_string(&mut deduped_auto_approve, r);
+            }
+        }
+        resolved.auto_approve = deduped_auto_approve;
+        resolved.excluded_auto_approve.clear();
         resolved.excluded_tools.clear();
         resolved.tools_restricted =
             !resolved.tools.is_empty() && !resolved.tools.iter().any(|t| t == "*");
@@ -58,6 +111,9 @@ fn resolve_skill_at(
     let mut merged_tools: Vec<String> = Vec::new();
     let mut excluded_tools: Vec<String> = Vec::new();
     let mut tools_restricted = false;
+    let mut merged_auto_approve: Vec<String> = Vec::new();
+    let mut excluded_auto_approve: Vec<String> = Vec::new();
+    let mut parent_auto_approve: Vec<(Vec<String>, Vec<String>)> = Vec::new();
     let mut merged_hooks: Vec<super::types::SkillHook> = Vec::new();
     let mut merged_args: Vec<SkillArgDef> = Vec::new();
     let mut inherited_dirs: Vec<PathBuf> = Vec::new();
@@ -114,6 +170,10 @@ fn resolve_skill_at(
                 push_unique_string(&mut excluded_tools, ex);
             }
         }
+        parent_auto_approve.push((
+            parent.auto_approve.clone(),
+            parent.excluded_auto_approve.clone(),
+        ));
         for hook in &parent.hooks {
             if !merged_hooks.contains(hook) {
                 merged_hooks.push(hook.clone());
@@ -153,6 +213,62 @@ fn resolve_skill_at(
             tools_restricted = true;
             push_unique_string(&mut merged_tools, trimmed);
             excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(trimmed));
+        }
+    }
+
+    // Merge parents' auto_approve rules order-independently: an explicit allow
+    // in any parent overrides another parent's exclusion of that rule.
+    for (pos_rules, _) in &parent_auto_approve {
+        for rule in pos_rules {
+            let r = rule.trim();
+            if !r.is_empty() {
+                push_unique_string(&mut merged_auto_approve, r);
+            }
+        }
+    }
+    for (i, (_, ex_rules)) in parent_auto_approve.iter().enumerate() {
+        for ex in ex_rules {
+            let ex = ex.trim();
+            if ex.is_empty() {
+                continue;
+            }
+            let overridden_by_other_parent =
+                parent_auto_approve
+                    .iter()
+                    .enumerate()
+                    .any(|(j, (other_pos, other_ex))| {
+                        i != j
+                            && other_pos
+                                .iter()
+                                .any(|r| auto_approve_rule_covers(r.trim(), ex))
+                            && !other_ex
+                                .iter()
+                                .any(|oex| auto_approve_rule_covers(oex.trim(), ex))
+                    });
+            if !overridden_by_other_parent
+                && !merged_auto_approve
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(ex))
+                && merged_auto_approve
+                    .iter()
+                    .any(|m| auto_approve_rule_covers(m, ex))
+            {
+                push_unique_string(&mut excluded_auto_approve, ex);
+            }
+        }
+    }
+
+    // Apply child's auto_approve rules (supporting `!rule` removal and exclusions).
+    for raw_rule in &child.auto_approve {
+        let trimmed = raw_rule.trim();
+        if let Some(neg) = trimmed.strip_prefix('!') {
+            apply_negative_auto_approve(&mut merged_auto_approve, &mut excluded_auto_approve, neg);
+        } else if !trimmed.is_empty() {
+            apply_positive_auto_approve(
+                &mut merged_auto_approve,
+                &mut excluded_auto_approve,
+                trimmed,
+            );
         }
     }
 
@@ -196,6 +312,8 @@ fn resolve_skill_at(
         tools: merged_tools,
         excluded_tools,
         tools_restricted,
+        auto_approve: merged_auto_approve,
+        excluded_auto_approve,
         hooks: merged_hooks,
         args: merged_args,
         prompt: final_prompt,

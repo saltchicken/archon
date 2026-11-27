@@ -1042,6 +1042,65 @@ pub fn check_scanned_registry(
             }
         }
 
+        // 4b. Auto-approve rules verification
+        for raw_rule in &parsed.raw_auto_approve {
+            let trimmed = raw_rule.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let (is_neg, rule) = match trimmed.strip_prefix('!') {
+                Some(rest) => (true, rest.trim()),
+                None => (false, trimmed),
+            };
+            if is_neg && raw_skill.extends.is_empty() {
+                diagnostics.push(SkillDiagnostic::warning(format!(
+                    "`auto_approve` negation '{trimmed}' has no effect on a skill without `extends`"
+                )));
+            }
+            if rule == "*" {
+                continue;
+            }
+            let (tool_name, subaction) = match rule.split_once(':') {
+                Some((t, sub)) => {
+                    if t != t.trim() || sub != sub.trim() {
+                        diagnostics.push(SkillDiagnostic::error(format!(
+                            "Unexpected whitespace around ':' in `auto_approve` entry '{trimmed}'"
+                        )));
+                        continue;
+                    }
+                    (t, Some(sub))
+                }
+                None => (rule, None),
+            };
+            if tool_name.is_empty() || !ALL_TOOL_NAMES.contains(&tool_name) {
+                diagnostics.push(SkillDiagnostic::error(format!(
+                    "Unknown tool '{tool_name}' in `auto_approve` entry '{trimmed}' (valid tools: {})",
+                    ALL_TOOL_NAMES.join(", ")
+                )));
+                continue;
+            }
+            if let Some(sub) = subaction
+                && sub != "*"
+            {
+                let valid_subs = tools::tool_subactions(tool_name);
+                if valid_subs.is_empty() {
+                    diagnostics.push(SkillDiagnostic::error(format!(
+                        "Tool '{tool_name}' in `auto_approve` entry '{trimmed}' does not support subactions"
+                    )));
+                } else if !valid_subs.contains(&sub) {
+                    diagnostics.push(SkillDiagnostic::error(format!(
+                        "Unknown subaction '{sub}' for tool '{tool_name}' in `auto_approve` entry '{trimmed}' (valid subactions: {})",
+                        valid_subs.join(", ")
+                    )));
+                }
+            }
+            if !is_neg && !effective.allows_tool(tool_name) {
+                diagnostics.push(SkillDiagnostic::warning(format!(
+                    "`auto_approve` entry '{trimmed}' targets tool '{tool_name}', which is not enabled by this skill's `tools`"
+                )));
+            }
+        }
+
         // 5. Typed `[[args]]` validation
         validate_args_defs(&raw_skill.args, &mut diagnostics);
 
