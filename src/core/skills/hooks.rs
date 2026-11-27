@@ -101,12 +101,7 @@ fn interpolate_hook_value(args: &Value, ctx: &TemplateContext<'_>) -> Option<Val
     match args {
         Value::String(s) if s.contains("{{") => {
             if let Some(inner) = single_template_ident(s) {
-                if let Some(typed_val) = ctx.inputs.get(inner).or_else(|| {
-                    ctx.inputs
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(inner))
-                        .map(|(_, v)| v)
-                }) {
+                if let Some(typed_val) = super::get_ci(ctx.inputs, inner) {
                     return Some(typed_val.clone());
                 }
                 if !matches!(inner, "args" | "raw_args" | "skill.name" | "last_response") {

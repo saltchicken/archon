@@ -95,12 +95,7 @@ impl<'a> TemplateContext<'a> {
     /// Resolves `var` against the typed skill inputs, falling back to a
     /// case-insensitive key match.
     fn input_value(&self, var: &str) -> Option<&Value> {
-        self.inputs.get(var).or_else(|| {
-            self.inputs
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(var))
-                .map(|(_, v)| v)
-        })
+        super::get_ci(self.inputs, var)
     }
 
     fn lookup_str(&self, var: &str) -> Option<String> {

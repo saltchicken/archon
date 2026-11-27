@@ -169,22 +169,14 @@ fn scan_arg_tokens(raw: &str) -> Vec<ArgTokenSpan> {
     let mut pos = 0usize;
 
     while pos < len {
-        while pos < len {
-            let ch = raw[pos..].chars().next().unwrap();
-            if ch.is_whitespace() {
-                pos += ch.len_utf8();
-            } else {
-                break;
-            }
-        }
+        let trimmed = raw[pos..].trim_start();
+        pos = len - trimmed.len();
         if pos >= len {
             break;
         }
 
         let token_start = pos;
-        let first_ch = raw[pos..].chars().next().unwrap();
-
-        if (first_ch == '"' || first_ch == '\'')
+        if trimmed.starts_with(['"', '\''])
             && let Some((end, unquoted)) = scan_quoted_segment(raw, pos)
         {
             tokens.push(ArgTokenSpan {
@@ -197,77 +189,41 @@ fn scan_arg_tokens(raw: &str) -> Vec<ArgTokenSpan> {
             continue;
         }
 
-        let mut scan = pos;
-        let mut eq_pos = None;
-        while scan < len {
-            let ch = raw[scan..].chars().next().unwrap();
-            if ch.is_whitespace() {
-                break;
-            }
-            if ch == '=' && scan > pos {
-                let candidate_key = &raw[pos..scan];
-                if candidate_key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-                {
-                    eq_pos = Some(scan);
-                }
-                break;
-            }
-            scan += ch.len_utf8();
-        }
+        let word_end = trimmed.find(char::is_whitespace).map_or(len, |i| pos + i);
+        let word = &raw[pos..word_end];
 
-        if let Some(eq) = eq_pos {
-            let key = raw[pos..eq].to_string();
-            let val_start = eq + 1;
-            if val_start < len {
-                let vch = raw[val_start..].chars().next().unwrap();
-                if (vch == '"' || vch == '\'')
-                    && let Some((end, unquoted)) = scan_quoted_segment(raw, val_start)
-                {
-                    tokens.push(ArgTokenSpan {
-                        start: token_start,
-                        end,
-                        key: Some(key),
-                        value: unquoted,
-                    });
-                    pos = end;
-                    continue;
-                }
-            }
-            let mut end = val_start;
-            while end < len {
-                let ch = raw[end..].chars().next().unwrap();
-                if ch.is_whitespace() {
-                    break;
-                }
-                end += ch.len_utf8();
-            }
+        if let Some(eq_rel) = word.find('=')
+            && eq_rel > 0
+            && word[..eq_rel]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
+            let key = word[..eq_rel].to_string();
+            let val_start = pos + eq_rel + 1;
+            let (end, value) = if raw[val_start..].starts_with(['"', '\''])
+                && let Some((q_end, unquoted)) = scan_quoted_segment(raw, val_start)
+            {
+                (q_end, unquoted)
+            } else {
+                (word_end, raw[val_start..word_end].to_string())
+            };
             tokens.push(ArgTokenSpan {
                 start: token_start,
                 end,
                 key: Some(key),
-                value: raw[val_start..end].to_string(),
+                value,
             });
             pos = end;
             continue;
         }
 
-        let mut end = pos;
-        while end < len {
-            let ch = raw[end..].chars().next().unwrap();
-            if ch.is_whitespace() {
-                break;
-            }
-            end += ch.len_utf8();
-        }
         tokens.push(ArgTokenSpan {
             start: token_start,
-            end,
+            end: word_end,
             key: None,
-            value: raw[token_start..end].to_string(),
+            value: word.to_string(),
         });
-        pos = end;
+        pos = word_end;
     }
 
     tokens
