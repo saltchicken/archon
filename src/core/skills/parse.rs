@@ -227,25 +227,23 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
     }
 }
 
-pub fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
-    let detailed = parse_skill_markdown_detailed(raw, dir_path);
-    if let Some(ref err) = detailed.frontmatter_error {
-        tracing::warn!(
-            "Failed to parse TOML frontmatter in skill '{}': {err}",
-            dir_path.display()
-        );
-    }
-    detailed.definition
+pub struct ScannedRawSkill {
+    pub(crate) scope_label: String,
+    pub(crate) scope: MemoryScope,
+    pub(crate) file_path: PathBuf,
+    pub(crate) skill_dir: PathBuf,
+    pub(crate) read_error: Option<String>,
+    pub(crate) parsed: Option<DetailedSkillParse>,
 }
 
-pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
+pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<ScannedRawSkill> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
 
-    let mut skills = Vec::new();
+    let mut out = Vec::new();
     for path in entries {
         let (md_path, skill_dir) = if path.is_dir() {
             let md = path.join("SKILL.md");
@@ -262,16 +260,80 @@ pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
 
         match fs::read_to_string(&md_path) {
             Ok(raw) => {
-                if let Some(skill) = parse_skill_markdown(&raw, &skill_dir) {
-                    skills.push(skill);
-                }
+                let parsed = parse_skill_markdown_detailed(&raw, &skill_dir);
+                out.push(ScannedRawSkill {
+                    scope_label: scope_label.to_string(),
+                    scope,
+                    file_path: md_path,
+                    skill_dir,
+                    read_error: None,
+                    parsed: Some(parsed),
+                });
             }
             Err(e) => {
-                tracing::warn!("Failed to read skill file '{}': {e}", md_path.display());
+                out.push(ScannedRawSkill {
+                    scope_label: scope_label.to_string(),
+                    scope,
+                    file_path: md_path,
+                    skill_dir,
+                    read_error: Some(e.to_string()),
+                    parsed: None,
+                });
             }
         }
     }
-    skills
+    out
+}
+
+/// Insert or replace a skill by name (case-insensitive).
+///
+/// When replacing, sets `overrides_global` on the incoming definition if it is
+/// a workspace-scoped entry overriding a global-scoped entry.
+pub fn upsert_skill_by_name(list: &mut Vec<SkillDefinition>, mut incoming: SkillDefinition) {
+    if let Some(existing) = list
+        .iter_mut()
+        .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
+    {
+        incoming.overrides_global =
+            existing.scope == MemoryScope::Global && incoming.scope == MemoryScope::Workspace;
+        *existing = incoming;
+    } else {
+        list.push(incoming);
+    }
+}
+
+pub fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
+    let detailed = parse_skill_markdown_detailed(raw, dir_path);
+    if let Some(ref err) = detailed.frontmatter_error {
+        tracing::warn!(
+            "Failed to parse TOML frontmatter in skill '{}': {err}",
+            dir_path.display()
+        );
+    }
+    detailed.definition
+}
+
+pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
+    scan_raw_dir(dir, "", MemoryScope::Global)
+        .into_iter()
+        .filter_map(|item| {
+            if let Some(err) = item.read_error {
+                tracing::warn!(
+                    "Failed to read skill file '{}': {err}",
+                    item.file_path.display()
+                );
+                return None;
+            }
+            let detailed = item.parsed?;
+            if let Some(ref err) = detailed.frontmatter_error {
+                tracing::warn!(
+                    "Failed to parse TOML frontmatter in skill '{}': {err}",
+                    item.skill_dir.display()
+                );
+            }
+            detailed.definition
+        })
+        .collect()
 }
 
 pub fn discover_skills(
@@ -279,29 +341,17 @@ pub fn discover_skills(
     workspace_skills_dir: Option<&Path>,
 ) -> Vec<SkillDefinition> {
     let mut merged = Vec::new();
-    let upsert = |list: &mut Vec<SkillDefinition>, mut incoming: SkillDefinition| {
-        if let Some(existing) = list
-            .iter_mut()
-            .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
-        {
-            incoming.overrides_global =
-                existing.scope == MemoryScope::Global && incoming.scope == MemoryScope::Workspace;
-            *existing = incoming;
-        } else {
-            list.push(incoming);
-        }
-    };
 
     let global_dir = expand_tilde(skills_dir);
     for mut skill in scan_skills_dir(&global_dir) {
         skill.scope = MemoryScope::Global;
-        upsert(&mut merged, skill);
+        upsert_skill_by_name(&mut merged, skill);
     }
 
     if let Some(ws_dir) = workspace_skills_dir {
         for mut skill in scan_skills_dir(ws_dir) {
             skill.scope = MemoryScope::Workspace;
-            upsert(&mut merged, skill);
+            upsert_skill_by_name(&mut merged, skill);
         }
     }
 

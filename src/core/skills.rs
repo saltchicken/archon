@@ -17,8 +17,9 @@ pub use hooks::{
     preview_due_hooks,
 };
 pub use parse::{
-    DetailedSkillParse, discover_skills, find_skill, parse_at_command, parse_skill_markdown,
-    parse_skill_markdown_detailed, scan_skills_dir, split_toml_frontmatter,
+    DetailedSkillParse, ScannedRawSkill, discover_skills, find_skill, parse_at_command,
+    parse_skill_markdown, parse_skill_markdown_detailed, scan_raw_dir, scan_skills_dir,
+    split_toml_frontmatter, upsert_skill_by_name,
 };
 pub use resolve::{
     check_skill_activation, missing_skill_tools, replace_super_placeholder, resolve_skills,

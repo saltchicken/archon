@@ -4,10 +4,9 @@ use crate::{
         config::{Config, MemoryScope, expand_tilde, format_tilde_path},
         schema_utils,
         skills::{
-            DetailedSkillParse, HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType,
-            SkillDefinition, SkillHook, TemplateContext, inspect_template, interpolate_hook_args,
-            parse_skill_markdown_detailed, resolve_skills, scan_skills_dir,
-            validate_arg_json_value,
+            HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType, SkillDefinition, SkillHook,
+            TemplateContext, inspect_template, interpolate_hook_args, resolve_skills,
+            scan_skills_dir, upsert_skill_by_name, validate_arg_json_value,
         },
     },
     tools::{self, ALL_TOOL_NAMES},
@@ -679,63 +678,7 @@ fn validate_hooks(
     }
 }
 
-pub struct ScannedRawSkill {
-    scope_label: String,
-    scope: MemoryScope,
-    file_path: PathBuf,
-    skill_dir: PathBuf,
-    read_error: Option<String>,
-    parsed: Option<DetailedSkillParse>,
-}
-
-pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<ScannedRawSkill> {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-
-    let mut out = Vec::new();
-    for path in entries {
-        let (md_path, skill_dir) = if path.is_dir() {
-            let md = path.join("SKILL.md");
-            if !md.exists() {
-                continue;
-            }
-            (md, path)
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let stem = path.with_extension("");
-            (path, stem)
-        } else {
-            continue;
-        };
-
-        match fs::read_to_string(&md_path) {
-            Ok(raw) => {
-                let parsed = parse_skill_markdown_detailed(&raw, &skill_dir);
-                out.push(ScannedRawSkill {
-                    scope_label: scope_label.to_string(),
-                    scope,
-                    file_path: md_path,
-                    skill_dir,
-                    read_error: None,
-                    parsed: Some(parsed),
-                });
-            }
-            Err(e) => {
-                out.push(ScannedRawSkill {
-                    scope_label: scope_label.to_string(),
-                    scope,
-                    file_path: md_path,
-                    skill_dir,
-                    read_error: Some(e.to_string()),
-                    parsed: None,
-                });
-            }
-        }
-    }
-    out
-}
+pub use crate::core::skills::{ScannedRawSkill, scan_raw_dir};
 
 pub fn check_scanned_registry(
     scanned: Vec<ScannedRawSkill>,
@@ -758,14 +701,7 @@ pub fn check_scanned_registry(
             continue;
         };
         def.scope = MemoryScope::Global;
-        if let Some(existing) = global_defs
-            .iter_mut()
-            .find(|s| s.name.eq_ignore_ascii_case(&def.name))
-        {
-            *existing = def;
-        } else {
-            global_defs.push(def);
-        }
+        upsert_skill_by_name(&mut global_defs, def);
     }
     let resolved_global = resolve_skills(global_defs.clone());
 
@@ -782,16 +718,7 @@ pub fn check_scanned_registry(
             continue;
         };
         def.scope = item.scope;
-        if let Some(existing) = merged_defs
-            .iter_mut()
-            .find(|s| s.name.eq_ignore_ascii_case(&def.name))
-        {
-            def.overrides_global =
-                existing.scope == MemoryScope::Global && def.scope == MemoryScope::Workspace;
-            *existing = def;
-        } else {
-            merged_defs.push(def);
-        }
+        upsert_skill_by_name(&mut merged_defs, def);
     }
 
     let resolved_merged = resolve_skills(merged_defs.clone());
