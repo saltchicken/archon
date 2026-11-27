@@ -944,7 +944,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
         "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
         "task" => {
-            "[list|add|update|remove|clear] [id=N] [title=...] [status=pending|in_progress|blocked] [priority=low|medium|high]"
+            "[list|add|update|remove|clear] [id=N] [title=...] [status=pending|in_progress|blocked]"
         }
         "todo" => {
             "[list|add|update|remove|clear] [scope=workspace|global] [id=N] [title=...] [status=pending|in_progress|blocked] [priority=low|medium|high]"

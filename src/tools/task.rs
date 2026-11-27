@@ -17,7 +17,7 @@ pub enum TaskAction {
     List,
     /// Add a single task (`title`) or batch-add multiple tasks (`items`).
     Add,
-    /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`.
+    /// Update an existing task's `status`, `title`, or `notes` by `id`.
     Update,
     /// Remove a finished or unneeded task by `id`.
     Remove,
@@ -63,48 +63,10 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskPriority {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-impl TaskPriority {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-
-    fn from_db(s: &str) -> Self {
-        match s {
-            "low" => Self::Low,
-            "high" => Self::High,
-            _ => Self::Medium,
-        }
-    }
-
-    fn badge(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "med",
-            Self::High => "HIGH",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct NewTaskItem {
     /// Short, actionable step description.
     pub title: String,
-    /// Optional priority (`low`, `medium`, `high`). Defaults to `medium`.
-    #[serde(default)]
-    pub priority: TaskPriority,
     /// Optional initial status (`pending`, `in_progress`, `blocked`). Defaults to `pending`.
     #[serde(default)]
     pub status: TaskStatus,
@@ -130,9 +92,6 @@ pub struct TaskArgs {
     /// Task status (`pending`, `in_progress`, `blocked`) for `add`, `update`, or filtering `list`.
     #[serde(default)]
     pub status: Option<TaskStatus>,
-    /// Task priority (`low`, `medium`, `high`) for `add` or `update`.
-    #[serde(default)]
-    pub priority: Option<TaskPriority>,
     /// Optional notes for `add` or `update`.
     #[serde(default)]
     pub notes: Option<String>,
@@ -143,7 +102,6 @@ struct TaskRow {
     id: i64,
     title: String,
     status: TaskStatus,
-    priority: TaskPriority,
     notes: String,
 }
 
@@ -156,7 +114,6 @@ fn open_task_db(config: &Config) -> Result<Connection> {
              id INTEGER NOT NULL,
              title TEXT NOT NULL,
              status TEXT NOT NULL DEFAULT 'pending',
-             priority TEXT NOT NULL DEFAULT 'medium',
              notes TEXT NOT NULL DEFAULT '',
              created_at TEXT NOT NULL,
              updated_at TEXT NOT NULL,
@@ -178,12 +135,11 @@ fn fetch_tasks(
 ) -> Result<Vec<TaskRow>> {
     let mut rows = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT id, title, status, priority, notes
+        "SELECT id, title, status, notes
          FROM tasks
          WHERE session_id = ?1
          ORDER BY
              CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
-             CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
              id ASC",
     )?;
 
@@ -192,8 +148,7 @@ fn fetch_tasks(
             id: row.get(0)?,
             title: row.get(1)?,
             status: TaskStatus::from_db(&row.get::<_, String>(2)?),
-            priority: TaskPriority::from_db(&row.get::<_, String>(3)?),
-            notes: row.get(4)?,
+            notes: row.get(3)?,
         })
     })?;
 
@@ -234,10 +189,9 @@ fn format_task_list(rows: &[TaskRow]) -> String {
     for r in rows {
         let _ = writeln!(
             out,
-            "  #{} {} [{}] {}",
+            "  #{} {} {}",
             r.id,
             r.status.label(),
-            r.priority.badge(),
             r.title
         );
         if !r.notes.trim().is_empty() {
@@ -267,10 +221,9 @@ pub fn format_active_tasks_for_prompt(config: &Config, session_id: &str) -> Opti
             format!(" — {}", r.notes.trim())
         };
         lines.push(format!(
-            "- #{} {} [{}] {}{}",
+            "- #{} {} {}{}",
             r.id,
             r.status.label(),
-            r.priority.badge(),
             r.title,
             note_suffix
         ));
@@ -316,8 +269,8 @@ pub fn clone_session_tasks(
 ) -> Result<()> {
     let conn = open_task_db(config)?;
     conn.execute(
-        "INSERT OR REPLACE INTO tasks (session_id, id, title, status, priority, notes, created_at, updated_at)
-         SELECT ?2, id, title, status, priority, notes, created_at, updated_at
+        "INSERT OR REPLACE INTO tasks (session_id, id, title, status, notes, created_at, updated_at)
+         SELECT ?2, id, title, status, notes, created_at, updated_at
          FROM tasks
          WHERE session_id = ?1",
         params![from_session_id, to_session_id],
@@ -358,7 +311,6 @@ impl BlockingTool for Tool {
                 {
                     to_insert.push(NewTaskItem {
                         title,
-                        priority: args.priority.unwrap_or_default(),
                         status: args.status.unwrap_or_default(),
                         notes: args.notes.unwrap_or_default(),
                     });
@@ -379,14 +331,13 @@ impl BlockingTool for Tool {
                         |r| r.get(0),
                     )?;
                     conn.execute(
-                        "INSERT INTO tasks (session_id, id, title, status, priority, notes, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        "INSERT INTO tasks (session_id, id, title, status, notes, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             session_id,
                             next_id,
                             title,
                             item.status.as_str(),
-                            item.priority.as_str(),
                             item.notes.trim(),
                             now,
                             now,
@@ -405,14 +356,14 @@ impl BlockingTool for Tool {
             }
             TaskAction::Update => {
                 let id = args.id.context("`task:update` requires `id`.")?;
-                let existing: Option<(String, String, String, String)> = conn
+                let existing: Option<(String, String, String)> = conn
                     .query_row(
-                        "SELECT title, status, priority, notes FROM tasks WHERE id = ?1 AND session_id = ?2",
+                        "SELECT title, status, notes FROM tasks WHERE id = ?1 AND session_id = ?2",
                         params![id, session_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )
                     .ok();
-                let Some((cur_title, cur_status, cur_priority, cur_notes)) = existing else {
+                let Some((cur_title, cur_status, cur_notes)) = existing else {
                     bail!("Task #{id} not found in this session.");
                 };
 
@@ -423,16 +374,12 @@ impl BlockingTool for Tool {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&cur_title);
                 let new_status = args.status.map(TaskStatus::as_str).unwrap_or(&cur_status);
-                let new_priority = args
-                    .priority
-                    .map(TaskPriority::as_str)
-                    .unwrap_or(&cur_priority);
                 let new_notes = args.notes.as_deref().map(str::trim).unwrap_or(&cur_notes);
 
                 conn.execute(
-                    "UPDATE tasks SET title = ?1, status = ?2, priority = ?3, notes = ?4, updated_at = ?5
-                     WHERE id = ?6 AND session_id = ?7",
-                    params![new_title, new_status, new_priority, new_notes, now, id, session_id],
+                    "UPDATE tasks SET title = ?1, status = ?2, notes = ?3, updated_at = ?4
+                     WHERE id = ?5 AND session_id = ?6",
+                    params![new_title, new_status, new_notes, now, id, session_id],
                 )?;
 
                 let rows = fetch_tasks(&conn, session_id, None)?;
@@ -496,26 +443,23 @@ mod tests {
                 items: vec![
                     NewTaskItem {
                         title: "Implement task tool".into(),
-                        priority: TaskPriority::High,
                         status: TaskStatus::InProgress,
                         notes: "src/tools/task.rs".into(),
                     },
                     NewTaskItem {
                         title: "Register in tools.rs".into(),
-                        priority: TaskPriority::Medium,
                         status: TaskStatus::Pending,
                         notes: String::new(),
                     },
                 ],
                 status: None,
-                priority: None,
                 notes: None,
             },
             &ctx_a,
         )
         .unwrap();
-        assert!(added.contains("#1 [in_progress] [HIGH] Implement task tool"));
-        assert!(added.contains("#2 [pending] [med] Register in tools.rs"));
+        assert!(added.contains("#1 [in_progress] Implement task tool"));
+        assert!(added.contains("#2 [pending] Register in tools.rs"));
 
         let prompt_a = format_active_tasks_for_prompt(&ctx_a.config, "sess-a").unwrap();
         assert!(prompt_a.contains("<tasks>"));
@@ -532,7 +476,6 @@ mod tests {
                 title: None,
                 items: vec![],
                 status: None,
-                priority: None,
                 notes: None,
             },
             &ctx_a,
@@ -548,7 +491,6 @@ mod tests {
                 title: None,
                 items: vec![],
                 status: None,
-                priority: None,
                 notes: None,
             },
             &ctx_a,
@@ -563,7 +505,6 @@ mod tests {
                 title: Some("Restart numbering".into()),
                 items: vec![],
                 status: None,
-                priority: None,
                 notes: None,
             },
             &ctx_a,
@@ -584,7 +525,6 @@ mod tests {
                 title: Some("Clarify API contract".into()),
                 items: vec![],
                 status: Some(TaskStatus::Blocked),
-                priority: Some(TaskPriority::High),
                 notes: Some("Waiting on user".into()),
             },
             &ctx,
