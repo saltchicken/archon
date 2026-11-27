@@ -35,6 +35,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+fn get_ci<'a, V>(map: &'a BTreeMap<String, V>, key: &str) -> Option<&'a V> {
+    map.get(key).or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v)
+    })
+}
+
 /// Composes the full system prompt for a turn, incorporating the base prompt,
 /// memory blocks, and the active skill's rendered prompt.
 pub fn compose_system_prompt(
