@@ -422,13 +422,13 @@ impl CoreEngine {
                 && self.session.auto_todo_turns < MAX_AUTO_TODO_TURNS
             {
                 let cfg = self.config.clone();
-                let has_todos = tokio::task::spawn_blocking(move || {
-                    tools::todo::has_active_todos(&cfg)
+                let should_continue = tokio::task::spawn_blocking(move || {
+                    tools::todo::should_autoloop(&cfg)
                 })
                 .await
                 .unwrap_or(false);
 
-                if has_todos {
+                if should_continue {
                     self.session.auto_todo_turns += 1;
                     info!(
                         "Active todos remain; auto-continuing todo loop ({}/{MAX_AUTO_TODO_TURNS})",
@@ -437,10 +437,14 @@ impl CoreEngine {
                     let _ = self
                         .tx
                         .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
-                    self.session.messages.push(ChatMessage::new(
-                        "user",
-                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish.",
-                    ));
+                    let prompt = if self.config.app.todo_autoloop_ignore_blocked {
+                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish."
+                    } else {
+                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish. If you need user input before proceeding, mark the task `blocked` with `todo` (`action: \"update\"`, `status: \"blocked\"`) and ask your question."
+                    };
+                    self.session
+                        .messages
+                        .push(ChatMessage::new("user", prompt));
                     self.save_and_emit_chat(Vec::new()).await;
                     let turn = self.turn.clone();
                     self.spawn_model_turn(&turn).await;

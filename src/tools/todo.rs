@@ -33,6 +33,8 @@ pub enum TodoStatus {
     Pending,
     /// Actively being worked on.
     InProgress,
+    /// Waiting on user input or an external decision (pauses `todo_autoloop` unless ignored).
+    Blocked,
 }
 
 impl TodoStatus {
@@ -40,12 +42,14 @@ impl TodoStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
         }
     }
 
     fn from_db(s: &str) -> Self {
         match s {
             "in_progress" => Self::InProgress,
+            "blocked" => Self::Blocked,
             _ => Self::Pending,
         }
     }
@@ -54,6 +58,7 @@ impl TodoStatus {
         match self {
             Self::Pending => "[ ]",
             Self::InProgress => "[~]",
+            Self::Blocked => "[!]",
         }
     }
 }
@@ -100,7 +105,7 @@ pub struct NewTodoItem {
     /// Optional priority (`low`, `medium`, `high`). Defaults to `medium`.
     #[serde(default)]
     pub priority: TodoPriority,
-    /// Optional initial status (`pending`, `in_progress`). Defaults to `pending`.
+    /// Optional initial status (`pending`, `in_progress`, `blocked`). Defaults to `pending`.
     #[serde(default)]
     pub status: TodoStatus,
     /// Optional details, file paths, or acceptance notes.
@@ -122,7 +127,7 @@ pub struct TodoArgs {
     /// Batch of tasks to add in a single call (for `add`).
     #[serde(default)]
     pub items: Vec<NewTodoItem>,
-    /// Task status (`pending`, `in_progress`) for `add`, `update`, or filtering `list`.
+    /// Task status (`pending`, `in_progress`, `blocked`) for `add`, `update`, or filtering `list`.
     #[serde(default)]
     pub status: Option<TodoStatus>,
     /// Task priority (`low`, `medium`, `high`) for `add` or `update`.
@@ -205,7 +210,7 @@ fn fetch_todos(
          FROM todos
          WHERE workspace = ?1
          ORDER BY
-             CASE status WHEN 'in_progress' THEN 0 ELSE 1 END,
+             CASE status WHEN 'in_progress' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,
              CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
              id ASC",
     )?;
@@ -240,8 +245,17 @@ fn format_todo_list(rows: &[TodoRow]) -> String {
         .iter()
         .filter(|r| r.status == TodoStatus::InProgress)
         .count();
+    let blocked = rows
+        .iter()
+        .filter(|r| r.status == TodoStatus::Blocked)
+        .count();
+    let blocked_suffix = if blocked > 0 {
+        format!(", {blocked} blocked")
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "Workspace tasks ({} total, {in_prog} in progress):\n",
+        "Workspace tasks ({} total, {in_prog} in progress{blocked_suffix}):\n",
         rows.len()
     );
 
@@ -288,8 +302,14 @@ pub fn format_active_todos_for_prompt(config: &Config) -> Option<String> {
         ));
     }
 
+    let instruction = if config.app.todo_autoloop && !config.app.todo_autoloop_ignore_blocked {
+        "Active workspace task plan (update with the `todo` tool as you make progress; if you need user input or clarification before continuing, set the relevant task's status to `blocked` with a note and ask your question):"
+    } else {
+        "Active workspace task plan (update with the `todo` tool as you make progress):"
+    };
+
     Some(format!(
-        "<todos>\nActive workspace task plan (update with the `todo` tool as you make progress):\n{}\n</todos>",
+        "<todos>\n{instruction}\n{}\n</todos>",
         lines.join("\n")
     ))
 }
@@ -301,6 +321,27 @@ pub fn has_active_todos(config: &Config) -> bool {
     };
     let ws = canonical_workspace(config);
     fetch_todos(&conn, &ws, None).is_ok_and(|rows| !rows.is_empty())
+}
+
+/// Returns `true` if `todo_autoloop` should continue into another turn.
+///
+/// When `app.todo_autoloop_ignore_blocked` is `false` (default), any `blocked`
+/// task pauses the loop so the model can wait for user input.
+pub fn should_autoloop(config: &Config) -> bool {
+    let Ok(conn) = open_todo_db(config) else {
+        return false;
+    };
+    let ws = canonical_workspace(config);
+    let Ok(rows) = fetch_todos(&conn, &ws, None) else {
+        return false;
+    };
+    if rows.is_empty() {
+        return false;
+    }
+    if config.app.todo_autoloop_ignore_blocked {
+        return true;
+    }
+    !rows.iter().any(|r| r.status == TodoStatus::Blocked)
 }
 
 impl BlockingTool for Tool {
@@ -536,5 +577,31 @@ mod tests {
         .unwrap();
         assert!(readded.contains("Added #1."));
         assert!(readded.contains("#1 [ ] [med] Restart numbering"));
+    }
+
+    #[test]
+    fn blocked_status_pauses_autoloop_unless_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_ctx(&tmp);
+
+        Tool::execute(
+            TodoArgs {
+                action: TodoAction::Add,
+                id: None,
+                title: Some("Clarify API contract".into()),
+                items: vec![],
+                status: Some(TodoStatus::Blocked),
+                priority: Some(TodoPriority::High),
+                notes: Some("Waiting on user".into()),
+            },
+            &ctx,
+        )
+        .unwrap();
+
+        ctx.config.app.todo_autoloop_ignore_blocked = false;
+        assert!(!should_autoloop(&ctx.config));
+
+        ctx.config.app.todo_autoloop_ignore_blocked = true;
+        assert!(should_autoloop(&ctx.config));
     }
 }

@@ -219,6 +219,9 @@ pub struct AppSettings {
     /// response finishes with no tool calls while active workspace todos remain.
     /// Default is `false`.
     pub todo_autoloop: bool,
+    /// When `true`, `todo_autoloop` ignores `blocked` tasks and keeps running
+    /// through the todo list instead of pausing for user input. Default is `false`.
+    pub todo_autoloop_ignore_blocked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +349,7 @@ impl Default for AppSettings {
             read_roots: Vec::new(),
             http_allowed_cidrs: Vec::new(),
             todo_autoloop: false,
+            todo_autoloop_ignore_blocked: false,
         }
     }
 }
