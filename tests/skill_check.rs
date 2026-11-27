@@ -410,11 +410,19 @@ fn skill_check_and_resolve_support_custom_tool_groups_and_catch_bad_members() {
     )
     .unwrap();
 
+    fs::create_dir_all(dir.join("custom-empty")).unwrap();
+    fs::write(
+        dir.join("custom-empty/SKILL.md"),
+        "+++\nname = \"custom-empty\"\ntools = [\"@empty\"]\n+++\nEmpty group.",
+    )
+    .unwrap();
+
     let mut cfg = Config::default();
     cfg.tool_groups
         .insert("myteam".into(), vec!["git".into(), "cargo".into()]);
     cfg.tool_groups
         .insert("broken".into(), vec!["git".into(), "@no_such_sub".into()]);
+    cfg.tool_groups.insert("empty".into(), vec![]);
 
     let report_ok = check_skills_in_dir(dir, "test", &cfg, true, Some("custom-ok"));
     assert!(
@@ -438,4 +446,13 @@ fn skill_check_and_resolve_support_custom_tool_groups_and_catch_bad_members() {
     assert!(custom_ok.allows_tool("git"));
     assert!(custom_ok.allows_tool("cargo"));
     assert!(!custom_ok.allows_tool("browser"));
+
+    // Unresolved nested `@group` sentinels do not leak into resolved skill tools.
+    let custom_bad = skills.iter().find(|s| s.name == "custom-bad").unwrap();
+    assert_eq!(custom_bad.tools, vec!["git"]);
+
+    // An empty custom group keeps a root skill restricted instead of allowing all tools.
+    let custom_empty = skills.iter().find(|s| s.name == "custom-empty").unwrap();
+    assert!(custom_empty.tools_restricted);
+    assert!(!custom_empty.allows_tool("git"));
 }

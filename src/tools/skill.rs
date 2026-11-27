@@ -435,22 +435,22 @@ fn check_unknown_tools(
     tools: &[String],
     custom_groups: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Option<String> {
-    let unknown: Vec<&str> = tools
+    let cleaned: Vec<String> = tools
         .iter()
         .map(String::as_str)
         .map(str::trim)
         .map(|t| t.strip_prefix('!').unwrap_or(t).trim())
-        .filter(|&t| !t.is_empty() && t != "*" && !super::is_known_tool_or_group(t, custom_groups))
+        .filter(|&t| !t.is_empty())
+        .map(str::to_string)
         .collect();
-    if unknown.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "[Note: unrecognized tool name(s) in `tools`: {}. {}]",
-            unknown.join(", "),
-            super::format_valid_tools_and_groups(custom_groups)
-        ))
-    }
+    let Err(unknown) = super::expand_tool_spec_checked(&cleaned, custom_groups) else {
+        return None;
+    };
+    Some(format!(
+        "[Note: unrecognized tool name(s) in `tools`: {}. {}]",
+        unknown.join(", "),
+        super::format_valid_tools_and_groups(custom_groups)
+    ))
 }
 
 fn normalize_doc_newlines(raw: &str) -> String {

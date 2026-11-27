@@ -156,9 +156,14 @@ pub fn resolve_load_tools_request(
     }
 
     // Preview FIFO evictions without mutating the caller's state.
-    let mut preview_state = session_tools.clone();
-    let evicted =
-        preview_state.apply_loaded(&newly_loaded, core_count, config.app.max_loaded_tools);
+    // Skip eviction preview when nothing new is loaded to match
+    // `CoreEngine::apply_load_tools_side_effect`, which is a no-op on empty batches.
+    let evicted = if newly_loaded.is_empty() {
+        Vec::new()
+    } else {
+        let mut preview_state = session_tools.clone();
+        preview_state.apply_loaded(&newly_loaded, core_count, config.app.max_loaded_tools)
+    };
 
     Ok(LoadToolsResolution {
         newly_loaded,

@@ -1815,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn schemas_for_turn_returns_core_loaded_and_load_tools_only_when_deferred_exist() {
+    fn schemas_for_turn_keeps_load_tools_append_only_for_non_core_tools() {
         let mut cfg = Config::default();
         cfg.app.enabled_tools = vec![
             "read_file".into(),
@@ -2064,6 +2064,8 @@ mod tests {
             vec!["git".into(), "@typo_group".into()],
         );
         cfg.tool_groups
+            .insert("bare_at".into(), vec!["git".into(), "@".into()]);
+        cfg.tool_groups
             .insert("mixed_case".into(), vec!["Git".into(), "Cargo".into()]);
 
         let mut st = SessionToolState::default();
@@ -2085,10 +2087,13 @@ mod tests {
             super::expand_tool_spec_checked(&["@mixed_case".into()], &cfg.tool_groups).unwrap();
         assert_eq!(expanded_mixed, vec!["git", "cargo"]);
 
-        // 3. Unknown nested `@group` inside a custom group is surfaced as an error.
+        // 3. Unknown nested `@group` (including bare `@`) inside a custom group is surfaced as an error.
         let err_nested =
             super::expand_tool_spec_checked(&["@bad_nested".into()], &cfg.tool_groups).unwrap_err();
         assert_eq!(err_nested, vec!["@typo_group"]);
+        let err_bare_at =
+            super::expand_tool_spec_checked(&["@bare_at".into()], &cfg.tool_groups).unwrap_err();
+        assert_eq!(err_bare_at, vec!["@"]);
 
         let call_nested = super::ToolCall {
             function: super::ToolFunction {
@@ -2119,7 +2124,16 @@ mod tests {
                 .contains("exceeds the dynamic tool slot budget")
         );
 
-        // 5. `max_loaded_tools = 0` disables eviction and allows arbitrary batch sizes.
+        // 5. Already-active no-op `load_tools` does not report phantom evictions even when
+        //    `/tools +` previously pushed `loaded` past `dynamic_cap`.
+        let mut over_cap = SessionToolState::default();
+        over_cap.enable_tools(&["git".into(), "cargo".into(), "browser".into()], &cfg);
+        let out_noop = super::execute(&call_single, &cfg, None, None, &over_cap, 4096, 8192).await;
+        assert!(!out_noop.is_error, "{}", out_noop.truncated_output);
+        assert!(out_noop.truncated_output.contains("Already active: git"));
+        assert!(!out_noop.truncated_output.contains("Evicted"));
+
+        // 6. `max_loaded_tools = 0` disables eviction and allows arbitrary batch sizes.
         cfg.app.max_loaded_tools = 0;
         let out_unbounded =
             super::execute(&call_oversized, &cfg, None, None, &st, 4096, 8192).await;

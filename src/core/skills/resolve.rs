@@ -23,7 +23,10 @@ fn expand_skill_tool_token(
     if let Some(group_key) = trimmed.strip_prefix('@')
         && let Some(members) = crate::tools::resolve_tool_group(group_key, custom_groups)
     {
-        return members;
+        return members
+            .into_iter()
+            .filter(|m| !m.starts_with('@'))
+            .collect();
     }
     vec![trimmed.to_string()]
 }
@@ -102,10 +105,14 @@ fn resolve_skill_at(
         // Strip any stray `!tool` negations from a root skill without parents,
         // and expand any `@group` entries.
         let mut expanded_tools = Vec::new();
+        let mut declared_restricted = false;
         for raw_t in &resolved.tools {
             let t = raw_t.trim();
             if t.is_empty() || t.starts_with('!') {
                 continue;
+            }
+            if t != "*" {
+                declared_restricted = true;
             }
             for item in expand_skill_tool_token(t, custom_groups) {
                 push_unique_string(&mut expanded_tools, &item);
@@ -122,8 +129,7 @@ fn resolve_skill_at(
         resolved.auto_approve = deduped_auto_approve;
         resolved.excluded_auto_approve.clear();
         resolved.excluded_tools.clear();
-        resolved.tools_restricted =
-            !resolved.tools.is_empty() && !resolved.tools.iter().any(|t| t == "*");
+        resolved.tools_restricted = declared_restricted && !resolved.tools.iter().any(|t| t == "*");
         memo[idx] = Some(resolved.clone());
         return resolved;
     }

@@ -81,8 +81,7 @@ fn resolve_group_recursive(
         }
         if let Some(sub) = item.strip_prefix('@') {
             let sub_key = sub.trim();
-            if !sub_key.is_empty()
-                && !resolve_group_recursive(sub_key, custom_groups, visiting, out)
+            if sub_key.is_empty() || !resolve_group_recursive(sub_key, custom_groups, visiting, out)
             {
                 let unresolved = format!("@{sub_key}");
                 if !out.iter().any(|existing| existing == &unresolved) {
@@ -108,7 +107,12 @@ fn resolve_group_recursive(
 }
 
 /// Resolves a group name (with or without leading `@`) against custom `[tool_groups]`
-/// first, then built-in groups. Returns `None` if the group does not exist.
+/// first, then built-in groups. Returns `None` if the top-level group does not exist.
+///
+/// Note: For custom groups, the returned list may contain unresolved nested `@...`
+/// sentinel tokens or unrecognized tool names so validators (`expand_tool_spec_checked`,
+/// `load_tools`, `skill_check`) can report them; non-validating callers should filter
+/// entries starting with `@` or validate against `ALL_TOOL_NAMES`.
 pub fn resolve_tool_group(
     group_name: &str,
     custom_groups: &BTreeMap<String, Vec<String>>,
