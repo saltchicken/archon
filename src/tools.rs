@@ -845,6 +845,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
             "metadata",
             "info",
             "tree",
+            "build",
         ],
         "git" => &[
             "status",

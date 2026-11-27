@@ -7,6 +7,10 @@ const CARGO_TIMEOUT_SECS: u64 = 120;
 /// `cargo test` compiles test harnesses (and their dependencies) before running,
 /// so it is given a more generous timeout than the other diagnostics.
 const CARGO_TEST_TIMEOUT_SECS: u64 = 300;
+/// `cargo build --all-targets` performs full codegen and linking for every target
+/// and the dependency tree, making it heavier than `check`/`clippy`; it gets the
+/// same generous budget as `test`.
+const CARGO_BUILD_TIMEOUT_SECS: u64 = 300;
 
 pub struct Tool;
 
@@ -31,6 +35,8 @@ enum CargoAction {
     Info,
     /// Display the dependency tree (`cargo tree`).
     Tree,
+    /// Build the package and all targets (`cargo build --all-targets`).
+    Build,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -62,7 +68,7 @@ fn validate_identifier<'a>(raw: &'a str, field: &str) -> Result<Option<&'a str>>
 
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
-    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree) within the workspace.";
+    const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree, build) within the workspace.";
     type Args = CargoArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -122,6 +128,12 @@ impl AsyncTool for Tool {
                     false,
                     "No dependency tree output.",
                 ),
+                CargoAction::Build => (
+                    &["build", "--all-targets", "--color", "never"],
+                    true,
+                    true,
+                    "cargo build completed successfully.",
+                ),
             };
 
         let mut cmd_args: Vec<String> = base_flags.iter().map(|&s| s.into()).collect();
@@ -143,6 +155,7 @@ impl AsyncTool for Tool {
 
         let timeout_secs = match args.action {
             CargoAction::Test => CARGO_TEST_TIMEOUT_SECS,
+            CargoAction::Build => CARGO_BUILD_TIMEOUT_SECS,
             _ => CARGO_TIMEOUT_SECS,
         };
 
