@@ -144,27 +144,26 @@ fn flatten_schema_node(val: &mut Value, strip_keys: &[&str], mark_nullable: bool
                         .collect();
                     let had_null = non_null.len() < orig_len;
 
-                    let replaced = if let Some(enum_vals) =
-                        schema_utils::extract_enum_strings(&non_null)
-                    {
-                        obj.insert("type".into(), json!("string"));
-                        obj.insert(
-                            "enum".into(),
-                            Value::Array(enum_vals.into_iter().map(Value::String).collect()),
-                        );
-                        true
-                    } else if non_null.len() == 1
-                        && let Some(Value::Object(inner)) = non_null.into_iter().next()
-                    {
-                        for (k, v) in inner {
-                            if !strip_keys.contains(&k.as_str()) {
-                                obj.entry(k).or_insert(v);
+                    let replaced =
+                        if let Some(enum_vals) = schema_utils::extract_enum_strings(&non_null) {
+                            obj.insert("type".into(), json!("string"));
+                            obj.insert(
+                                "enum".into(),
+                                Value::Array(enum_vals.into_iter().map(Value::String).collect()),
+                            );
+                            true
+                        } else if non_null.len() == 1
+                            && let Some(Value::Object(inner)) = non_null.into_iter().next()
+                        {
+                            for (k, v) in inner {
+                                if !strip_keys.contains(&k.as_str()) {
+                                    obj.entry(k).or_insert(v);
+                                }
                             }
-                        }
-                        true
-                    } else {
-                        false
-                    };
+                            true
+                        } else {
+                            false
+                        };
 
                     if replaced {
                         obj.remove(key);
@@ -266,6 +265,7 @@ impl Provider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build_turn_payload(
         &self,
         model: &str,
@@ -273,6 +273,7 @@ impl Provider {
         messages: Vec<ChatMessage>,
         turn: &TurnConfig,
         session_id: Option<&str>,
+        session_tools: &tools::SessionToolState,
     ) -> (String, Vec<ChatMessage>, Value) {
         let active_skill = turn.active_skill.as_deref();
         let skill_args = turn.skill_args.as_deref();
@@ -280,10 +281,10 @@ impl Provider {
 
         let tools_schema = turn
             .enable_tools
-            .then(|| tools::schemas_for_turn(config, active_skill))
+            .then(|| tools::schemas_for_turn(config, session_tools, active_skill))
             .filter(|t| !t.is_empty());
 
-        let effective_system_prompt = crate::core::skills::compose_system_prompt(
+        let effective_system_prompt = crate::core::skills::compose_system_prompt_for_turn(
             &turn.system_prompt,
             active_skill,
             skill_args,
@@ -291,6 +292,8 @@ impl Provider {
             &turn.skill_inputs,
             session_id,
             config,
+            turn.enable_tools,
+            session_tools,
         );
 
         let sanitized_messages = sanitize_messages_for_turn(messages);
@@ -391,26 +394,29 @@ impl Provider {
         task: &str,
         allowed_tools: Vec<String>,
         active_skill: Option<&str>,
+        session_tools: &tools::SessionToolState,
     ) -> std::result::Result<String, String> {
         const MAX_SUBAGENT_TURNS: usize = 10;
 
-        // Build the effective tool list (exclude "subagent" to prevent recursion).
-        let effective_tools: Vec<String> = if allowed_tools.iter().any(|t| t == "*") {
-            config
-                .app
-                .enabled_tools
+        // Build the effective tool list (expanding `@group` entries and excluding
+        // `"subagent"` to prevent recursion and `"load_tools"`).
+        let expanded_allowed = tools::expand_tool_list(&allowed_tools, &config.tool_groups);
+        let effective_tools: Vec<String> = if expanded_allowed.iter().any(|t| t == "*") {
+            tools::ALL_TOOL_NAMES
                 .iter()
-                .filter(|t| {
-                    t.as_str() != "subagent"
-                        && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                .filter(|&&t| {
+                    t != "subagent"
+                        && tools::is_tool_enabled_for_turn(t, &config, session_tools, active_skill)
                 })
-                .cloned()
+                .map(|&t| t.to_string())
                 .collect()
         } else {
-            allowed_tools
+            expanded_allowed
                 .into_iter()
                 .filter(|t| {
-                    t != "subagent" && tools::is_tool_enabled_for_turn(t, &config, active_skill)
+                    t != "subagent"
+                        && t != tools::LOAD_TOOLS_NAME
+                        && tools::is_tool_enabled_for_turn(t, &config, session_tools, active_skill)
                 })
                 .collect()
         };
@@ -509,6 +515,7 @@ impl Provider {
             for tc in &tool_calls {
                 let call = tc.clone();
                 let config_clone = config.clone();
+                let session_tools_clone = session_tools.clone();
 
                 let skill_owned = active_skill_owned.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -522,6 +529,7 @@ impl Provider {
                         &config_clone,
                         skill_ref,
                         None,
+                        &session_tools_clone,
                         max_out,
                         full_cap,
                     ))
@@ -644,10 +652,17 @@ impl Provider {
         messages: Vec<ChatMessage>,
         turn: TurnConfig,
         session_id: Option<String>,
+        session_tools: tools::SessionToolState,
         tx: UnboundedSender<EngineEvent>,
     ) {
-        let (effective_system_prompt, sanitized_msgs, payload) =
-            self.build_turn_payload(&model, &config, messages, &turn, session_id.as_deref());
+        let (effective_system_prompt, sanitized_msgs, payload) = self.build_turn_payload(
+            &model,
+            &config,
+            messages,
+            &turn,
+            session_id.as_deref(),
+            &session_tools,
+        );
 
         let inspection = format_payload_inspection(
             *self,
@@ -924,17 +939,19 @@ mod tests {
 
     #[test]
     fn all_registered_tools_flatten_cleanly_for_ollama_and_gemini() {
-        let all_names: Vec<String> = tools::ALL_TOOL_NAMES
+        let mut all_names: Vec<String> = tools::ALL_TOOL_NAMES
             .iter()
             .map(|&s| s.to_string())
             .collect();
+        all_names.push(tools::LOAD_TOOLS_NAME.to_string());
+        let expected_count = all_names.len();
         let raw_schemas = tools::schemas_for_tool_names(&all_names);
-        assert_eq!(raw_schemas.len(), tools::ALL_TOOL_NAMES.len());
+        assert_eq!(raw_schemas.len(), expected_count);
 
         let ollama_payload =
             ollama::build_payload("test-model", &[], "", 4096, Some(raw_schemas.clone()));
         let ollama_tools = ollama_payload["tools"].as_array().unwrap();
-        assert_eq!(ollama_tools.len(), tools::ALL_TOOL_NAMES.len());
+        assert_eq!(ollama_tools.len(), expected_count);
 
         for t in ollama_tools {
             let name = t["function"]["name"].as_str().unwrap();
@@ -946,7 +963,7 @@ mod tests {
         let gemini_decls = gemini_payload["tools"][0]["functionDeclarations"]
             .as_array()
             .unwrap();
-        assert_eq!(gemini_decls.len(), tools::ALL_TOOL_NAMES.len());
+        assert_eq!(gemini_decls.len(), expected_count);
 
         for decl in gemini_decls {
             let name = decl["name"].as_str().unwrap();

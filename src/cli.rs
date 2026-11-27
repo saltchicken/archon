@@ -128,10 +128,15 @@ impl CliArgs {
                     let raw = Self::require_value(&mut args, arg.as_str())?;
                     let list = cli.allowed_tools.get_or_insert_with(Vec::new);
                     for item in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                        if item != "*" && !crate::tools::ALL_TOOL_NAMES.contains(&item) {
+                        let is_group_syntax =
+                            item.strip_prefix('@').is_some_and(|g| !g.trim().is_empty());
+                        if item != "*"
+                            && !is_group_syntax
+                            && !crate::tools::ALL_TOOL_NAMES.contains(&item)
+                        {
                             bail!(
-                                "Unknown tool '{item}' in {arg}. Valid tools: {}",
-                                crate::tools::ALL_TOOL_NAMES.join(", ")
+                                "Unknown tool '{item}' in {arg}. {}",
+                                crate::tools::format_valid_tools_and_groups(&BTreeMap::new())
                             );
                         }
                         if !list.iter().any(|existing| existing == item) {
@@ -367,7 +372,7 @@ impl CliArgs {
                --session <ID>          Resume an existing session ID\n  \
                -i, --image <PATH>      Attach an image file (repeatable)\n  \
                -y, --yes               Auto-approve all tool executions in headless mode\n  \
-               --allowed-tools <LIST>  Restrict enabled tools to comma-separated list\n  \
+               --allowed-tools <LIST>  Restrict enabled tools (names or @groups, comma-separated)\n  \
                --no-tools              Disable tool calls\n  \
                --no-save               Do not persist the session to archon.db\n  \
                --thoughts              Stream model thinking to stderr\n  \

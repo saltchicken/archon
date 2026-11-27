@@ -191,6 +191,7 @@ impl CoreEngine {
         let config = self.config.clone();
         let turn_cfg = turn.clone();
         let session_id_for_turn = self.session.id.clone();
+        let session_tools = self.session.tools.clone();
 
         self.spawn_with_tx(move |internal_tx| async move {
             provider
@@ -201,6 +202,7 @@ impl CoreEngine {
                     hydrated_msgs,
                     turn_cfg,
                     Some(session_id_for_turn),
+                    session_tools,
                     internal_tx,
                 )
                 .await;
@@ -383,6 +385,7 @@ impl CoreEngine {
             preview_msgs,
             &turn,
             Some(self.session.id.as_str()),
+            &self.session.tools,
         );
         let formatted = provider::format_payload_inspection(
             self.provider,
@@ -436,7 +439,12 @@ impl CoreEngine {
             let max_turns = self.config.app.task_autoloop_max_turns;
             if self.config.app.task_autoloop
                 && self.turn.enable_tools
-                && tools::is_tool_enabled_for_turn("task", &self.config, self.active_turn_skill())
+                && tools::is_tool_enabled_for_turn(
+                    "task",
+                    &self.config,
+                    &self.session.tools,
+                    self.active_turn_skill(),
+                )
                 && self.inflight.queued_interjections.is_empty()
                 && self.session.auto_task_turns < max_turns
             {

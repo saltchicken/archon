@@ -424,6 +424,7 @@ mod tests {
             max_output_size: 32_768,
             active_skill: None,
             session_id: Some(session_id.to_string()),
+            session_tools: crate::tools::SessionToolState::default(),
             config: cfg,
         }
     }

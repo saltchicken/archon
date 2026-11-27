@@ -214,6 +214,23 @@ impl SkillDefinition {
             .any(|t| t == "*" || t == name)
     }
 
+    /// Returns `true` if the skill explicitly names `name` in `tools` (not via `"*"`)
+    /// and does not exclude it. Explicitly declared skill tools bypass deferred loading.
+    pub fn explicitly_declares_tool(&self, name: &str) -> bool {
+        if self
+            .excluded_tools
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        self.tools
+            .iter()
+            .map(String::as_str)
+            .map(str::trim)
+            .any(|t| t != "*" && t == name)
+    }
+
     pub fn auto_approve_allows(&self, call: &crate::tools::ToolCall) -> bool {
         let Some(incl) = self
             .auto_approve

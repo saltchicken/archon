@@ -9,6 +9,8 @@ mod fetch_url;
 pub mod fs;
 mod git;
 mod github_repo;
+pub mod groups;
+pub(crate) mod load_tools;
 mod manual;
 mod memory;
 mod notify;
@@ -29,7 +31,13 @@ pub(crate) mod utils;
 pub mod workspace_snapshot;
 
 pub use approval::format_approval;
+pub use groups::{
+    BUILTIN_TOOL_GROUPS, all_group_names, expand_tool_list, expand_tool_spec_checked,
+    format_valid_tools_and_groups, is_known_tool_or_group, resolve_tool_group,
+};
 pub use manual::parse_manual_tool_call;
+
+pub const LOAD_TOOLS_NAME: &str = load_tools::Tool::NAME;
 
 use crate::core::config::{Config, expand_tilde};
 use anyhow::{Context, Result, bail};
@@ -168,12 +176,92 @@ pub trait AsyncTool {
     ) -> impl std::future::Future<Output = Result<String>> + Send;
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionToolState {
+    /// Tools dynamically loaded during this session (via `load_tools` or `/tools +`),
+    /// preserved in insertion order for prompt-cache stability and FIFO eviction.
+    pub loaded: Vec<String>,
+    /// Tools explicitly force-enabled for this session via `/tools +` even if disabled in config.
+    pub force_enabled: Vec<String>,
+    /// Tools explicitly unloaded/disabled for this session via `/tools -`.
+    pub force_disabled: Vec<String>,
+}
+
+impl SessionToolState {
+    pub fn is_loaded(&self, name: &str) -> bool {
+        self.loaded.iter().any(|t| t == name)
+    }
+
+    pub fn is_force_enabled(&self, name: &str) -> bool {
+        self.force_enabled.iter().any(|t| t == name)
+    }
+
+    pub fn is_force_disabled(&self, name: &str) -> bool {
+        self.force_disabled.iter().any(|t| t == name)
+    }
+
+    /// Appends `names` to `loaded` (preserving insertion order) and enforces
+    /// `max_loaded_tools` via FIFO eviction of the oldest dynamically loaded
+    /// tools. Returns any evicted tool names.
+    pub fn apply_loaded(
+        &mut self,
+        names: &[String],
+        core_count: usize,
+        max_loaded_tools: usize,
+    ) -> Vec<String> {
+        for name in names {
+            if !self.loaded.iter().any(|t| t == name) {
+                self.loaded.push(name.clone());
+            }
+        }
+        let mut evicted = Vec::new();
+        if max_loaded_tools > 0 {
+            let dynamic_cap = max_loaded_tools.saturating_sub(core_count).max(1);
+            while self.loaded.len() > dynamic_cap {
+                evicted.push(self.loaded.remove(0));
+            }
+        }
+        evicted
+    }
+
+    /// Enables and loads `names` for the current session (via `/tools +`).
+    pub fn enable_tools(&mut self, names: &[String], config: &Config) {
+        for name in names {
+            self.force_disabled.retain(|t| t != name);
+            if !is_tool_enabled(name, config) && !self.force_enabled.iter().any(|t| t == name) {
+                self.force_enabled.push(name.clone());
+            }
+            if !is_core_tool(name, config) && !self.loaded.iter().any(|t| t == name) {
+                self.loaded.push(name.clone());
+            }
+        }
+    }
+
+    /// Unloads and disables `names` for the current session (via `/tools -`).
+    pub fn disable_tools(&mut self, names: &[String]) {
+        for name in names {
+            self.loaded.retain(|t| t != name);
+            self.force_enabled.retain(|t| t != name);
+            if !self.force_disabled.iter().any(|t| t == name) {
+                self.force_disabled.push(name.clone());
+            }
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.loaded.clear();
+        self.force_enabled.clear();
+        self.force_disabled.clear();
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolContext {
     pub root: PathBuf,
     pub max_output_size: usize,
     pub active_skill: Option<String>,
     pub session_id: Option<String>,
+    pub session_tools: SessionToolState,
     pub config: Config,
 }
 
@@ -182,6 +270,7 @@ impl ToolContext {
         config: &Config,
         active_skill: Option<&str>,
         session_id: Option<&str>,
+        session_tools: &SessionToolState,
         max_output_size: usize,
     ) -> Result<Self> {
         Ok(Self {
@@ -189,6 +278,7 @@ impl ToolContext {
             max_output_size,
             active_skill: active_skill.map(String::from),
             session_id: session_id.map(String::from),
+            session_tools: session_tools.clone(),
             config: config.clone(),
         })
     }
@@ -954,7 +1044,52 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         }
         "create_file" => "file_path=... content=...",
         "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
+        "load_tools" => "names=[\"git\",\"@web\"]",
         _ => "[key=value | JSON]",
+    }
+}
+
+/// Concise one-line summary for each tool, used in the `<deferred_tools>` catalog.
+pub fn tool_short_summary(tool_name: &str) -> &'static str {
+    match tool_name {
+        "browser" => {
+            "Control Chrome via CDP to navigate, read, click, type, extract, and screenshot pages."
+        }
+        "cargo" => {
+            "Run Cargo commands (check, clippy, test, fmt, build, doc, metadata, info, tree, add, update)."
+        }
+        "create_file" => "Create a new file in the workspace.",
+        "curl" => {
+            "Make HTTP requests (GET/POST/PUT/PATCH/DELETE) with custom headers, body, or JSON."
+        }
+        "dotfiles" => "Inspect, edit, validate, diff, restore, and sync user dotfiles.",
+        "edit_file" => "Apply exact search/replace edits to an existing workspace file.",
+        "fetch_url" => "Fetch a web page or URL and return readable text or raw content.",
+        "fs" => "List directories or rename, copy, and remove files in the workspace.",
+        "git" => {
+            "Run Git operations (status, diff, log, show, blame, branch, add, commit, stash, switch, merge)."
+        }
+        "github_repo" => "Fetch, list, read, and search cached GitHub repositories.",
+        "memory" => "Read or update persistent global and workspace MEMORY.md facts.",
+        "notify" => "Send a desktop notification.",
+        "process" => "List, inspect, poll, kill, or clean up background processes.",
+        "read_file" => {
+            "Read a file in the workspace (or configured read_roots) with optional line range."
+        }
+        "repo_map" => "AST code map, symbol definitions, and references via Tree-sitter.",
+        "schedule" => "List, view logs, run, sync, or clean Archon systemd scheduled tasks.",
+        "search" => "Search workspace files using regex or literal text patterns.",
+        "session" => "List, search, read, inspect stats, rename, or pin past Archon sessions.",
+        "skill" => "List, read, create, modify, or validate Archon SKILL.md definitions.",
+        "sqlite" => "Inspect tables/schemas and run read-only SQL queries on SQLite databases.",
+        "subagent" => "Delegate a multi-step task to an isolated subagent with its own context.",
+        "system" => {
+            "Inspect local system status, journal logs, systemd services, processes, Hyprland, btrfs, and packages."
+        }
+        "task" => "Manage session-scoped active execution tasks across turns and compactions.",
+        "todo" => "Manage persistent workspace or global todo backlogs.",
+        "workspace_snapshot" => "Generate a workspace directory tree and optional file dump.",
+        _ => "Built-in tool.",
     }
 }
 
@@ -1012,16 +1147,36 @@ where
 }
 
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
-    config
-        .app
-        .enabled_tools
-        .iter()
-        .map(|s| s.trim())
-        .any(|t| t == "*" || t == name)
+    crate::core::config::tool_list_contains(&config.app.enabled_tools, name, &config.tool_groups)
 }
 
-pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skill: Option<&str>) -> bool {
-    if !is_tool_enabled(name, config) {
+pub fn is_core_tool(name: &str, config: &Config) -> bool {
+    crate::core::config::tool_list_contains(&config.app.core_tools, name, &config.tool_groups)
+}
+
+pub fn is_tool_session_enabled(
+    name: &str,
+    config: &Config,
+    session_tools: &SessionToolState,
+) -> bool {
+    if session_tools.is_force_disabled(name) {
+        return false;
+    }
+    session_tools.is_force_enabled(name) || is_tool_enabled(name, config)
+}
+
+pub fn is_tool_enabled_for_turn(
+    name: &str,
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> bool {
+    if name == LOAD_TOOLS_NAME {
+        return ALL_TOOL_NAMES
+            .iter()
+            .any(|&t| is_tool_enabled_for_turn(t, config, session_tools, active_skill));
+    }
+    if !is_tool_session_enabled(name, config, session_tools) {
         return false;
     }
     let Some(skill) = active_skill.and_then(|s| crate::core::skills::find_skill(config, s)) else {
@@ -1030,21 +1185,101 @@ pub fn is_tool_enabled_for_turn(name: &str, config: &Config, active_skill: Optio
     skill.allows_tool(name)
 }
 
+/// Regular tools that are immediately active on this turn without calling `load_tools`:
+/// turn-eligible `core_tools` plus any tools explicitly declared by an active `@skill`.
+pub fn core_regular_tools_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<String> {
+    let skill = active_skill.and_then(|s| crate::core::skills::find_skill(config, s));
+    ALL_TOOL_NAMES
+        .iter()
+        .filter(|&&name| {
+            is_tool_enabled_for_turn(name, config, session_tools, active_skill)
+                && (is_core_tool(name, config)
+                    || skill.is_some_and(|s| s.explicitly_declares_tool(name)))
+        })
+        .map(|&name| name.to_string())
+        .collect()
+}
+
+/// All regular tools whose full JSON schemas are active on this turn:
+/// core/skill-declared tools followed by dynamically loaded session tools in insertion order.
+pub fn active_regular_tools_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<String> {
+    let mut active = core_regular_tools_for_turn(config, session_tools, active_skill);
+    for loaded in &session_tools.loaded {
+        if is_tool_enabled_for_turn(loaded, config, session_tools, active_skill)
+            && !active.iter().any(|a| a == loaded)
+        {
+            active.push(loaded.clone());
+        }
+    }
+    active
+}
+
+/// Regular tools enabled for this turn but currently deferred (available via `load_tools`),
+/// returned in canonical `ALL_TOOL_NAMES` order.
+pub fn deferred_tool_names_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<String> {
+    let active = active_regular_tools_for_turn(config, session_tools, active_skill);
+    ALL_TOOL_NAMES
+        .iter()
+        .filter(|&&name| {
+            is_tool_enabled_for_turn(name, config, session_tools, active_skill)
+                && !active.iter().any(|a| a == name)
+        })
+        .map(|&name| name.to_string())
+        .collect()
+}
+
+/// Ordered tool names whose schemas are sent to the model on this turn.
+///
+/// Placement of `load_tools` right after `core_tools` (before dynamically `loaded` tools)
+/// keeps tool declarations append-only across `load_tools` calls for prompt-cache stability.
+pub fn active_tool_names_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<String> {
+    let mut names = core_regular_tools_for_turn(config, session_tools, active_skill);
+    let deferred = deferred_tool_names_for_turn(config, session_tools, active_skill);
+    if !deferred.is_empty() {
+        names.push(LOAD_TOOLS_NAME.to_string());
+    }
+    for loaded in &session_tools.loaded {
+        if is_tool_enabled_for_turn(loaded, config, session_tools, active_skill)
+            && !names.iter().any(|a| a == loaded)
+        {
+            names.push(loaded.clone());
+        }
+    }
+    names
+}
+
+pub fn schemas_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<Value> {
+    let names = active_tool_names_for_turn(config, session_tools, active_skill);
+    schemas_for_tool_names(&names)
+}
+
 macro_rules! register_tools {
     ($( $kind:ident : $mod:ident ),* $(,)?) => {
         pub const ALL_TOOL_NAMES: &[&str] = &[ $( $mod::Tool::NAME ),* ];
 
-        pub fn schemas_for_turn(config: &Config, active_skill: Option<&str>) -> Vec<Value> {
-            [ $( ( $mod::Tool::NAME, register_tools!(@schema $kind, $mod), ) ),* ]
-                .into_iter()
-                .filter_map(|(name, schema)| {
-                    is_tool_enabled_for_turn(name, config, active_skill).then_some(schema)
-                })
-                .collect()
-        }
-
         pub fn tool_schema_by_name(name: &str) -> Option<Value> {
             match name {
+                LOAD_TOOLS_NAME => Some(register_tools!(@schema blocking, load_tools)),
                 $( $mod::Tool::NAME => Some(register_tools!(@schema $kind, $mod)), )*
                 _ => None,
             }
@@ -1059,6 +1294,11 @@ macro_rules! register_tools {
 
         pub fn deserialize_tool_args(name: &str, args: &Value) -> Result<()> {
             match name {
+                LOAD_TOOLS_NAME => {
+                    let _: register_tools!(@args_ty blocking, load_tools) =
+                        parse_args(args, LOAD_TOOLS_NAME)?;
+                    Ok(())
+                }
                 $( $mod::Tool::NAME => {
                     let _: register_tools!(@args_ty $kind, $mod) = parse_args(args, $mod::Tool::NAME)?;
                     Ok(())
@@ -1067,25 +1307,36 @@ macro_rules! register_tools {
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn dispatch_tool(
             name: &str,
             args: &Value,
             config: &Config,
             active_skill: Option<&str>,
             session_id: Option<&str>,
+            session_tools: &SessionToolState,
             max_output_size: usize,
             filter: ToolFilter,
         ) -> Result<String> {
             let allowed = match filter {
-                ToolFilter::Turn => is_tool_enabled_for_turn(name, config, active_skill),
+                ToolFilter::Turn => {
+                    is_tool_enabled_for_turn(name, config, session_tools, active_skill)
+                }
                 ToolFilter::Enabled => is_tool_enabled(name, config),
-                ToolFilter::Manual => ALL_TOOL_NAMES.contains(&name),
+                ToolFilter::Manual => name == LOAD_TOOLS_NAME || ALL_TOOL_NAMES.contains(&name),
             };
             if !allowed {
                 bail!("Unknown tool: '{name}'");
             }
-            let ctx = ToolContext::new(config, active_skill, session_id, max_output_size)?;
+            let ctx = ToolContext::new(
+                config,
+                active_skill,
+                session_id,
+                session_tools,
+                max_output_size,
+            )?;
             match name {
+                LOAD_TOOLS_NAME => register_tools!(@run blocking, load_tools::Tool, args, ctx),
                 $( $mod::Tool::NAME => register_tools!(@run $kind, $mod::Tool, args, ctx), )*
                 _ => bail!("Unknown tool: '{name}'"),
             }
@@ -1196,7 +1447,8 @@ pub async fn run_manual_command(
     full_cap: usize,
 ) -> ToolExecutionOutput {
     let capture_limit = full_cap.max(max_size);
-    let ctx = match ToolContext::new(config, None, None, capture_limit) {
+    let empty_tools = SessionToolState::default();
+    let ctx = match ToolContext::new(config, None, None, &empty_tools, capture_limit) {
         Ok(c) => c,
         Err(e) => {
             return ToolExecutionOutput::error(format!("Error resolving workspace root: {e}"));
@@ -1219,11 +1471,13 @@ enum ToolFilter {
     Manual,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_filter(
     call: &ToolCall,
     config: &Config,
     active_skill: Option<&str>,
     session_id: Option<&str>,
+    session_tools: &SessionToolState,
     max_size: usize,
     full_cap: usize,
     filter: ToolFilter,
@@ -1240,6 +1494,7 @@ async fn execute_with_filter(
         config,
         active_skill,
         session_id,
+        session_tools,
         capture_limit,
         filter,
     )
@@ -1274,6 +1529,7 @@ pub async fn execute(
     config: &Config,
     active_skill: Option<&str>,
     session_id: Option<&str>,
+    session_tools: &SessionToolState,
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
@@ -1282,6 +1538,7 @@ pub async fn execute(
         config,
         active_skill,
         session_id,
+        session_tools,
         max_size,
         full_cap,
         ToolFilter::Turn,
@@ -1297,11 +1554,13 @@ pub async fn execute_hook(
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
+    let empty_tools = SessionToolState::default();
     execute_with_filter(
         call,
         config,
         active_skill,
         session_id,
+        &empty_tools,
         max_size,
         full_cap,
         ToolFilter::Enabled,
@@ -1314,6 +1573,7 @@ pub async fn execute_manual(
     config: &Config,
     active_skill: Option<&str>,
     session_id: Option<&str>,
+    session_tools: &SessionToolState,
     max_size: usize,
     full_cap: usize,
 ) -> ToolExecutionOutput {
@@ -1322,6 +1582,7 @@ pub async fn execute_manual(
         config,
         active_skill,
         session_id,
+        session_tools,
         max_size,
         full_cap,
         ToolFilter::Manual,
@@ -1331,9 +1592,13 @@ pub async fn execute_manual(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolContext, diff_paths};
+    use super::{SessionToolState, ToolContext, diff_paths};
     use crate::core::config::Config;
     use std::path::Path;
+
+    fn test_tool_ctx(config: &Config) -> ToolContext {
+        ToolContext::new(config, None, None, &SessionToolState::default(), 1024).unwrap()
+    }
 
     #[test]
     fn read_root_file_search_anchors_base_root_to_read_root() {
@@ -1345,7 +1610,7 @@ mod tests {
 
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         // A single file under a read root must resolve with a non-empty relative
         // path: `base_root` anchors at the read root, not the file itself.
@@ -1375,7 +1640,7 @@ mod tests {
 
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         let resolved = ctx.resolve_readable_path(f.to_str().unwrap()).unwrap();
         assert_eq!(resolved, f);
@@ -1394,7 +1659,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = false;
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         // `read_roots` is an explicit permission grant, so hidden files under
         // the root are readable even without `app.allow_hidden`.
@@ -1414,7 +1679,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = true;
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         let resolved = ctx.resolve_readable_path(secret.to_str().unwrap()).unwrap();
         assert_eq!(resolved, secret);
@@ -1432,7 +1697,7 @@ mod tests {
         let other_root = dunce::canonicalize(other_dir.path()).unwrap();
         let mut config = Config::default();
         config.app.read_roots = vec![other_root.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         let err = ctx
             .resolve_scan_roots(&outside_file.to_string_lossy(), "label")
@@ -1455,7 +1720,7 @@ mod tests {
         let mut config = Config::default();
         config.app.read_roots = vec![read_root.to_string_lossy().into_owned()];
         config.app.allow_hidden = false;
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         let err = ctx
             .resolve_readable_path(secret.to_str().unwrap())
@@ -1477,7 +1742,7 @@ mod tests {
         let broken = base.path().join("missing-root");
         let mut config = Config::default();
         config.app.read_roots = vec![broken.to_string_lossy().into_owned()];
-        let ctx = ToolContext::new(&config, None, None, 1024).unwrap();
+        let ctx = test_tool_ctx(&config);
 
         // `read_file`: an absolute path outside the workspace is rejected, and
         // the misconfigured entry is named in the message.
@@ -1497,5 +1762,250 @@ mod tests {
             .to_string();
         assert!(msg.contains("relative"), "unexpected error: {msg}");
         assert!(msg.contains("missing-root"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn builtin_tool_groups_cover_all_registered_tools_without_unknowns() {
+        let mut covered = std::collections::HashSet::new();
+        for &(group, members) in super::BUILTIN_TOOL_GROUPS {
+            assert!(!members.is_empty(), "group @{group} must not be empty");
+            for &member in members {
+                assert!(
+                    super::ALL_TOOL_NAMES.contains(&member),
+                    "group @{group} references unknown tool '{member}'"
+                );
+                covered.insert(member);
+            }
+        }
+        for &tool in super::ALL_TOOL_NAMES {
+            assert!(
+                covered.contains(tool),
+                "registered tool '{tool}' is missing from BUILTIN_TOOL_GROUPS"
+            );
+            assert_ne!(
+                super::tool_short_summary(tool),
+                "Built-in tool.",
+                "tool '{tool}' should have a dedicated one-line summary"
+            );
+        }
+    }
+
+    #[test]
+    fn schemas_for_turn_returns_core_loaded_and_load_tools_only_when_deferred_exist() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "git".into(),
+            "cargo".into(),
+        ];
+        cfg.app.core_tools = vec!["read_file".into(), "edit_file".into()];
+
+        let mut session_tools = SessionToolState::default();
+
+        let schema_names = |cfg: &Config, st: &SessionToolState, skill: Option<&str>| {
+            super::schemas_for_turn(cfg, st, skill)
+                .into_iter()
+                .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // Turn 1: core_tools + load_tools (git & cargo are deferred).
+        let t1 = schema_names(&cfg, &session_tools, None);
+        assert_eq!(t1, vec!["edit_file", "read_file", "load_tools"]);
+
+        // Turn 2: load `git` -> append-only after `load_tools`, `cargo` still deferred.
+        session_tools.apply_loaded(&["git".into()], 2, cfg.app.max_loaded_tools);
+        let t2 = schema_names(&cfg, &session_tools, None);
+        assert_eq!(t2, vec!["edit_file", "read_file", "load_tools", "git"]);
+        // Prompt-cache stability: prefix of Turn 2 matches Turn 1 verbatim.
+        assert_eq!(&t2[..t1.len()], &t1[..]);
+
+        // Turn 3: load `cargo` -> no deferred tools left, so `load_tools` is omitted.
+        session_tools.apply_loaded(&["cargo".into()], 2, cfg.app.max_loaded_tools);
+        let t3 = schema_names(&cfg, &session_tools, None);
+        assert_eq!(t3, vec!["edit_file", "read_file", "git", "cargo"]);
+
+        // When `core_tools = ["*"]`, all enabled tools are active and `load_tools` is omitted.
+        cfg.app.core_tools = vec!["*".into()];
+        let all_core = schema_names(&cfg, &SessionToolState::default(), None);
+        assert_eq!(all_core, vec!["cargo", "edit_file", "git", "read_file"]);
+    }
+
+    #[test]
+    fn active_skill_declared_tools_bypass_deferred_loading() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec![
+            "read_file".into(),
+            "git".into(),
+            "cargo".into(),
+            "sqlite".into(),
+        ];
+        cfg.app.core_tools = vec!["read_file".into()];
+
+        let explicit_skill = crate::core::skills::parse_skill_markdown(
+            "+++\nname = \"git-cargo\"\ntools = [\"git\", \"cargo\"]\n+++\nUse git and cargo.",
+            Path::new("/tmp/git-cargo"),
+        )
+        .unwrap();
+        let prompt_only_skill = crate::core::skills::parse_skill_markdown(
+            "+++\nname = \"helper\"\n+++\nBe helpful.",
+            Path::new("/tmp/helper"),
+        )
+        .unwrap();
+        cfg.skills = crate::core::skills::resolve_skills(vec![explicit_skill, prompt_only_skill]);
+
+        let st = SessionToolState::default();
+
+        // Explicit `tools = ["git", "cargo"]`: both immediately loaded, no `load_tools`, no deferred.
+        let names: Vec<String> = super::schemas_for_turn(&cfg, &st, Some("git-cargo"))
+            .into_iter()
+            .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["cargo", "git"]);
+        assert!(super::deferred_tool_names_for_turn(&cfg, &st, Some("git-cargo")).is_empty());
+
+        let sys_explicit = crate::core::skills::compose_system_prompt_for_turn(
+            "",
+            Some("git-cargo"),
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            None,
+            &cfg,
+            true,
+            &st,
+        );
+        assert!(!sys_explicit.contains("<deferred_tools>"));
+
+        // Prompt-only skill (unrestricted): normal deferred loading still applies.
+        let names_prompt_only: Vec<String> = super::schemas_for_turn(&cfg, &st, Some("helper"))
+            .into_iter()
+            .map(|s| s["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names_prompt_only, vec!["read_file", "load_tools"]);
+    }
+
+    #[test]
+    fn deferred_tools_catalog_lists_and_removes_loaded_tools() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec!["read_file".into(), "git".into(), "cargo".into()];
+        cfg.app.core_tools = vec!["read_file".into()];
+
+        let mut st = SessionToolState::default();
+        let empty = std::collections::BTreeMap::new();
+
+        // Initially both `cargo` and `git` appear in `<deferred_tools>`, while core `read_file` does not.
+        let sys1 = crate::core::skills::compose_system_prompt_for_turn(
+            "Base.", None, None, None, &empty, None, &cfg, true, &st,
+        );
+        assert!(sys1.contains("<deferred_tools>"));
+        assert!(sys1.contains("- cargo: "));
+        assert!(sys1.contains("- git: "));
+        assert!(!sys1.contains("- read_file: "));
+        assert!(!sys1.contains("- sqlite: ")); // disabled
+
+        // When `enable_tools = false`, no `<deferred_tools>` block is injected.
+        let sys_no_tools = crate::core::skills::compose_system_prompt_for_turn(
+            "Base.", None, None, None, &empty, None, &cfg, false, &st,
+        );
+        assert!(!sys_no_tools.contains("<deferred_tools>"));
+
+        // After loading `git`, it disappears from `<deferred_tools>` while `cargo` remains.
+        st.apply_loaded(&["git".into()], 1, cfg.app.max_loaded_tools);
+        let sys2 = crate::core::skills::compose_system_prompt_for_turn(
+            "Base.", None, None, None, &empty, None, &cfg, true, &st,
+        );
+        assert!(sys2.contains("<deferred_tools>"));
+        assert!(sys2.contains("- cargo: "));
+        assert!(!sys2.contains("- git: "));
+
+        // After loading `cargo` too, `<deferred_tools>` disappears completely.
+        st.apply_loaded(&["cargo".into()], 1, cfg.app.max_loaded_tools);
+        let sys3 = crate::core::skills::compose_system_prompt_for_turn(
+            "Base.", None, None, None, &empty, None, &cfg, true, &st,
+        );
+        assert!(!sys3.contains("<deferred_tools>"));
+    }
+
+    #[tokio::test]
+    async fn load_tools_rejects_disabled_and_unknown_and_activates_enabled_with_fifo_eviction() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec![
+            "read_file".into(),
+            "git".into(),
+            "cargo".into(),
+            "fetch_url".into(),
+            "browser".into(), // note: `curl` from `@web` is disabled
+        ];
+        cfg.app.core_tools = vec!["read_file".into()];
+        cfg.app.max_loaded_tools = 3; // 1 core + 2 dynamic slots
+
+        let mut st = SessionToolState::default();
+
+        // 1. Rejects disabled individual tool (`curl`).
+        let call_disabled = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["curl"] }),
+            },
+            thought_signature: None,
+        };
+        let out_disabled = super::execute(&call_disabled, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(out_disabled.is_error);
+        assert!(out_disabled.truncated_output.contains("Disabled tool(s)"));
+        assert!(out_disabled.truncated_output.contains("curl"));
+
+        // 2. Rejects unknown tool/group.
+        let call_unknown = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["@no_such_group"] }),
+            },
+            thought_signature: None,
+        };
+        let out_unknown = super::execute(&call_unknown, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(out_unknown.is_error);
+        assert!(out_unknown.truncated_output.contains("Unknown tool/group"));
+
+        // 3. Activates enabled `@web` members (`fetch_url`, `browser`) and skips disabled `curl`.
+        let call_web = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["@web"] }),
+            },
+            thought_signature: None,
+        };
+        let out_web = super::execute(&call_web, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(!out_web.is_error, "{}", out_web.truncated_output);
+        assert!(out_web.truncated_output.contains("fetch_url"));
+        assert!(out_web.truncated_output.contains("browser"));
+        assert!(out_web.truncated_output.contains("Skipped disabled"));
+        assert!(out_web.truncated_output.contains("curl"));
+
+        // Apply loaded to session state and verify FIFO eviction when loading `git`.
+        let evicted1 = st.apply_loaded(
+            &["fetch_url".into(), "browser".into()],
+            1,
+            cfg.app.max_loaded_tools,
+        );
+        assert!(evicted1.is_empty());
+        assert_eq!(st.loaded, vec!["fetch_url", "browser"]);
+
+        let call_git = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["git"] }),
+            },
+            thought_signature: None,
+        };
+        let out_git = super::execute(&call_git, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(!out_git.is_error, "{}", out_git.truncated_output);
+        assert!(out_git.truncated_output.contains("Evicted oldest"));
+        assert!(out_git.truncated_output.contains("fetch_url"));
+
+        let evicted2 = st.apply_loaded(&["git".into()], 1, cfg.app.max_loaded_tools);
+        assert_eq!(evicted2, vec!["fetch_url"]);
+        assert_eq!(st.loaded, vec!["browser", "git"]);
     }
 }

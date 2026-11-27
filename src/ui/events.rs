@@ -163,6 +163,9 @@ impl TuiApp {
                 self.payload_scroll = 0;
                 self.modal = ActiveModal::PayloadInspector;
             }
+            EngineEvent::SessionToolsUpdated(session_tools) => {
+                self.session_tools = session_tools;
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::core::provider::Provider;
-use crate::core::skills::compose_system_prompt;
+use crate::core::skills::compose_system_prompt_for_turn;
 use crate::tools::{AsyncTool, ToolContext};
 use anyhow::Result;
 use schemars::JsonSchema;
@@ -42,7 +42,7 @@ impl AsyncTool for Tool {
             });
 
         let system_prompt = if active_skill.is_some() {
-            compose_system_prompt(
+            compose_system_prompt_for_turn(
                 &base_prompt,
                 active_skill,
                 None,
@@ -50,14 +50,14 @@ impl AsyncTool for Tool {
                 &std::collections::BTreeMap::new(),
                 None,
                 &ctx.config,
+                false,
+                &ctx.session_tools,
             )
         } else {
             base_prompt
         };
 
-        let allowed_tools = args
-            .tools
-            .unwrap_or_else(|| ctx.config.app.enabled_tools.clone());
+        let allowed_tools = args.tools.unwrap_or_else(|| vec!["*".to_string()]);
 
         let result = provider
             .run_subagent(
@@ -69,6 +69,7 @@ impl AsyncTool for Tool {
                 &args.task,
                 allowed_tools,
                 active_skill,
+                &ctx.session_tools,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Subagent failed: {e}"))?;

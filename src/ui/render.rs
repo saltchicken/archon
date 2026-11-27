@@ -617,9 +617,12 @@ impl TuiApp {
             .first()
             .map_or("", |l| l.trim_start());
 
-        if let Some(cmd_prefix) = first_trimmed.strip_prefix('/')
-            && !cmd_prefix.contains(char::is_whitespace)
-        {
+        if let Some(cmd_prefix) = first_trimmed.strip_prefix('/') {
+            if let Some((cmd, _)) = cmd_prefix.split_once(char::is_whitespace) {
+                return cmd.eq_ignore_ascii_case("tools").then(|| {
+                    " Prompt — /tools [list | +<name|@group> | -<name|@group> | reset] ".into()
+                });
+            }
             let matches = SlashCommand::matching_triggers(cmd_prefix);
             (!matches.is_empty()).then(|| format!(" Prompt — Commands: {} ", matches.join(" │ ")))
         } else if let Some(rest) = first_trimmed.strip_prefix('@') {
@@ -1003,7 +1006,8 @@ impl TuiApp {
             ("OFF (blocked)".to_string(), theme::STATUS_DISABLED)
         };
 
-        let df_tool_enabled = self.enable_tools && tools::is_tool_enabled("dotfiles", &self.config);
+        let df_tool_enabled = self.enable_tools
+            && tools::is_tool_session_enabled("dotfiles", &self.config, &self.session_tools);
         let df_dirs = &self.config.dotfiles.allowed_dirs;
         let df_dirs_label = if df_dirs.iter().any(|d| d.trim() == "*") {
             "*".to_string()
@@ -1116,40 +1120,81 @@ impl TuiApp {
         let active_skill = self.effective_sidebar_skill();
         let active_skill_name = active_skill.map(|s| s.name.as_str());
         let total_tools = tools::ALL_TOOL_NAMES.len();
-        let active_count = if self.enable_tools {
-            tools::ALL_TOOL_NAMES
-                .iter()
-                .filter(|&&name| {
-                    tools::is_tool_enabled_for_turn(name, &self.config, active_skill_name)
-                })
-                .count()
+
+        let active_regular = if self.enable_tools {
+            tools::active_regular_tools_for_turn(
+                &self.config,
+                &self.session_tools,
+                active_skill_name,
+            )
         } else {
-            0
+            Vec::new()
         };
+        let deferred_regular = if self.enable_tools {
+            tools::deferred_tool_names_for_turn(
+                &self.config,
+                &self.session_tools,
+                active_skill_name,
+            )
+        } else {
+            Vec::new()
+        };
+        let loaded_count = active_regular.len();
+        let deferred_count = deferred_regular.len();
 
         let kb = self.max_tool_output_size / 1024;
         let src_tag = self.config.provenance.enabled_tools.short_tag();
         let title = if !self.enable_tools {
             format!(" Tools: OFF (0/{total_tools}, {kb}KB) [{src_tag}] (^T) ")
         } else if let Some(sk) = active_skill {
+            if deferred_count > 0 {
+                format!(
+                    " Tools: @{} ({loaded_count}+{deferred_count}/{total_tools}, {kb}KB) ",
+                    sk.trigger()
+                )
+            } else {
+                format!(
+                    " Tools: @{} ({loaded_count}/{total_tools}, {kb}KB) (^T) ",
+                    sk.trigger()
+                )
+            }
+        } else if deferred_count > 0 {
             format!(
-                " Tools: @{} ({active_count}/{total_tools}, {kb}KB) (^T) ",
-                sk.trigger()
+                " Tools: {loaded_count}+{deferred_count}/{total_tools} ({kb}KB) [{src_tag}] (^T) "
             )
         } else {
-            format!(" Tools: ON ({active_count}/{total_tools}, {kb}KB) [{src_tag}] (^T) ")
+            format!(" Tools: ON ({loaded_count}/{total_tools}, {kb}KB) [{src_tag}] (^T) ")
         };
 
         let lines = tools::ALL_TOOL_NAMES
             .iter()
             .map(|&tool_name| {
-                let cfg_enabled = tools::is_tool_enabled(tool_name, &self.config);
+                let sess_enabled =
+                    tools::is_tool_session_enabled(tool_name, &self.config, &self.session_tools);
                 let turn_enabled = self.enable_tools
-                    && tools::is_tool_enabled_for_turn(tool_name, &self.config, active_skill_name);
+                    && tools::is_tool_enabled_for_turn(
+                        tool_name,
+                        &self.config,
+                        &self.session_tools,
+                        active_skill_name,
+                    );
+                let is_loaded = active_regular.iter().any(|t| t == tool_name);
+                let is_session_loaded = self.session_tools.is_loaded(tool_name)
+                    || self.session_tools.is_force_enabled(tool_name);
+                let is_session_disabled = self.session_tools.is_force_disabled(tool_name);
                 let prov = self.config.tool_provenance(tool_name);
 
                 let (glyph, name_style, state_str, state_style, tag_str, tag_style) =
-                    if !cfg_enabled {
+                    if is_session_disabled {
+                        (
+                            "✗ ",
+                            Style::default().fg(theme::STATUS_DISABLED),
+                            "OFF",
+                            Style::default().fg(theme::STATUS_DISABLED),
+                            "[-ses]",
+                            Style::default().fg(theme::STATUS_DISABLED),
+                        )
+                    } else if !sess_enabled {
                         (
                             "✗ ",
                             Style::default().fg(theme::STATUS_DISABLED),
@@ -1176,7 +1221,12 @@ impl TuiApp {
                             "[-@sk]",
                             Style::default().fg(theme::CTX_USAGE_WARN),
                         )
-                    } else {
+                    } else if is_loaded {
+                        let (tag, tstyle) = if is_session_loaded {
+                            ("[+ses]", Style::default().fg(theme::MODAL_HINT))
+                        } else {
+                            (prov.short_tag(), tool_prov_style(prov))
+                        };
                         (
                             "✓ ",
                             Style::default().fg(theme::STATUS_ENABLED),
@@ -1184,6 +1234,15 @@ impl TuiApp {
                             Style::default()
                                 .fg(theme::STATUS_ENABLED)
                                 .add_modifier(Modifier::BOLD),
+                            tag,
+                            tstyle,
+                        )
+                    } else {
+                        (
+                            "○ ",
+                            Style::default().fg(theme::STATUS_DEFERRED),
+                            "DEF",
+                            Style::default().fg(theme::STATUS_DEFERRED),
                             prov.short_tag(),
                             tool_prov_style(prov),
                         )

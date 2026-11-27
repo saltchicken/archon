@@ -5,15 +5,26 @@ use crate::{
         session::{ChatMessage, SessionSummary, ThoughtPart},
         skills::SkillDefinition,
     },
-    tools::{ToolCall, ToolExecutionOutput},
+    tools::{SessionToolState, ToolCall, ToolExecutionOutput},
 };
 use std::{collections::BTreeMap, path::PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionToolsAction {
+    List,
+    Update {
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    Reset,
+}
 
 #[derive(Debug, Clone)]
 pub enum ToolExecSource {
     Model {
         tool_name: String,
         summary: String,
+        arguments: serde_json::Value,
     },
     ManualShell {
         command: String,
@@ -22,6 +33,7 @@ pub enum ToolExecSource {
     ManualTool {
         tool_name: String,
         summary: String,
+        arguments: serde_json::Value,
         include_in_context: bool,
     },
 }
@@ -114,6 +126,7 @@ pub enum EngineCommand {
         draft_prompt: String,
         turn: TurnConfig,
     },
+    ManageSessionTools(SessionToolsAction),
 }
 
 #[derive(Debug, Clone)]
@@ -192,4 +205,5 @@ pub enum EngineEvent {
     },
     PayloadCaptured(String),
     PayloadInspectorOpened(String),
+    SessionToolsUpdated(SessionToolState),
 }

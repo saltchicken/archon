@@ -2,7 +2,8 @@
 //! for tool calls that require user approval.
 
 use super::{
-    BlockingTool, ToolCall, ToolContext, dotfiles, edit_file, fs, memory, parse_args, skill,
+    BlockingTool, SessionToolState, ToolCall, ToolContext, dotfiles, edit_file, fs, memory,
+    parse_args, skill,
 };
 use crate::core::config::Config;
 use anyhow::Result;
@@ -67,7 +68,10 @@ fn format_edit_approval(
 
     let preview =
         parse_args::<edit_file::EditFileArgs>(args, edit_file::Tool::NAME).and_then(|parsed| {
-            edit_file::preview_edits(&parsed, &ToolContext::new(config, active_skill, None, 0)?)
+            edit_file::preview_edits(
+                &parsed,
+                &ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)?,
+            )
         });
 
     match preview {
@@ -95,7 +99,10 @@ fn format_fs_approval(
 ) {
     append_filtered_kvs(out, obj, &[]);
     let preview = parse_args::<fs::FsArgs>(args, fs::Tool::NAME).and_then(|parsed| {
-        fs::preview_action(&parsed, &ToolContext::new(config, active_skill, None, 0)?)
+        fs::preview_action(
+            &parsed,
+            &ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)?,
+        )
     });
     match preview {
         Ok((summary, maybe_diff)) => {
@@ -158,7 +165,8 @@ fn format_skill_approval(
     append_filtered_kvs(out, obj, &["edits", "content", "prompt"]);
 
     if let Ok(parsed) = parse_args::<skill::SkillArgs>(args, skill::Tool::NAME)
-        && let Ok(ctx) = ToolContext::new(config, active_skill, None, 0)
+        && let Ok(ctx) =
+            ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)
     {
         match parsed.action {
             skill::SkillAction::Modify => append_diff_result(
@@ -184,7 +192,8 @@ fn format_memory_approval(
     append_filtered_kvs(out, obj, &[]);
 
     if let Ok(parsed) = parse_args::<memory::MemoryArgs>(args, memory::Tool::NAME)
-        && let Ok(ctx) = ToolContext::new(config, active_skill, None, 0)
+        && let Ok(ctx) =
+            ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)
         && !matches!(
             parsed.action,
             memory::MemoryAction::List | memory::MemoryAction::Read

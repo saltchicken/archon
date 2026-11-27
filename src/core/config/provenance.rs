@@ -1,6 +1,8 @@
 //! Config provenance tracking: which source (default, global, workspace,
 //! env, CLI) set each configuration value, and which keys were overridden.
 
+use std::collections::BTreeMap;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConfigSource {
     #[default]
@@ -77,6 +79,8 @@ pub struct ConfigProvenance {
     pub cli_allowed_tools: Option<Vec<String>>,
     pub default_model: ConfigSource,
     pub enabled_tools: ConfigSource,
+    pub core_tools: ConfigSource,
+    pub tool_groups: ConfigSource,
     pub auto_approve: ConfigSource,
     pub models: ConfigSource,
     pub system_presets: ConfigSource,
@@ -230,6 +234,8 @@ pub fn build_provenance(
         cli_allowed_tools: None,
         default_model: source_for_table_key(global_table, ws_table, "app", "default_model"),
         enabled_tools: source_for_table_key(global_table, ws_table, "app", "enabled_tools"),
+        core_tools: source_for_table_key(global_table, ws_table, "app", "core_tools"),
+        tool_groups: source_for_section(global_table, ws_table, "tool_groups"),
         auto_approve: source_for_table_key(global_table, ws_table, "app", "auto_approve"),
         models: source_for_section(global_table, ws_table, "models"),
         system_presets: source_for_section(global_table, ws_table, "system_presets"),
@@ -246,8 +252,19 @@ pub fn build_provenance(
     }
 }
 
-pub fn tool_list_contains(list: &[String], tool_name: &str) -> bool {
-    list.iter()
-        .map(|s| s.trim())
-        .any(|t| t == "*" || t == tool_name)
+pub fn tool_list_contains(
+    list: &[String],
+    tool_name: &str,
+    custom_groups: &BTreeMap<String, Vec<String>>,
+) -> bool {
+    list.iter().map(|s| s.trim()).any(|t| {
+        if t == "*" || t == tool_name {
+            return true;
+        }
+        if let Some(group_key) = t.strip_prefix('@') {
+            return crate::tools::resolve_tool_group(group_key, custom_groups)
+                .is_some_and(|members| members.iter().any(|m| m == tool_name));
+        }
+        false
+    })
 }

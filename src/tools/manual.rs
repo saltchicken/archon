@@ -1,7 +1,7 @@
 //! Manual tool invocation parsing: converts `#tool args` user input into a
 //! `ToolCall` with positional argument mapping.
 
-use super::{ALL_TOOL_NAMES, ToolCall, ToolFunction, format_call_summary};
+use super::{ALL_TOOL_NAMES, LOAD_TOOLS_NAME, ToolCall, ToolFunction, format_call_summary};
 use anyhow::{Context, bail};
 use serde_json::{Map, Value};
 
@@ -44,6 +44,15 @@ fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<Strin
     if tool_name == "workspace_snapshot" {
         if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
             map.insert("tree_only".into(), Value::Bool(true));
+        }
+        return;
+    }
+    if tool_name == LOAD_TOOLS_NAME {
+        let entry = map
+            .entry("names".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Value::Array(arr) = entry {
+            arr.push(Value::String(token.to_string()));
         }
         return;
     }
@@ -148,10 +157,14 @@ pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)
         None => (tool_token.trim(), None),
     };
 
-    let Some(&tool_name) = ALL_TOOL_NAMES
+    let tool_name = if raw_name.eq_ignore_ascii_case(LOAD_TOOLS_NAME) {
+        LOAD_TOOLS_NAME
+    } else if let Some(&found) = ALL_TOOL_NAMES
         .iter()
         .find(|&&name| name.eq_ignore_ascii_case(raw_name))
-    else {
+    {
+        found
+    } else {
         bail!(
             "Unknown tool '{}'. Available tools: {}",
             raw_name,

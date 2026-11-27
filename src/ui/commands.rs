@@ -1,7 +1,7 @@
 use super::{TuiApp, create_text_area, create_text_area_with};
 use crate::{
     core::{
-        EngineCommand,
+        EngineCommand, SessionToolsAction,
         config::{
             Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file,
         },
@@ -23,6 +23,7 @@ pub(super) enum SlashCommand {
     Rename,
     Reset,
     Run,
+    Tools,
 }
 
 impl SlashCommand {
@@ -37,6 +38,7 @@ impl SlashCommand {
         ("rename", Self::Rename),
         ("reset", Self::Reset),
         ("run", Self::Run),
+        ("tools", Self::Tools),
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -216,12 +218,71 @@ impl TuiApp {
             .send(EngineCommand::SetMemory { scope, memory: mem });
     }
 
+    fn handle_tools_slash_command(&mut self, raw_prompt: &str, args: &str) {
+        self.record_prompt_and_clear(raw_prompt);
+        self.scroll_to_bottom();
+
+        let trimmed = args.trim();
+        let action = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("list") {
+            SessionToolsAction::List
+        } else if trimmed.eq_ignore_ascii_case("reset") {
+            SessionToolsAction::Reset
+        } else {
+            let mut add = Vec::new();
+            let mut remove = Vec::new();
+            let mut valid = true;
+
+            for raw_tok in trimmed.split_whitespace() {
+                if let Some(rest) = raw_tok.strip_prefix('+') {
+                    let items: Vec<&str> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if items.is_empty() {
+                        valid = false;
+                        break;
+                    }
+                    add.extend(items.into_iter().map(String::from));
+                } else if let Some(rest) = raw_tok.strip_prefix('-') {
+                    let items: Vec<&str> = rest
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if items.is_empty() {
+                        valid = false;
+                        break;
+                    }
+                    remove.extend(items.into_iter().map(String::from));
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if !valid || (add.is_empty() && remove.is_empty()) {
+                self.push_error_message(
+                    "Usage: /tools [list | +<name|@group> | -<name|@group> | reset]".into(),
+                );
+                return;
+            }
+            SessionToolsAction::Update { add, remove }
+        };
+
+        let _ = self.cmd_tx.send(EngineCommand::ManageSessionTools(action));
+    }
+
     fn handle_slash_command(&mut self, raw_prompt: &str, rest: &str) -> bool {
         let (cmd_token, args) = match rest.find(char::is_whitespace) {
             Some(idx) => (&rest[..idx], rest[idx..].trim()),
             None => (rest, ""),
         };
         match SlashCommand::from_name(cmd_token) {
+            Some(SlashCommand::Tools) => {
+                self.handle_tools_slash_command(raw_prompt, args);
+                false
+            }
             Some(SlashCommand::Run) => {
                 let (include_in_context, cmd_args) = if let Some(rest_args) = args
                     .strip_prefix("-c ")

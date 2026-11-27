@@ -1,5 +1,5 @@
 use super::{
-    ALL_TOOL_NAMES, BlockingTool, ToolContext,
+    BlockingTool, ToolContext,
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
@@ -431,20 +431,21 @@ fn table_args(table: &toml::Table) -> Option<Vec<SkillArgDef>> {
 }
 
 fn check_unknown_tools(tools: &[String]) -> Option<String> {
+    let empty_groups = std::collections::BTreeMap::new();
     let unknown: Vec<&str> = tools
         .iter()
         .map(String::as_str)
         .map(str::trim)
         .map(|t| t.strip_prefix('!').unwrap_or(t).trim())
-        .filter(|&t| !t.is_empty() && t != "*" && !ALL_TOOL_NAMES.contains(&t))
+        .filter(|&t| !t.is_empty() && t != "*" && !super::is_known_tool_or_group(t, &empty_groups))
         .collect();
     if unknown.is_empty() {
         None
     } else {
         Some(format!(
-            "[Note: unrecognized tool name(s) in `tools`: {}. Valid tools: {}]",
+            "[Note: unrecognized tool name(s) in `tools`: {}. {}]",
             unknown.join(", "),
-            ALL_TOOL_NAMES.join(", ")
+            super::format_valid_tools_and_groups(&empty_groups)
         ))
     }
 }

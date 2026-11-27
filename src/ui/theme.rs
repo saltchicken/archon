@@ -50,6 +50,7 @@ pub const TAB_WORKSPACE_ACTIVE: Color = Color::Magenta;
 pub const TAB_INACTIVE: Color = Color::LightGreen;
 
 pub const STATUS_ENABLED: Color = Color::Green;
+pub const STATUS_DEFERRED: Color = Color::Cyan;
 pub const STATUS_DISABLED: Color = Color::LightRed;
 pub const PRESET_ACTIVE: Color = Color::Green;
 

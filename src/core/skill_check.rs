@@ -908,16 +908,36 @@ pub fn check_scanned_registry(
                         "Tool negation '{trimmed}' has no effect on a skill without `extends`"
                     )));
                 }
-                if neg_name.is_empty() || !ALL_TOOL_NAMES.contains(&neg_name) {
+                if neg_name.is_empty() || !tools::is_known_tool_or_group(neg_name, &BTreeMap::new())
+                {
                     diagnostics.push(SkillDiagnostic::error(format!(
-                        "Unknown tool '{neg_name}' in negated `tools` entry '{trimmed}' (valid tools: {})",
-                        ALL_TOOL_NAMES.join(", ")
+                        "Unknown tool '{neg_name}' in negated `tools` entry '{trimmed}' ({})",
+                        tools::format_valid_tools_and_groups(&BTreeMap::new())
+                    )));
+                }
+            } else if let Some(group_key) = trimmed.strip_prefix('@') {
+                if let Some(members) = tools::resolve_tool_group(group_key, &BTreeMap::new()) {
+                    if check_enabled {
+                        for member in members {
+                            if !tools::is_tool_enabled(&member, config)
+                                && warned_disabled_tools.insert(member.clone())
+                            {
+                                diagnostics.push(SkillDiagnostic::warning(format!(
+                                    "Tool '{member}' (from group '{trimmed}') is not enabled in current config (`app.enabled_tools`)"
+                                )));
+                            }
+                        }
+                    }
+                } else {
+                    diagnostics.push(SkillDiagnostic::error(format!(
+                        "Unknown tool group '{trimmed}' in `tools` ({})",
+                        tools::format_valid_tools_and_groups(&BTreeMap::new())
                     )));
                 }
             } else if !ALL_TOOL_NAMES.contains(&trimmed) {
                 diagnostics.push(SkillDiagnostic::error(format!(
-                    "Unknown tool '{trimmed}' in `tools` (valid tools: {})",
-                    ALL_TOOL_NAMES.join(", ")
+                    "Unknown tool '{trimmed}' in `tools` ({})",
+                    tools::format_valid_tools_and_groups(&BTreeMap::new())
                 )));
             } else if check_enabled
                 && !tools::is_tool_enabled(trimmed, config)
@@ -973,7 +993,9 @@ pub fn check_scanned_registry(
                 }
                 None => (rule, None),
             };
-            if tool_name.is_empty() || !ALL_TOOL_NAMES.contains(&tool_name) {
+            if tool_name.is_empty()
+                || (tool_name != tools::LOAD_TOOLS_NAME && !ALL_TOOL_NAMES.contains(&tool_name))
+            {
                 diagnostics.push(SkillDiagnostic::error(format!(
                     "Unknown tool '{tool_name}' in `auto_approve` entry '{trimmed}' (valid tools: {})",
                     ALL_TOOL_NAMES.join(", ")
@@ -995,7 +1017,7 @@ pub fn check_scanned_registry(
                     )));
                 }
             }
-            if !is_neg && !effective.allows_tool(tool_name) {
+            if !is_neg && tool_name != tools::LOAD_TOOLS_NAME && !effective.allows_tool(tool_name) {
                 diagnostics.push(SkillDiagnostic::warning(format!(
                     "`auto_approve` entry '{trimmed}' targets tool '{tool_name}', which is not enabled by this skill's `tools`"
                 )));

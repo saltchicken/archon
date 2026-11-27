@@ -1,11 +1,12 @@
 use super::{
-    ActiveSessionState, CoreEngine, EngineEvent, TurnConfig,
+    ActiveSessionState, CoreEngine, EngineEvent, SessionToolsAction, TurnConfig,
     attachments::ImageStaging,
     config::{self, Memory, MemoryScope},
     provider::Provider,
     session::{self, ChatMessage, SessionManager},
 };
-use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+use crate::tools;
+use std::{collections::VecDeque, fmt::Write as _, path::PathBuf, sync::Arc};
 use tracing::{error, info, warn};
 
 impl CoreEngine {
@@ -171,6 +172,10 @@ impl CoreEngine {
                 self.session.auto_approve.clear();
                 self.session.executed_skill_hooks.clear();
                 self.session.auto_task_turns = 0;
+                self.session.tools.reset();
+                let _ = self
+                    .tx
+                    .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
                 self.session.sent_images.extend(restored_staging_paths);
                 let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
 
@@ -293,6 +298,9 @@ impl CoreEngine {
 
         self.session.sent_images.extend(restored_paths);
         let _ = self.tx.send(EngineEvent::AttachmentsUpdated(attachments));
+        let _ = self
+            .tx
+            .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
         self.save_and_emit_chat(image_blobs).await;
     }
 
@@ -366,6 +374,130 @@ impl CoreEngine {
 
         self.session = ActiveSessionState::new();
         self.reset_skill_and_sync_model_limits();
+        let _ = self
+            .tx
+            .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
+        self.emit_chat();
+    }
+
+    fn format_session_tools_summary(&self) -> String {
+        let active_skill = self.active_turn_skill();
+        let loaded =
+            tools::active_regular_tools_for_turn(&self.config, &self.session.tools, active_skill);
+        let deferred =
+            tools::deferred_tool_names_for_turn(&self.config, &self.session.tools, active_skill);
+        let disabled: Vec<&str> = tools::ALL_TOOL_NAMES
+            .iter()
+            .copied()
+            .filter(|&name| {
+                !tools::is_tool_enabled_for_turn(
+                    name,
+                    &self.config,
+                    &self.session.tools,
+                    active_skill,
+                )
+            })
+            .collect();
+
+        let format_list = |items: &[String]| -> String {
+            if items.is_empty() {
+                "(none)".to_string()
+            } else {
+                items.join(", ")
+            }
+        };
+        let disabled_owned: Vec<String> = disabled.into_iter().map(String::from).collect();
+        let groups = tools::all_group_names(&self.config.tool_groups);
+
+        let mut out = String::new();
+        let _ = writeln!(out, "Loaded ({}): {}", loaded.len(), format_list(&loaded));
+        let _ = writeln!(
+            out,
+            "Deferred ({}): {}",
+            deferred.len(),
+            format_list(&deferred)
+        );
+        let _ = writeln!(
+            out,
+            "Disabled ({}): {}",
+            disabled_owned.len(),
+            format_list(&disabled_owned)
+        );
+        let _ = write!(out, "Groups: {}", groups.join(", "));
+        out
+    }
+
+    pub(super) async fn handle_manage_session_tools(&mut self, action: SessionToolsAction) {
+        let report = match action {
+            SessionToolsAction::List => self.format_session_tools_summary(),
+            SessionToolsAction::Reset => {
+                self.session.tools.reset();
+                let _ = self
+                    .tx
+                    .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
+                format!(
+                    "Reset session tool overrides back to core_tools.\n\n{}",
+                    self.format_session_tools_summary()
+                )
+            }
+            SessionToolsAction::Update { add, remove } => {
+                let expanded_add =
+                    match tools::expand_tool_spec_checked(&add, &self.config.tool_groups) {
+                        Ok(list) => list,
+                        Err(unknown) => {
+                            self.emit_error(format!(
+                                "Unknown tool/group(s): {}. {}",
+                                unknown.join(", "),
+                                tools::format_valid_tools_and_groups(&self.config.tool_groups)
+                            ))
+                            .await;
+                            return;
+                        }
+                    };
+                let expanded_remove =
+                    match tools::expand_tool_spec_checked(&remove, &self.config.tool_groups) {
+                        Ok(list) => list,
+                        Err(unknown) => {
+                            self.emit_error(format!(
+                                "Unknown tool/group(s): {}. {}",
+                                unknown.join(", "),
+                                tools::format_valid_tools_and_groups(&self.config.tool_groups)
+                            ))
+                            .await;
+                            return;
+                        }
+                    };
+
+                if !expanded_add.is_empty() {
+                    self.session.tools.enable_tools(&expanded_add, &self.config);
+                }
+                if !expanded_remove.is_empty() {
+                    self.session.tools.disable_tools(&expanded_remove);
+                }
+                let _ = self
+                    .tx
+                    .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
+
+                let mut notes = Vec::new();
+                if !expanded_add.is_empty() {
+                    notes.push(format!("Loaded/enabled: {}", expanded_add.join(", ")));
+                }
+                if !expanded_remove.is_empty() {
+                    notes.push(format!("Unloaded/disabled: {}", expanded_remove.join(", ")));
+                }
+                format!(
+                    "{}\n\n{}",
+                    notes.join("\n"),
+                    self.format_session_tools_summary()
+                )
+            }
+        };
+
+        self.session.messages.push(ChatMessage {
+            include_in_context: false,
+            tool_name: Some("/tools".into()),
+            ..ChatMessage::new("local", report)
+        });
         self.emit_chat();
     }
 

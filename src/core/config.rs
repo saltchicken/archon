@@ -11,13 +11,14 @@ pub use provenance::{
 };
 
 use crate::core::{provider::Provider, skills::SkillDefinition};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -131,6 +132,8 @@ pub struct Config {
     pub browser: BrowserSettings,
     pub ollama: EndpointSettings,
     pub gemini: EndpointSettings,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_groups: BTreeMap<String, Vec<String>>,
     pub models: Vec<ModelPreset>,
     pub system_presets: Vec<Preset>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -197,6 +200,14 @@ pub struct AppSettings {
     #[serde(alias = "include_hidden")]
     pub allow_hidden: bool,
     pub enabled_tools: Vec<String>,
+    /// Tools whose full JSON schemas are eagerly included on every turn.
+    /// Other tools in `enabled_tools` are exposed via `<deferred_tools>` and
+    /// activated on demand with `load_tools`. Supports `@group` entries and `"*"`.
+    pub core_tools: Vec<String>,
+    /// Maximum number of active tool schemas (core + dynamically loaded) per
+    /// session before oldest dynamically loaded tools are evicted FIFO. Set to
+    /// `0` to disable eviction. Default is `16`.
+    pub max_loaded_tools: usize,
     pub auto_approve: Vec<String>,
     /// When `true`, the `curl` and `fetch_url` tools may access private,
     /// loopback, and otherwise reserved IP addresses (e.g. `127.0.0.1`,
@@ -300,7 +311,19 @@ impl Default for AppSettings {
                 .iter()
                 .map(|&s| String::from(s))
                 .collect(),
+            core_tools: [
+                "read_file",
+                "edit_file",
+                "create_file",
+                "search",
+                "repo_map",
+                "task",
+            ]
+            .map(String::from)
+            .into(),
+            max_loaded_tools: 16,
             auto_approve: [
+                "load_tools",
                 "read_file",
                 "search",
                 "repo_map",
@@ -414,6 +437,7 @@ impl Default for Config {
                 chat_timeout: 600,
                 status_timeout: 5,
             },
+            tool_groups: BTreeMap::new(),
             models: vec![
                 ModelPreset {
                     name: "qwen3.8:27b".into(),
@@ -557,16 +581,16 @@ impl Config {
             .provenance
             .global_enabled_tools
             .as_ref()
-            .is_none_or(|g| tool_list_contains(g, tool_name));
+            .is_none_or(|g| tool_list_contains(g, tool_name, &self.tool_groups));
         let in_ws = self
             .provenance
             .workspace_enabled_tools
             .as_ref()
-            .map(|ws| tool_list_contains(ws, tool_name));
+            .map(|ws| tool_list_contains(ws, tool_name, &self.tool_groups));
 
         if let Some(ref cli) = self.provenance.cli_allowed_tools
             && in_ws.unwrap_or(in_global)
-            && !tool_list_contains(cli, tool_name)
+            && !tool_list_contains(cli, tool_name, &self.tool_groups)
         {
             return ToolProvenance::CliDisabled;
         }
@@ -583,6 +607,19 @@ impl Config {
         }
     }
 
+    /// Validates `--allowed-tools` entries against built-in tools and both
+    /// built-in and custom `[tool_groups]`.
+    pub fn validate_allowed_tools(&self, allowed: &[String]) -> Result<()> {
+        if let Err(unknown) = crate::tools::expand_tool_spec_checked(allowed, &self.tool_groups) {
+            bail!(
+                "Unknown tool/group(s) in --allowed-tools: {}. {}",
+                unknown.join(", "),
+                crate::tools::format_valid_tools_and_groups(&self.tool_groups)
+            );
+        }
+        Ok(())
+    }
+
     pub fn restrict_enabled_tools(&mut self, allowed: &[String]) {
         self.provenance.cli_allowed_tools = Some(
             allowed
@@ -596,23 +633,17 @@ impl Config {
         if allow_all {
             return;
         }
-        let had_wildcard = self
-            .app
-            .enabled_tools
-            .iter()
-            .map(|s| s.trim())
-            .any(|t| t == "*");
+        let expanded_allowed = crate::tools::expand_tool_list(allowed, &self.tool_groups);
+        let expanded_enabled =
+            crate::tools::expand_tool_list(&self.app.enabled_tools, &self.tool_groups);
+        let had_wildcard = expanded_enabled.iter().any(|t| t == "*");
         if had_wildcard {
-            self.app.enabled_tools = allowed
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            self.app.enabled_tools = expanded_allowed;
         } else {
-            self.app.enabled_tools.retain(|tool| {
-                let t = tool.trim();
-                allowed.iter().map(|a| a.trim()).any(|a| a == t)
-            });
+            self.app.enabled_tools = expanded_enabled
+                .into_iter()
+                .filter(|tool| expanded_allowed.iter().any(|a| a == tool))
+                .collect();
         }
     }
 

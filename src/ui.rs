@@ -8,11 +8,14 @@ pub mod theme;
 
 use commands::SlashCommand;
 
-use crate::core::{
-    EngineCommand, EngineEvent, TurnConfig,
-    attachments::ImageAttachment,
-    config::{Config, Memory, MemoryScope, Preset},
-    session::{ChatMessage, SessionSummary},
+use crate::{
+    core::{
+        EngineCommand, EngineEvent, TurnConfig,
+        attachments::ImageAttachment,
+        config::{Config, Memory, MemoryScope, Preset},
+        session::{ChatMessage, SessionSummary},
+    },
+    tools::SessionToolState,
 };
 use anyhow::Result;
 use crossterm::{
@@ -236,6 +239,7 @@ pub struct TuiApp {
     pub(super) sidebar_area: Rect,
     pub(super) sidebar_scroll: usize,
     pub(super) active_turn_skill: Option<String>,
+    pub(super) session_tools: SessionToolState,
     pub(super) session_auto_approve_count: usize,
     pub(super) term_focused: bool,
     pub(super) cursor_blink_on: bool,
@@ -386,6 +390,7 @@ impl TuiApp {
             sidebar_area: Rect::default(),
             sidebar_scroll: 0,
             active_turn_skill: None,
+            session_tools: SessionToolState::default(),
             session_auto_approve_count: 0,
             term_focused: true,
             cursor_blink_on: true,

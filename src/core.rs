@@ -14,9 +14,11 @@ pub mod skills;
 mod tool_runner;
 mod turns;
 
-pub use protocol::{EngineCommand, EngineEvent, ToolExecSource, TruncatedToolAction, TurnConfig};
+pub use protocol::{
+    EngineCommand, EngineEvent, SessionToolsAction, ToolExecSource, TruncatedToolAction, TurnConfig,
+};
 
-use crate::tools::ToolCall;
+use crate::tools::{SessionToolState, ToolCall};
 use attachments::ImageStaging;
 use config::Config;
 use processes::ProcessRegistry;
@@ -46,6 +48,7 @@ struct ActiveSessionState {
     auto_approve: HashSet<String>,
     executed_skill_hooks: HashSet<String>,
     auto_task_turns: usize,
+    tools: SessionToolState,
 }
 
 impl ActiveSessionState {
@@ -60,6 +63,7 @@ impl ActiveSessionState {
             auto_approve: HashSet::new(),
             executed_skill_hooks: HashSet::new(),
             auto_task_turns: 0,
+            tools: SessionToolState::default(),
         }
     }
 }
@@ -376,6 +380,9 @@ impl CoreEngine {
             }
             EngineCommand::InspectPayload { draft_prompt, turn } => {
                 self.handle_inspect_payload(draft_prompt, turn);
+            }
+            EngineCommand::ManageSessionTools(action) => {
+                self.handle_manage_session_tools(action).await;
             }
         }
     }

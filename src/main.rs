@@ -71,6 +71,7 @@ async fn main() -> Result<()> {
 
     let (mut config, config_err) = Config::load(&base_config_path, &ws_config_dir);
     if let Some(ref allowed) = cli_args.allowed_tools {
+        config.validate_allowed_tools(allowed)?;
         config.restrict_enabled_tools(allowed);
     }
     if cli_args.model.is_some() {

@@ -344,3 +344,49 @@ fn repo_skills_directory_passes_skill_check() {
         );
     }
 }
+
+#[test]
+fn skill_check_and_resolve_support_tool_groups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    fs::create_dir_all(dir.join("base-all")).unwrap();
+    fs::write(
+        dir.join("base-all/SKILL.md"),
+        "+++\nname = \"base-all\"\nabstract = true\ntools = [\"*\"]\n+++\nBase.",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("git-helper")).unwrap();
+    fs::write(
+        dir.join("git-helper/SKILL.md"),
+        "+++\nname = \"git-helper\"\ntools = [\"@git\", \"read_file\"]\n+++\nGit helper.",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("offline-agent")).unwrap();
+    fs::write(
+        dir.join("offline-agent/SKILL.md"),
+        "+++\nname = \"offline-agent\"\nextends = \"base-all\"\ntools = [\"!@web\"]\n+++\nOffline.",
+    )
+    .unwrap();
+
+    let cfg = Config::default();
+    let report = check_skills_in_dir(dir, "test", &cfg, true, None);
+    assert!(
+        report.is_ok(true),
+        "Expected group-based skills to pass check:\n{}",
+        report.format_report(true)
+    );
+
+    let skills = archon::core::skills::discover_skills(&dir.to_string_lossy(), None);
+    let git_helper = skills.iter().find(|s| s.name == "git-helper").unwrap();
+    assert!(git_helper.allows_tool("git"));
+    assert!(git_helper.allows_tool("github_repo"));
+    assert!(git_helper.allows_tool("read_file"));
+    assert!(!git_helper.allows_tool("cargo"));
+
+    let offline = skills.iter().find(|s| s.name == "offline-agent").unwrap();
+    assert!(!offline.allows_tool("fetch_url"));
+    assert!(!offline.allows_tool("curl"));
+    assert!(!offline.allows_tool("browser"));
+    assert!(offline.allows_tool("git"));
+}

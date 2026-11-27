@@ -3,13 +3,26 @@
 
 use super::types::{SkillArgDef, SkillDefinition};
 use crate::core::config::Config;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 use tracing;
 
 fn push_unique_string(vec: &mut Vec<String>, item: &str) {
     if !vec.iter().any(|existing| existing == item) {
         vec.push(item.to_string());
     }
+}
+
+fn expand_skill_tool_token(token: &str) -> Vec<String> {
+    let trimmed = token.trim();
+    if let Some(group_key) = trimmed.strip_prefix('@')
+        && let Some(members) = crate::tools::resolve_tool_group(group_key, &BTreeMap::new())
+    {
+        return members;
+    }
+    vec![trimmed.to_string()]
 }
 
 fn auto_approve_rule_covers(broad: &str, target: &str) -> bool {
@@ -82,14 +95,19 @@ fn resolve_skill_at(
     let child = &raw[idx];
     if child.extends.is_empty() {
         let mut resolved = child.clone();
-        // Strip any stray `!tool` negations from a root skill without parents.
-        resolved.tools = resolved
-            .tools
-            .iter()
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty() && !t.starts_with('!'))
-            .map(String::from)
-            .collect();
+        // Strip any stray `!tool` negations from a root skill without parents,
+        // and expand any built-in `@group` entries.
+        let mut expanded_tools = Vec::new();
+        for raw_t in &resolved.tools {
+            let t = raw_t.trim();
+            if t.is_empty() || t.starts_with('!') {
+                continue;
+            }
+            for item in expand_skill_tool_token(t) {
+                push_unique_string(&mut expanded_tools, &item);
+            }
+        }
+        resolved.tools = expanded_tools;
         let mut deduped_auto_approve = Vec::new();
         for rule in &resolved.auto_approve {
             let r = rule.trim();
@@ -194,7 +212,7 @@ fn resolve_skill_at(
 
     visiting.pop();
 
-    // Apply child's tools (supporting `!tool` removal without expanding `*` into hard requirements).
+    // Apply child's tools (supporting `!tool`, `@group`, and `!@group` without expanding `*` into hard requirements).
     for raw_tool in &child.tools {
         let trimmed = raw_tool.trim();
         if let Some(neg) = trimmed.strip_prefix('!') {
@@ -202,17 +220,21 @@ fn resolve_skill_at(
             if neg.is_empty() {
                 continue;
             }
-            merged_tools.retain(|t| !t.eq_ignore_ascii_case(neg));
-            if !tools_restricted || merged_tools.iter().any(|t| t == "*") {
-                push_unique_string(&mut excluded_tools, neg);
+            for item in expand_skill_tool_token(neg) {
+                merged_tools.retain(|t| !t.eq_ignore_ascii_case(&item));
+                if !tools_restricted || merged_tools.iter().any(|t| t == "*") {
+                    push_unique_string(&mut excluded_tools, &item);
+                }
             }
         } else if trimmed == "*" {
             push_unique_string(&mut merged_tools, "*");
             excluded_tools.clear();
         } else if !trimmed.is_empty() {
             tools_restricted = true;
-            push_unique_string(&mut merged_tools, trimmed);
-            excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(trimmed));
+            for item in expand_skill_tool_token(trimmed) {
+                push_unique_string(&mut merged_tools, &item);
+                excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(&item));
+            }
         }
     }
 

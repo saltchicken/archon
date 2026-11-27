@@ -131,6 +131,42 @@ impl CoreEngine {
         avail_tokens.saturating_mul(4)
     }
 
+    fn apply_load_tools_side_effect(&mut self, arguments: &serde_json::Value) {
+        let Ok(parsed) =
+            serde_json::from_value::<tools::load_tools::LoadToolsArgs>(arguments.clone())
+        else {
+            return;
+        };
+        let Ok(res) = tools::load_tools::resolve_load_tools_request(
+            &parsed.names,
+            &self.config,
+            &self.session.tools,
+            self.active_turn_skill(),
+        ) else {
+            return;
+        };
+        if !res.newly_loaded.is_empty() {
+            let core_count = tools::core_regular_tools_for_turn(
+                &self.config,
+                &self.session.tools,
+                self.active_turn_skill(),
+            )
+            .len();
+            let evicted = self.session.tools.apply_loaded(
+                &res.newly_loaded,
+                core_count,
+                self.config.app.max_loaded_tools,
+            );
+            info!(
+                "Activated deferred tool(s): {:?} (evicted: {:?})",
+                res.newly_loaded, evicted
+            );
+            let _ = self
+                .tx
+                .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
+        }
+    }
+
     async fn complete_tool_exec(
         &mut self,
         source: ToolExecSource,
@@ -140,7 +176,14 @@ impl CoreEngine {
     ) {
         let is_model_tool = matches!(source, ToolExecSource::Model { .. });
         match source {
-            ToolExecSource::Model { tool_name, .. } => {
+            ToolExecSource::Model {
+                tool_name,
+                arguments,
+                ..
+            } => {
+                if tool_name == tools::LOAD_TOOLS_NAME && !is_error {
+                    self.apply_load_tools_side_effect(&arguments);
+                }
                 self.sync_tool_side_effects(&tool_name);
                 self.session.messages.push(ChatMessage::new_tool(
                     tool_name, output, truncated, is_error,
@@ -160,8 +203,12 @@ impl CoreEngine {
             ToolExecSource::ManualTool {
                 tool_name,
                 summary,
+                arguments,
                 include_in_context,
             } => {
+                if tool_name == tools::LOAD_TOOLS_NAME && !is_error {
+                    self.apply_load_tools_side_effect(&arguments);
+                }
                 self.sync_tool_side_effects(&tool_name);
                 self.session.messages.push(ChatMessage {
                     truncated,
@@ -261,11 +308,13 @@ impl CoreEngine {
         let cfg = self.config.clone();
         let active_skill = self.active_turn_skill().map(String::from);
         let session_id = self.session.id.clone();
+        let session_tools = self.session.tools.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
         let source = ToolExecSource::Model {
             tool_name: call.function.name.clone(),
             summary: sig,
+            arguments: call.function.arguments.clone(),
         };
 
         self.spawn_with_tx(move |tx| async move {
@@ -274,6 +323,7 @@ impl CoreEngine {
                 &cfg,
                 active_skill.as_deref(),
                 Some(session_id.as_str()),
+                &session_tools,
                 max_out,
                 full_cap,
             )
@@ -298,6 +348,7 @@ impl CoreEngine {
             if !tools::is_tool_enabled_for_turn(
                 &call.function.name,
                 &self.config,
+                &self.session.tools,
                 self.active_turn_skill(),
             ) {
                 let call = self.inflight.pending_tools.pop_front().unwrap();
@@ -522,11 +573,13 @@ impl CoreEngine {
         let cfg = self.config.clone();
         let active_skill = self.active_turn_skill().map(String::from);
         let session_id = self.session.id.clone();
+        let session_tools = self.session.tools.clone();
         let max_out = self.active_max_tool_output_size;
         let full_cap = self.context_padded_capture_limit();
         let source = ToolExecSource::ManualTool {
             tool_name: call.function.name.clone(),
             summary,
+            arguments: call.function.arguments.clone(),
             include_in_context,
         };
 
@@ -536,6 +589,7 @@ impl CoreEngine {
                 &cfg,
                 active_skill.as_deref(),
                 Some(session_id.as_str()),
+                &session_tools,
                 max_out,
                 full_cap,
             )
@@ -559,7 +613,9 @@ impl CoreEngine {
             && self.inflight.queued_interjections.is_empty()
         {
             let (tool_name, modal_summary, index, total) = match &source {
-                ToolExecSource::Model { tool_name, summary } => {
+                ToolExecSource::Model {
+                    tool_name, summary, ..
+                } => {
                     let (idx, tot) = self.tool_batch_progress();
                     (
                         tool_name.clone(),
@@ -711,5 +767,88 @@ Coder."#,
         assert!(engine.is_call_auto_approved(&edit_call));
         assert!(engine.is_call_auto_approved(&cargo_check));
         assert!(!engine.is_call_auto_approved(&cargo_fmt));
+    }
+
+    #[tokio::test]
+    async fn core_engine_load_tools_slash_tools_fork_and_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = config::Config::default();
+        cfg.app.history_dir = tmp.path().to_string_lossy().into_owned();
+        cfg.app.enabled_tools = vec!["read_file".into(), "git".into(), "cargo".into()];
+        cfg.app.core_tools = vec!["read_file".into()];
+
+        let (tx, mut rx) = unbounded_channel();
+        let mut engine = CoreEngine::new("test-model".to_string(), cfg, tx).unwrap();
+        engine.set_save_session(false);
+
+        // `load_tools` is auto-approved by default.
+        let load_call = ToolCall {
+            function: ToolFunction {
+                name: tools::LOAD_TOOLS_NAME.to_string(),
+                arguments: json!({ "names": ["git"] }),
+            },
+            thought_signature: None,
+        };
+        assert!(engine.is_call_auto_approved(&load_call));
+
+        // Applying `load_tools` side effect adds `git` to `session.tools.loaded` and emits event.
+        engine.apply_load_tools_side_effect(&load_call.function.arguments);
+        assert_eq!(engine.session.tools.loaded, vec!["git"]);
+        let mut saw_updated = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let EngineEvent::SessionToolsUpdated(st) = ev
+                && st.loaded == vec!["git"]
+            {
+                saw_updated = true;
+            }
+        }
+        assert!(saw_updated);
+
+        // `/tools +browser -read_file` force-enables disabled `browser` and disables core `read_file`.
+        engine
+            .handle_manage_session_tools(crate::core::SessionToolsAction::Update {
+                add: vec!["browser".into()],
+                remove: vec!["read_file".into()],
+            })
+            .await;
+        assert!(engine.session.tools.is_force_enabled("browser"));
+        assert!(engine.session.tools.is_loaded("browser"));
+        assert!(engine.session.tools.is_force_disabled("read_file"));
+        assert!(!tools::is_tool_enabled_for_turn(
+            "read_file",
+            &engine.config,
+            &engine.session.tools,
+            None,
+        ));
+        assert!(tools::is_tool_enabled_for_turn(
+            "browser",
+            &engine.config,
+            &engine.session.tools,
+            None,
+        ));
+
+        // Fork preserves `session.tools`.
+        engine
+            .session
+            .messages
+            .push(ChatMessage::new("assistant", "Reply"));
+        let fork_idx = engine.session.messages.len() - 1;
+        engine.handle_fork_session(fork_idx).await;
+        assert_eq!(engine.session.tools.loaded, vec!["git", "browser"]);
+        assert!(engine.session.tools.is_force_disabled("read_file"));
+
+        // `/tools reset` clears all overrides back to `core_tools`.
+        engine
+            .handle_manage_session_tools(crate::core::SessionToolsAction::Reset)
+            .await;
+        assert!(engine.session.tools.loaded.is_empty());
+        assert!(engine.session.tools.force_enabled.is_empty());
+        assert!(engine.session.tools.force_disabled.is_empty());
+
+        // Reload `git`, then `/reset` clears `session.tools`.
+        engine.apply_load_tools_side_effect(&load_call.function.arguments);
+        assert_eq!(engine.session.tools.loaded, vec!["git"]);
+        engine.handle_reset_chat().await;
+        assert!(engine.session.tools.loaded.is_empty());
     }
 }

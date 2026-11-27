@@ -30,7 +30,7 @@ pub use types::{
     SkillDefinition, SkillHook,
 };
 
-use crate::core::config::Config;
+use crate::{core::config::Config, tools::SessionToolState};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -43,9 +43,31 @@ fn get_ci<'a, V>(map: &'a BTreeMap<String, V>, key: &str) -> Option<&'a V> {
     })
 }
 
+/// Formats a compact `<deferred_tools>` catalog block for tools that are enabled
+/// for this turn but not yet loaded into the active tool schema list.
+pub fn format_deferred_tools_catalog(deferred_tools: &[String]) -> Option<String> {
+    if deferred_tools.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(deferred_tools.len());
+    for name in deferred_tools {
+        let summary = crate::tools::tool_short_summary(name);
+        lines.push(format!("- {name}: {summary}"));
+    }
+    Some(format!(
+        "<deferred_tools>\n\
+         Additional enabled tools are available on demand. Call `load_tools(names: [...])` with tool names or `@group` names (e.g. `@git`, `@web`, `@rust`, `@sysadmin`, `@data`, `@planning`, `@code`, `@agent`) to load their full schemas before using them:\n\
+         {}\n\
+         </deferred_tools>",
+        lines.join("\n")
+    ))
+}
+
 /// Composes the full system prompt for a turn, incorporating the base prompt,
-/// memory blocks, and the active skill's rendered prompt.
-pub fn compose_system_prompt(
+/// memory blocks, active tasks, active skill prompt, and (when applicable) the
+/// compact `<deferred_tools>` catalog.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_system_prompt_for_turn(
     base_system_prompt: &str,
     active_skill: Option<&str>,
     skill_args: Option<&str>,
@@ -53,6 +75,8 @@ pub fn compose_system_prompt(
     skill_inputs: &BTreeMap<String, Value>,
     session_id: Option<&str>,
     config: &Config,
+    enable_tools: bool,
+    session_tools: &SessionToolState,
 ) -> String {
     let mut sections = Vec::new();
     if !base_system_prompt.trim().is_empty() {
@@ -114,5 +138,37 @@ pub fn compose_system_prompt(
         ));
     }
 
+    if enable_tools {
+        let deferred =
+            crate::tools::deferred_tool_names_for_turn(config, session_tools, active_skill);
+        if let Some(deferred_block) = format_deferred_tools_catalog(&deferred) {
+            sections.push(deferred_block);
+        }
+    }
+
     sections.join("\n\n")
+}
+
+/// Composes the full system prompt using default (empty) session tool state
+/// with tools enabled.
+pub fn compose_system_prompt(
+    base_system_prompt: &str,
+    active_skill: Option<&str>,
+    skill_args: Option<&str>,
+    raw_skill_args: Option<&str>,
+    skill_inputs: &BTreeMap<String, Value>,
+    session_id: Option<&str>,
+    config: &Config,
+) -> String {
+    compose_system_prompt_for_turn(
+        base_system_prompt,
+        active_skill,
+        skill_args,
+        raw_skill_args,
+        skill_inputs,
+        session_id,
+        config,
+        true,
+        &SessionToolState::default(),
+    )
 }
