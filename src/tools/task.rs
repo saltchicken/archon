@@ -17,7 +17,7 @@ pub enum TaskAction {
     List,
     /// Add a single task (`title`) or batch-add multiple tasks (`items`).
     Add,
-    /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`.
+    /// Update an existing task's `status`, `title`, `priority`, or `notes` by `id`. (Use `remove` when finished; there is no `done` status.)
     Update,
     /// Remove a finished or unneeded task by `id`.
     Remove,

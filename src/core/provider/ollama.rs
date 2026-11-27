@@ -126,6 +126,12 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
+const OLLAMA_STRIP_KEYS: &[&str] = &["$schema", "$defs", "definitions", "$ref"];
+
+fn flatten_schema_for_ollama(val: &mut Value) {
+    super::flatten_tool_schema(val, OLLAMA_STRIP_KEYS, false);
+}
+
 pub fn build_payload(
     model: &str,
     messages: &[ChatMessage],
@@ -168,8 +174,17 @@ pub fn build_payload(
         "stream": true,
         "options": { "num_ctx": num_ctx, "num_predict": -1, "num_batch": 256 }
     });
-    if let Some(t) = tools {
-        payload["tools"] = json!(t);
+    if let Some(raw_tools) = tools {
+        let flattened: Vec<Value> = raw_tools
+            .into_iter()
+            .map(|mut t| {
+                if let Some(params) = t.get_mut("function").and_then(|f| f.get_mut("parameters")) {
+                    flatten_schema_for_ollama(params);
+                }
+                t
+            })
+            .collect();
+        payload["tools"] = json!(flattened);
     }
     payload
 }
@@ -277,4 +292,55 @@ pub async fn stream_chat(
         tool_calls: collected_tools,
         thoughts,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flatten_schema_inlines_defs_and_optional_enum_for_ollama() {
+        let mut schema = json!({
+            "type": "object",
+            "$defs": {
+                "TaskStatus": {
+                    "oneOf": [
+                        { "type": "string", "const": "pending", "description": "Queued." },
+                        { "type": "string", "const": "in_progress", "description": "Active." },
+                        { "type": "string", "const": "blocked", "description": "Waiting." }
+                    ]
+                }
+            },
+            "properties": {
+                "id": {
+                    "type": ["integer", "null"],
+                    "format": "int64",
+                    "default": null
+                },
+                "status": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/TaskStatus" },
+                        { "type": "null" }
+                    ],
+                    "default": null,
+                    "description": "Task status"
+                }
+            }
+        });
+
+        flatten_schema_for_ollama(&mut schema);
+
+        assert!(schema.get("$defs").is_none());
+        assert_eq!(schema["properties"]["id"]["type"], json!("integer"));
+        assert_eq!(schema["properties"]["id"]["format"], json!("int64"));
+        assert!(schema["properties"]["id"].get("default").is_none());
+
+        let status = &schema["properties"]["status"];
+        assert_eq!(status["type"], json!("string"));
+        assert_eq!(status["enum"], json!(["pending", "in_progress", "blocked"]));
+        assert!(status.get("oneOf").is_none());
+        assert!(status.get("anyOf").is_none());
+        assert!(status.get("nullable").is_none());
+        assert!(status.get("default").is_none());
+    }
 }

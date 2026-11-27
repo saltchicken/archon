@@ -34,6 +34,7 @@ enum CargoAction {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CargoArgs {
     /// The Cargo action to run.
     action: CargoAction,
@@ -147,5 +148,29 @@ impl AsyncTool for Tool {
 
         ctx.run_command_with_timeout("cargo", &cmd_args, empty_msg, timeout_secs)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cargo_args_rejects_unknown_fields() {
+        let err = crate::tools::deserialize_tool_args(
+            "cargo",
+            &serde_json::json!({
+                "action": "info",
+                "crate_name": "eframe"
+            }),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Invalid arguments provided to cargo"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("unknown field `crate_name`, expected one of `action`, `package`, `bin`"),
+            "unexpected error: {msg}"
+        );
     }
 }

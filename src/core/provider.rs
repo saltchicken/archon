@@ -12,7 +12,7 @@ use crate::{
 use anyhow::Result;
 use futures_util::{Stream, TryStreamExt};
 use reqwest::{Client, RequestBuilder};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{fmt::Write as _, io, time::Duration};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::{
@@ -48,6 +48,191 @@ pub async fn open_line_stream(
         StreamReader::new(byte_stream),
         LinesCodec::new_with_max_length(8 * 1024 * 1024),
     ))
+}
+
+fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) {
+    if depth > 16 {
+        return;
+    }
+    match val {
+        Value::Object(obj) => {
+            if let Some(ref_str) = obj
+                .remove("$ref")
+                .and_then(|v| v.as_str().map(String::from))
+                && let Some(name) = ref_str
+                    .strip_prefix("#/$defs/")
+                    .or_else(|| ref_str.strip_prefix("#/definitions/"))
+                && let Some(Value::Object(target_obj)) = defs.get(name).cloned()
+            {
+                for (k, v) in target_obj {
+                    obj.entry(k).or_insert(v);
+                }
+            }
+            for (k, v) in obj.iter_mut() {
+                if (k == "properties" || k == "patternProperties") && v.is_object() {
+                    if let Some(props) = v.as_object_mut() {
+                        for prop_schema in props.values_mut() {
+                            inline_schema_refs(prop_schema, defs, depth + 1);
+                        }
+                    }
+                } else {
+                    inline_schema_refs(v, defs, depth + 1);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                inline_schema_refs(v, defs, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_string_enum_variants(items: &[Value]) -> Option<Vec<Value>> {
+    let mut variants = Vec::new();
+    for item in items {
+        let obj = item.as_object()?;
+        if let Some(c) = obj.get("const").and_then(Value::as_str) {
+            variants.push(Value::String(c.to_string()));
+        } else {
+            let arr = obj.get("enum").and_then(Value::as_array)?;
+            if !arr.iter().all(Value::is_string) {
+                return None;
+            }
+            variants.extend_from_slice(arr);
+        }
+    }
+    (!variants.is_empty()).then_some(variants)
+}
+
+fn flatten_schema_node(val: &mut Value, strip_keys: &[&str], mark_nullable: bool) {
+    match val {
+        Value::Object(obj) => {
+            for k in strip_keys {
+                obj.remove(*k);
+            }
+
+            if let Some(s) = obj
+                .remove("const")
+                .and_then(|v| v.as_str().map(String::from))
+            {
+                obj.insert("type".into(), json!("string"));
+                obj.insert("enum".into(), json!([s]));
+            }
+
+            if let Some(Value::Array(types)) = obj.get("type").cloned() {
+                let orig_len = types.len();
+                let mut non_null: Vec<Value> = types
+                    .into_iter()
+                    .filter(|t| t.as_str() != Some("null"))
+                    .collect();
+                let had_null = non_null.len() < orig_len;
+                if non_null.len() == 1
+                    && let Some(first) = non_null.pop()
+                {
+                    obj.insert("type".into(), first);
+                    if had_null {
+                        if mark_nullable {
+                            obj.insert("nullable".into(), Value::Bool(true));
+                        }
+                        if obj.get("default") == Some(&Value::Null) {
+                            obj.remove("default");
+                        }
+                    }
+                }
+            }
+
+            // Loop so nested wrappers like `anyOf: [{ oneOf: [...] }, { type: "null" }]`
+            // (emitted by schemars for `Option<Enum>` with variant doc comments)
+            // unwrap `anyOf` and then immediately flatten the exposed `oneOf`.
+            for _ in 0..4 {
+                let mut changed = false;
+                for key in ["anyOf", "oneOf"] {
+                    let Some(Value::Array(variants)) = obj.get(key).cloned() else {
+                        continue;
+                    };
+                    let orig_len = variants.len();
+                    let non_null: Vec<Value> = variants
+                        .into_iter()
+                        .filter(|i| {
+                            i.get("type").and_then(Value::as_str) != Some("null")
+                                && i.get("const") != Some(&Value::Null)
+                        })
+                        .collect();
+                    let had_null = non_null.len() < orig_len;
+
+                    let replaced = if let Some(enum_vals) = extract_string_enum_variants(&non_null)
+                    {
+                        obj.insert("type".into(), json!("string"));
+                        obj.insert("enum".into(), Value::Array(enum_vals));
+                        true
+                    } else if non_null.len() == 1
+                        && let Some(Value::Object(inner)) = non_null.into_iter().next()
+                    {
+                        for (k, v) in inner {
+                            if !strip_keys.contains(&k.as_str()) {
+                                obj.entry(k).or_insert(v);
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    };
+
+                    if replaced {
+                        obj.remove(key);
+                        if had_null {
+                            if mark_nullable {
+                                obj.insert("nullable".into(), Value::Bool(true));
+                            }
+                            if obj.get("default") == Some(&Value::Null) {
+                                obj.remove("default");
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+
+            for (k, v) in obj.iter_mut() {
+                if (k == "properties" || k == "patternProperties") && v.is_object() {
+                    // Keys here are property names, not schema keywords.
+                    if let Some(props) = v.as_object_mut() {
+                        for prop_schema in props.values_mut() {
+                            flatten_schema_node(prop_schema, strip_keys, mark_nullable);
+                        }
+                    }
+                } else {
+                    flatten_schema_node(v, strip_keys, mark_nullable);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                flatten_schema_node(v, strip_keys, mark_nullable);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn flatten_tool_schema(val: &mut Value, strip_keys: &[&str], mark_nullable: bool) {
+    let mut root_defs = Map::new();
+    if let Some(obj) = val.as_object_mut() {
+        for key in ["$defs", "definitions"] {
+            if let Some(Value::Object(d)) = obj.remove(key) {
+                root_defs.extend(d);
+            }
+        }
+    }
+    if !root_defs.is_empty() {
+        inline_schema_refs(val, &root_defs, 0);
+    }
+    flatten_schema_node(val, strip_keys, mark_nullable);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -711,4 +896,178 @@ pub fn sanitize_messages_for_turn(messages: Vec<ChatMessage>) -> Vec<ChatMessage
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_schema_is_flat(tool_name: &str, provider: &str, val: &Value, path: &str) {
+        match val {
+            Value::Object(obj) => {
+                for forbidden in ["$defs", "definitions", "$ref", "oneOf", "anyOf", "const"] {
+                    assert!(
+                        !obj.contains_key(forbidden),
+                        "{provider} schema for '{tool_name}' still contains '{forbidden}' at {path}: {obj:?}"
+                    );
+                }
+                if let Some(ty) = obj.get("type") {
+                    assert!(
+                        !ty.is_array(),
+                        "{provider} schema for '{tool_name}' still has array 'type' at {path}: {ty:?}"
+                    );
+                }
+                for (k, v) in obj {
+                    if (k == "properties" || k == "patternProperties") && v.is_object() {
+                        if let Some(props) = v.as_object() {
+                            for (prop_name, prop_schema) in props {
+                                assert_schema_is_flat(
+                                    tool_name,
+                                    provider,
+                                    prop_schema,
+                                    &format!("{path}.{k}.{prop_name}"),
+                                );
+                            }
+                        }
+                    } else {
+                        assert_schema_is_flat(tool_name, provider, v, &format!("{path}.{k}"));
+                    }
+                }
+            }
+            Value::Array(arr) => {
+                for (idx, item) in arr.iter().enumerate() {
+                    assert_schema_is_flat(tool_name, provider, item, &format!("{path}[{idx}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn all_registered_tools_flatten_cleanly_for_ollama_and_gemini() {
+        let all_names: Vec<String> = tools::ALL_TOOL_NAMES
+            .iter()
+            .map(|&s| s.to_string())
+            .collect();
+        let raw_schemas = tools::schemas_for_tool_names(&all_names);
+        assert_eq!(raw_schemas.len(), tools::ALL_TOOL_NAMES.len());
+
+        let ollama_payload =
+            ollama::build_payload("test-model", &[], "", 4096, Some(raw_schemas.clone()));
+        let ollama_tools = ollama_payload["tools"].as_array().unwrap();
+        assert_eq!(ollama_tools.len(), tools::ALL_TOOL_NAMES.len());
+
+        for t in ollama_tools {
+            let name = t["function"]["name"].as_str().unwrap();
+            let params = &t["function"]["parameters"];
+            assert_schema_is_flat(name, "ollama", params, "parameters");
+        }
+
+        let gemini_payload = gemini::build_payload(&[], "", Some(raw_schemas));
+        let gemini_decls = gemini_payload["tools"][0]["functionDeclarations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(gemini_decls.len(), tools::ALL_TOOL_NAMES.len());
+
+        for decl in gemini_decls {
+            let name = decl["name"].as_str().unwrap();
+            let params = &decl["parameters"];
+            assert_schema_is_flat(name, "gemini", params, "parameters");
+        }
+
+        // Spot-check key tools for exact flattened shapes.
+        let find_ollama = |name: &str| {
+            ollama_tools
+                .iter()
+                .find(|t| t["function"]["name"] == name)
+                .map(|t| &t["function"]["parameters"])
+                .unwrap()
+        };
+        let find_gemini = |name: &str| {
+            gemini_decls
+                .iter()
+                .find(|d| d["name"] == name)
+                .map(|d| &d["parameters"])
+                .unwrap()
+        };
+
+        for tool_name in ["task", "todo"] {
+            for (provider, params) in [
+                ("ollama", find_ollama(tool_name)),
+                ("gemini", find_gemini(tool_name)),
+            ] {
+                let props = &params["properties"];
+                assert!(
+                    props.get("title").is_some(),
+                    "{provider} {tool_name} missing title"
+                );
+                assert_eq!(
+                    props["action"]["enum"],
+                    json!(["list", "add", "update", "remove", "clear"]),
+                    "{provider} {tool_name} action enum"
+                );
+                assert_eq!(
+                    props["status"]["type"],
+                    json!("string"),
+                    "{provider} {tool_name} status type"
+                );
+                assert_eq!(
+                    props["status"]["enum"],
+                    json!(["pending", "in_progress", "blocked"]),
+                    "{provider} {tool_name} status enum"
+                );
+                if provider == "gemini" {
+                    assert_eq!(props["status"]["nullable"], json!(true));
+                }
+            }
+        }
+
+        for (provider, params) in [
+            ("ollama", find_ollama("browser")),
+            ("gemini", find_gemini("browser")),
+        ] {
+            assert_eq!(
+                params["properties"]["source"]["type"],
+                json!("string"),
+                "{provider} browser.source type"
+            );
+            assert_eq!(
+                params["properties"]["source"]["enum"],
+                json!(["clipboard", "workspace_snapshot", "workspace_snapshot_tree"]),
+                "{provider} browser.source enum"
+            );
+        }
+
+        for (provider, params) in [
+            ("ollama", find_ollama("skill")),
+            ("gemini", find_gemini("skill")),
+        ] {
+            let arg_props = &params["properties"]["args"]["items"]["properties"];
+            assert!(
+                arg_props.get("type").is_some(),
+                "{provider} skill.args[].type missing"
+            );
+            assert!(
+                arg_props.get("default").is_some(),
+                "{provider} skill.args[].default missing"
+            );
+        }
+
+        for (provider, params) in [
+            ("ollama", find_ollama("edit_file")),
+            ("gemini", find_gemini("edit_file")),
+        ] {
+            let hunk_props = &params["properties"]["edits"]["items"]["properties"];
+            assert_eq!(
+                hunk_props["search_string"]["type"],
+                json!("string"),
+                "{provider} edit_file search_string"
+            );
+            assert_eq!(
+                hunk_props["replace_string"]["type"],
+                json!("string"),
+                "{provider} edit_file replace_string"
+            );
+        }
+    }
 }

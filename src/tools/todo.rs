@@ -22,31 +22,29 @@ pub enum TodoScope {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoAction {
-    /// List todo items (hides `done` items unless `include_done = true` or `status = "done"`).
+    /// List todo items for the selected `scope`.
     #[default]
     List,
     /// Add a single todo (`title`) or batch-add multiple todos (`items`).
     Add,
-    /// Update an existing todo's `status`, `title`, `priority`, or `notes` by `id`.
+    /// Update an existing todo's `status`, `title`, `priority`, or `notes` by `id`. (Use `remove` when finished; there is no `done` status.)
     Update,
-    /// Mark a todo as `done` by `id`.
-    Done,
-    /// Delete a todo permanently by `id`.
+    /// Remove a finished or unneeded todo by `id`.
     Remove,
-    /// Clear todos (pass `status = "done"` to clear only completed items, or omit to clear all).
+    /// Clear all todos for the selected `scope`.
     Clear,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
-    /// Not started.
+    /// Queued / not started.
     #[default]
     Pending,
-    /// In progress.
+    /// Actively being worked on.
     InProgress,
-    /// Completed.
-    Done,
+    /// Waiting on user input or an external decision.
+    Blocked,
 }
 
 impl TodoStatus {
@@ -54,14 +52,14 @@ impl TodoStatus {
         match self {
             Self::Pending => "pending",
             Self::InProgress => "in_progress",
-            Self::Done => "done",
+            Self::Blocked => "blocked",
         }
     }
 
     fn from_db(s: &str) -> Self {
         match s {
             "in_progress" => Self::InProgress,
-            "done" => Self::Done,
+            "blocked" => Self::Blocked,
             _ => Self::Pending,
         }
     }
@@ -70,7 +68,7 @@ impl TodoStatus {
         match self {
             Self::Pending => "[ ]",
             Self::InProgress => "[~]",
-            Self::Done => "[x]",
+            Self::Blocked => "[!]",
         }
     }
 }
@@ -117,7 +115,7 @@ pub struct NewTodoItem {
     /// Optional priority (`low`, `medium`, `high`). Defaults to `medium`.
     #[serde(default)]
     pub priority: TodoPriority,
-    /// Optional initial status (`pending`, `in_progress`, `done`). Defaults to `pending`.
+    /// Optional initial status (`pending`, `in_progress`, `blocked`). Defaults to `pending`.
     #[serde(default)]
     pub status: TodoStatus,
     /// Optional notes or context.
@@ -127,13 +125,13 @@ pub struct NewTodoItem {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TodoArgs {
-    /// Operation to perform: `list` (default), `add`, `update`, `done`, `remove`, or `clear`.
+    /// Operation to perform: `list` (default), `add`, `update`, `remove`, or `clear`.
     #[serde(default)]
     pub action: TodoAction,
     /// Backlog scope: `workspace` (default) or `global`.
     #[serde(default)]
     pub scope: TodoScope,
-    /// Todo ID (for `update`, `done`, or `remove`).
+    /// Todo ID (for `update` or `remove`).
     #[serde(default)]
     pub id: Option<i64>,
     /// Todo title (for single `add` or `update`).
@@ -142,12 +140,9 @@ pub struct TodoArgs {
     /// Batch of todos to add in a single call (for `add`).
     #[serde(default)]
     pub items: Vec<NewTodoItem>,
-    /// Todo status (`pending`, `in_progress`, `done`) for `add`, `update`, `list`, or `clear`.
+    /// Todo status (`pending`, `in_progress`, `blocked`) for `add`, `update`, or filtering `list`.
     #[serde(default)]
     pub status: Option<TodoStatus>,
-    /// Include completed (`done`) items when running `list` without a `status` filter.
-    #[serde(default)]
-    pub include_done: bool,
     /// Todo priority (`low`, `medium`, `high`) for `add` or `update`.
     #[serde(default)]
     pub priority: Option<TodoPriority>,
@@ -213,6 +208,10 @@ fn open_todo_db(config: &Config) -> Result<Connection> {
     )
     .context("Failed to initialize todos table")?;
 
+    // The `done` status no longer exists; remove legacy rows so finished
+    // todos don't resurface as `pending`.
+    conn.execute("DELETE FROM todos WHERE status = 'done'", params![])?;
+
     Ok(conn)
 }
 
@@ -220,7 +219,6 @@ fn fetch_todos(
     conn: &Connection,
     ws_key: &str,
     status_filter: Option<TodoStatus>,
-    include_done: bool,
 ) -> Result<Vec<TodoRow>> {
     let mut rows = Vec::new();
     let mut stmt = conn.prepare(
@@ -244,11 +242,9 @@ fn fetch_todos(
     })?;
 
     for item in iter.flatten() {
-        if let Some(filter) = status_filter {
-            if item.status != filter {
-                continue;
-            }
-        } else if !include_done && item.status == TodoStatus::Done {
+        if let Some(filter) = status_filter
+            && item.status != filter
+        {
             continue;
         }
         rows.push(item);
@@ -265,14 +261,23 @@ fn format_todo_list(rows: &[TodoRow], scope: TodoScope) -> String {
         return format!("No {scope_label} todos found.");
     }
 
-    let open = rows.iter().filter(|r| r.status != TodoStatus::Done).count();
-    let done = rows.iter().filter(|r| r.status == TodoStatus::Done).count();
-    let done_suffix = if done > 0 {
-        format!(", {done} done")
+    let in_prog = rows
+        .iter()
+        .filter(|r| r.status == TodoStatus::InProgress)
+        .count();
+    let blocked = rows
+        .iter()
+        .filter(|r| r.status == TodoStatus::Blocked)
+        .count();
+    let blocked_suffix = if blocked > 0 {
+        format!(", {blocked} blocked")
     } else {
         String::new()
     };
-    let mut out = format!("{scope_label} todos ({open} open{done_suffix}):\n");
+    let mut out = format!(
+        "{scope_label} todos ({} total, {in_prog} in progress{blocked_suffix}):\n",
+        rows.len()
+    );
 
     for r in rows {
         let _ = writeln!(
@@ -292,7 +297,7 @@ fn format_todo_list(rows: &[TodoRow], scope: TodoScope) -> String {
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "todo";
-    const DESCRIPTION: &'static str = "Manage a persistent workspace or global todo backlog (`list`, `add`, `update`, `done`, `remove`, `clear`). Passive tracker — does not trigger autoloop or inject into the system prompt.";
+    const DESCRIPTION: &'static str = "Manage a persistent workspace or global todo backlog (`list`, `add`, `update`, `remove`, `clear`). Passive tracker — does not trigger autoloop or inject into the system prompt.";
     type Args = TodoArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
@@ -302,7 +307,7 @@ impl BlockingTool for Tool {
 
         match args.action {
             TodoAction::List => {
-                let rows = fetch_todos(&conn, &ws_key, args.status, args.include_done)?;
+                let rows = fetch_todos(&conn, &ws_key, args.status)?;
                 Ok(format_todo_list(&rows, args.scope))
             }
             TodoAction::Add => {
@@ -349,7 +354,7 @@ impl BlockingTool for Tool {
                     added_ids.push(next_id);
                 }
 
-                let rows = fetch_todos(&conn, &ws_key, None, false)?;
+                let rows = fetch_todos(&conn, &ws_key, None)?;
                 let id_list = added_ids
                     .iter()
                     .map(|id| format!("#{id}"))
@@ -357,21 +362,6 @@ impl BlockingTool for Tool {
                     .join(", ");
                 Ok(format!(
                     "Added {id_list}.\n\n{}",
-                    format_todo_list(&rows, args.scope)
-                ))
-            }
-            TodoAction::Done => {
-                let id = args.id.context("`todo:done` requires `id`.")?;
-                let updated = conn.execute(
-                    "UPDATE todos SET status = 'done', updated_at = ?1 WHERE id = ?2 AND workspace = ?3",
-                    params![now, id, ws_key],
-                )?;
-                if updated == 0 {
-                    bail!("Todo #{id} not found.");
-                }
-                let rows = fetch_todos(&conn, &ws_key, None, false)?;
-                Ok(format!(
-                    "Marked todo #{id} as done.\n\n{}",
                     format_todo_list(&rows, args.scope)
                 ))
             }
@@ -407,7 +397,7 @@ impl BlockingTool for Tool {
                     params![new_title, new_status, new_priority, new_notes, now, id, ws_key],
                 )?;
 
-                let rows = fetch_todos(&conn, &ws_key, None, args.include_done)?;
+                let rows = fetch_todos(&conn, &ws_key, None)?;
                 Ok(format!(
                     "Updated todo #{id}.\n\n{}",
                     format_todo_list(&rows, args.scope)
@@ -422,21 +412,15 @@ impl BlockingTool for Tool {
                 if deleted == 0 {
                     bail!("Todo #{id} not found.");
                 }
-                let rows = fetch_todos(&conn, &ws_key, None, false)?;
+                let rows = fetch_todos(&conn, &ws_key, None)?;
                 Ok(format!(
                     "Removed todo #{id}.\n\n{}",
                     format_todo_list(&rows, args.scope)
                 ))
             }
             TodoAction::Clear => {
-                let deleted = if let Some(status) = args.status {
-                    conn.execute(
-                        "DELETE FROM todos WHERE workspace = ?1 AND status = ?2",
-                        params![ws_key, status.as_str()],
-                    )?
-                } else {
-                    conn.execute("DELETE FROM todos WHERE workspace = ?1", params![ws_key])?
-                };
+                let deleted =
+                    conn.execute("DELETE FROM todos WHERE workspace = ?1", params![ws_key])?;
                 Ok(format!("Cleared {deleted} todo(s)."))
             }
         }
@@ -461,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn backlog_add_done_filter_and_clear_done() {
+    fn backlog_add_update_remove_and_clear() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&tmp);
 
@@ -475,78 +459,59 @@ mod tests {
                     NewTodoItem {
                         title: "Refactor markdown parser".into(),
                         priority: TodoPriority::High,
-                        status: TodoStatus::Pending,
+                        status: TodoStatus::InProgress,
                         notes: "src/ui/markdown.rs".into(),
                     },
                     NewTodoItem {
                         title: "Add Windows clipboard".into(),
                         priority: TodoPriority::Low,
-                        status: TodoStatus::Pending,
-                        notes: String::new(),
+                        status: TodoStatus::Blocked,
+                        notes: "Waiting on test VM".into(),
                     },
                 ],
                 status: None,
-                include_done: false,
                 priority: None,
                 notes: None,
             },
             &ctx,
         )
         .unwrap();
-        assert!(added.contains("#1 [ ] [HIGH] Refactor markdown parser"));
-        assert!(added.contains("#2 [ ] [low] Add Windows clipboard"));
+        assert!(added.contains("#1 [~] [HIGH] Refactor markdown parser"));
+        assert!(added.contains("#2 [!] [low] Add Windows clipboard"));
+        assert!(added.contains("2 total, 1 in progress, 1 blocked"));
 
-        let done_res = Tool::execute(
+        let removed = Tool::execute(
             TodoArgs {
-                action: TodoAction::Done,
+                action: TodoAction::Remove,
                 scope: TodoScope::Workspace,
                 id: Some(1),
                 title: None,
                 items: vec![],
                 status: None,
-                include_done: false,
                 priority: None,
                 notes: None,
             },
             &ctx,
         )
         .unwrap();
-        assert!(done_res.contains("Marked todo #1 as done."));
-        assert!(!done_res.contains("Refactor markdown parser"));
+        assert!(removed.contains("Removed todo #1."));
+        assert!(!removed.contains("Refactor markdown parser"));
+        assert!(removed.contains("1 total"));
 
-        let listed_all = Tool::execute(
-            TodoArgs {
-                action: TodoAction::List,
-                scope: TodoScope::Workspace,
-                id: None,
-                title: None,
-                items: vec![],
-                status: None,
-                include_done: true,
-                priority: None,
-                notes: None,
-            },
-            &ctx,
-        )
-        .unwrap();
-        assert!(listed_all.contains("#1 [x] [HIGH] Refactor markdown parser"));
-        assert!(listed_all.contains("1 open, 1 done"));
-
-        let cleared_done = Tool::execute(
+        let cleared = Tool::execute(
             TodoArgs {
                 action: TodoAction::Clear,
                 scope: TodoScope::Workspace,
                 id: None,
                 title: None,
                 items: vec![],
-                status: Some(TodoStatus::Done),
-                include_done: false,
+                status: None,
                 priority: None,
                 notes: None,
             },
             &ctx,
         )
         .unwrap();
-        assert!(cleared_done.contains("Cleared 1 todo(s)."));
+        assert!(cleared.contains("Cleared 1 todo(s)."));
     }
 }

@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info};
@@ -46,169 +46,22 @@ pub async fn run_preflight(model: &str, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn inline_schema_refs(val: &mut Value, defs: &Map<String, Value>, depth: usize) {
-    if depth > 16 {
-        return;
-    }
-    match val {
-        Value::Object(obj) => {
-            if let Some(ref_str) = obj
-                .remove("$ref")
-                .and_then(|v| v.as_str().map(String::from))
-                && let Some(name) = ref_str
-                    .strip_prefix("#/$defs/")
-                    .or_else(|| ref_str.strip_prefix("#/definitions/"))
-                && let Some(Value::Object(target_obj)) = defs.get(name).cloned()
-            {
-                for (k, v) in target_obj {
-                    obj.entry(k).or_insert(v);
-                }
-            }
-            for v in obj.values_mut() {
-                inline_schema_refs(v, defs, depth + 1);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                inline_schema_refs(v, defs, depth + 1);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn extract_string_enum_variants(items: &[Value]) -> Option<Vec<Value>> {
-    let mut variants = Vec::new();
-    for item in items {
-        let obj = item.as_object()?;
-        if let Some(c) = obj.get("const").and_then(Value::as_str) {
-            variants.push(Value::String(c.to_string()));
-        } else {
-            let arr = obj.get("enum").and_then(Value::as_array)?;
-            if !arr.iter().all(Value::is_string) {
-                return None;
-            }
-            variants.extend_from_slice(arr);
-        }
-    }
-    (!variants.is_empty()).then_some(variants)
-}
+const GEMINI_STRIP_KEYS: &[&str] = &[
+    "$schema",
+    "$defs",
+    "definitions",
+    "$ref",
+    "title",
+    "additionalProperties",
+    "format",
+    "default",
+    "examples",
+    "minimum",
+    "maximum",
+];
 
 fn sanitize_schema_for_gemini(val: &mut Value) {
-    let mut root_defs = Map::new();
-    if let Some(obj) = val.as_object_mut() {
-        for key in ["$defs", "definitions"] {
-            if let Some(Value::Object(d)) = obj.remove(key) {
-                root_defs.extend(d);
-            }
-        }
-    }
-    if !root_defs.is_empty() {
-        inline_schema_refs(val, &root_defs, 0);
-    }
-    sanitize_schema_node(val);
-}
-
-fn sanitize_schema_node(val: &mut Value) {
-    match val {
-        Value::Object(obj) => {
-            for k in [
-                "$schema",
-                "$defs",
-                "definitions",
-                "$ref",
-                "title",
-                "additionalProperties",
-                "format",
-                "default",
-                "examples",
-                "minimum",
-                "maximum",
-            ] {
-                obj.remove(k);
-            }
-
-            if let Some(s) = obj
-                .remove("const")
-                .and_then(|v| v.as_str().map(String::from))
-            {
-                obj.insert("type".into(), json!("string"));
-                obj.insert("enum".into(), json!([s]));
-            }
-
-            if let Some(Value::Array(types)) = obj.get("type").cloned() {
-                let orig_len = types.len();
-                let mut non_null: Vec<Value> = types
-                    .into_iter()
-                    .filter(|t| t.as_str() != Some("null"))
-                    .collect();
-                let had_null = non_null.len() < orig_len;
-                if let Some(first) = non_null.pop() {
-                    obj.insert("type".into(), first);
-                    if had_null {
-                        obj.insert("nullable".into(), Value::Bool(true));
-                    }
-                }
-            }
-
-            for key in ["oneOf", "anyOf"] {
-                let Some(Value::Array(variants)) = obj.get(key).cloned() else {
-                    continue;
-                };
-                let orig_len = variants.len();
-                let non_null: Vec<Value> = variants
-                    .into_iter()
-                    .filter(|i| {
-                        i.get("type").and_then(Value::as_str) != Some("null")
-                            && i.get("const") != Some(&Value::Null)
-                    })
-                    .collect();
-                let had_null = non_null.len() < orig_len;
-
-                let replaced = if let Some(enum_vals) = extract_string_enum_variants(&non_null) {
-                    obj.insert("type".into(), json!("string"));
-                    obj.insert("enum".into(), Value::Array(enum_vals));
-                    true
-                } else if non_null.len() == 1
-                    && let Some(Value::Object(inner)) = non_null.into_iter().next()
-                {
-                    for (k, v) in inner {
-                        obj.entry(k).or_insert(v);
-                    }
-                    true
-                } else {
-                    false
-                };
-
-                if replaced {
-                    obj.remove(key);
-                    if had_null {
-                        obj.insert("nullable".into(), Value::Bool(true));
-                    }
-                }
-            }
-
-            for (k, v) in obj.iter_mut() {
-                if (k == "properties" || k == "patternProperties") && v.is_object() {
-                    // The keys here are property *names*, not schema keywords.
-                    // Only sanitize each property's schema, not the mapping itself.
-                    if let Some(props) = v.as_object_mut() {
-                        for prop_schema in props.values_mut() {
-                            sanitize_schema_node(prop_schema);
-                        }
-                    }
-                } else {
-                    sanitize_schema_node(v);
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                sanitize_schema_node(v);
-            }
-        }
-        _ => {}
-    }
+    super::flatten_tool_schema(val, GEMINI_STRIP_KEYS, true);
 }
 
 pub fn build_payload(
@@ -635,7 +488,7 @@ mod tests {
             }
         });
 
-        sanitize_schema_node(&mut schema);
+        sanitize_schema_for_gemini(&mut schema);
 
         // The `title` property must still exist in `properties`.
         let props = schema["items"]["properties"].as_object().unwrap();
@@ -673,7 +526,7 @@ mod tests {
             }
         });
 
-        sanitize_schema_node(&mut schema);
+        sanitize_schema_for_gemini(&mut schema);
 
         // Top-level `title` (string value) should be stripped.
         assert!(schema.get("title").is_none());
@@ -683,5 +536,40 @@ mod tests {
         assert!(name_schema.get("default").is_none(), "inner default should be stripped");
         // The `name` property must still exist.
         assert!(schema["properties"].as_object().unwrap().contains_key("name"));
+    }
+
+    #[test]
+    fn sanitize_flattens_optional_documented_enum() {
+        let mut schema = json!({
+            "type": "object",
+            "$defs": {
+                "TaskStatus": {
+                    "oneOf": [
+                        { "type": "string", "const": "pending", "description": "Queued." },
+                        { "type": "string", "const": "in_progress", "description": "Active." },
+                        { "type": "string", "const": "blocked", "description": "Waiting." }
+                    ]
+                }
+            },
+            "properties": {
+                "status": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/TaskStatus" },
+                        { "type": "null" }
+                    ],
+                    "default": null,
+                    "description": "Task status"
+                }
+            }
+        });
+
+        sanitize_schema_for_gemini(&mut schema);
+
+        let status = &schema["properties"]["status"];
+        assert_eq!(status["type"], json!("string"));
+        assert_eq!(status["enum"], json!(["pending", "in_progress", "blocked"]));
+        assert_eq!(status["nullable"], json!(true));
+        assert!(status.get("oneOf").is_none());
+        assert!(status.get("anyOf").is_none());
     }
 }
