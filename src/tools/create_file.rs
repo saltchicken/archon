@@ -10,13 +10,15 @@ pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CreateFileArgs {
+    /// Relative path for the brand-new file in the workspace (must not already exist).
     file_path: String,
+    /// Complete initial contents of the new file.
     content: String,
 }
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "create_file";
-    const DESCRIPTION: &'static str = "Create a new file in the workspace.";
+    const DESCRIPTION: &'static str = "Create a brand-new file in the workspace. Fails if the file already exists—always use `edit_file` to modify or overwrite existing files, and check with `read_file` or `search` first if unsure whether a file exists.";
     type Args = CreateFileArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
