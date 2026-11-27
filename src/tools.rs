@@ -1,6 +1,7 @@
 mod approval;
 pub(crate) mod browser;
 mod cargo;
+mod clipboard;
 mod create_file;
 mod curl;
 mod dotfiles;
@@ -868,6 +869,7 @@ pub fn call_signature(call: &ToolCall) -> String {
             ("memory", "get") => "read",
             ("memory", "delete" | "rm") => "remove",
             ("dotfiles", "revert" | "checkout") => "restore",
+            ("clipboard", "") => "read",
             (_, r) => r,
         }
     } else {
@@ -994,6 +996,7 @@ pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
         ],
         "schedule" => &["list", "logs", "run", "sync", "clean"],
         "sqlite" => &["tables", "schema", "query"],
+        "clipboard" => &["read", "write", "read_image", "write_image", "clear"],
         "task" => &["list", "add", "update", "remove", "clear"],
         "todo" => &["list", "add", "update", "remove", "clear"],
         _ => &[],
@@ -1012,6 +1015,7 @@ pub fn tool_param_hint(tool_name: &str) -> &'static str {
         "cargo" => {
             "[check|clippy|test|fmt_check|fmt|doc|metadata|info|tree] [package=...] [bin=...]"
         }
+        "clipboard" => "[read|write|read_image|write_image|clear] [text=...] [file_path=...]",
         "git" => "[status|diff|log|show|blame|branch|add|...] [target=...] [path=...]",
         "fs" => "[list|rename|copy|remove] [path=...] [destination=...]",
         "fetch_url" => "<url> [raw=true|false]",
@@ -1058,6 +1062,7 @@ pub fn tool_short_summary(tool_name: &str) -> &'static str {
         "cargo" => {
             "Run Cargo commands (check, clippy, test, fmt, build, doc, metadata, info, tree, add, update)."
         }
+        "clipboard" => "Read, write, or clear text and images in the system clipboard.",
         "create_file" => "Create a new file in the workspace.",
         "curl" => {
             "Make HTTP requests (GET/POST/PUT/PATCH/DELETE) with custom headers, body, or JSON."
@@ -1389,6 +1394,7 @@ macro_rules! register_tools {
 register_tools! {
     async: browser,
     async: cargo,
+    blocking: clipboard,
     blocking: create_file,
     blocking: dotfiles,
     blocking: edit_file,

@@ -23,7 +23,14 @@ pub const BUILTIN_TOOL_GROUPS: &[(&str, &[&str])] = &[
     ("web", &["fetch_url", "curl", "browser"]),
     (
         "sysadmin",
-        &["system", "dotfiles", "process", "schedule", "notify"],
+        &[
+            "system",
+            "dotfiles",
+            "process",
+            "schedule",
+            "notify",
+            "clipboard",
+        ],
     ),
     ("data", &["sqlite", "memory", "session"]),
     ("planning", &["task", "todo"]),

@@ -2,14 +2,18 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{ImageBuffer, ImageFormat, Rgba};
 use std::{
+    borrow::Cow,
     fs,
-    io::Read,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
 use wl_clipboard_rs::{
-    copy::{MimeType as CopyMimeType, Options as CopyOptions, Source as CopySource},
+    copy::{
+        ClipboardType as CopyClipboardType, MimeType as CopyMimeType, Options as CopyOptions,
+        Seat as CopySeat, Source as CopySource, clear as wl_clear,
+    },
     paste::{ClipboardType, MimeType, Seat, get_contents},
 };
 
@@ -45,6 +49,87 @@ pub fn read_text_from_clipboard() -> Result<String> {
         bail!("Clipboard is empty");
     }
     Ok(text)
+}
+
+pub fn read_image_from_clipboard() -> Result<image::DynamicImage> {
+    if let Some(bytes) = read_wayland_clipboard_image() {
+        return image::load_from_memory(&bytes)
+            .context("Failed to decode image from Wayland clipboard");
+    }
+
+    if let Some(buffer) = arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_image().ok())
+        .and_then(|img| {
+            ImageBuffer::<Rgba<u8>, _>::from_raw(
+                img.width as u32,
+                img.height as u32,
+                img.bytes.into_owned(),
+            )
+        })
+    {
+        return Ok(image::DynamicImage::ImageRgba8(buffer));
+    }
+
+    bail!("No valid image found in clipboard")
+}
+
+pub fn clear_clipboard() -> Result<()> {
+    if wl_clear(CopyClipboardType::Regular, CopySeat::All).is_ok() {
+        return Ok(());
+    }
+
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.clear())
+        .context("Failed to clear clipboard")
+}
+
+pub fn copy_image_to_clipboard(path: &Path) -> Result<(u32, u32)> {
+    let img =
+        image::open(path).with_context(|| format!("Cannot open image: {}", path.display()))?;
+    let dims = (img.width(), img.height());
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let mut png_bytes = Vec::new();
+        img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
+            .context("Failed to encode image as PNG")?;
+
+        if CopyOptions::new()
+            .copy(
+                CopySource::Bytes(png_bytes.into_boxed_slice()),
+                CopyMimeType::Specific("image/png".into()),
+            )
+            .is_ok()
+        {
+            return Ok(dims);
+        }
+    }
+
+    let rgba = img.to_rgba8();
+    let img_data = arboard::ImageData {
+        width: dims.0 as usize,
+        height: dims.1 as usize,
+        bytes: Cow::Owned(rgba.into_raw()),
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_image(img_data))
+        .context("Failed to copy image to clipboard")?;
+    Ok(dims)
+}
+
+fn read_wayland_clipboard_image() -> Option<Vec<u8>> {
+    ["image/png", "image/jpeg", "image/webp", "image/bmp"]
+        .into_iter()
+        .find_map(|mime| {
+            let (mut pipe, _) = get_contents(
+                ClipboardType::Regular,
+                Seat::Unspecified,
+                MimeType::Specific(mime),
+            )
+            .ok()?;
+            let mut buf = Vec::new();
+            (pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty()).then_some(buf)
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -108,45 +193,8 @@ impl ImageStaging {
 
     pub fn paste_clipboard(&self) -> Result<PathBuf> {
         let out_path = self.gen_path("paste");
-
-        if let Some(bytes) = Self::read_wayland_clipboard_image() {
-            image::load_from_memory(&bytes)
-                .context("Failed to decode image from Wayland clipboard")?
-                .save_with_format(&out_path, ImageFormat::Png)?;
-            return Ok(out_path);
-        }
-
-        if let Some(buffer) = arboard::Clipboard::new()
-            .ok()
-            .and_then(|mut cb| cb.get_image().ok())
-            .and_then(|img| {
-                ImageBuffer::<Rgba<u8>, _>::from_raw(
-                    img.width as u32,
-                    img.height as u32,
-                    img.bytes.into_owned(),
-                )
-            })
-        {
-            buffer.save_with_format(&out_path, ImageFormat::Png)?;
-            return Ok(out_path);
-        }
-
-        bail!("No valid image found in clipboard")
-    }
-
-    fn read_wayland_clipboard_image() -> Option<Vec<u8>> {
-        ["image/png", "image/jpeg", "image/webp", "image/bmp"]
-            .into_iter()
-            .find_map(|mime| {
-                let (mut pipe, _) = get_contents(
-                    ClipboardType::Regular,
-                    Seat::Unspecified,
-                    MimeType::Specific(mime),
-                )
-                .ok()?;
-                let mut buf = Vec::new();
-                (pipe.read_to_end(&mut buf).is_ok() && !buf.is_empty()).then_some(buf)
-            })
+        read_image_from_clipboard()?.save_with_format(&out_path, ImageFormat::Png)?;
+        Ok(out_path)
     }
 
     pub fn import_file(&self, src: impl AsRef<Path>) -> Result<PathBuf> {
