@@ -15,10 +15,13 @@ fn push_unique_string(vec: &mut Vec<String>, item: &str) {
     }
 }
 
-fn expand_skill_tool_token(token: &str) -> Vec<String> {
+fn expand_skill_tool_token(
+    token: &str,
+    custom_groups: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
     let trimmed = token.trim();
     if let Some(group_key) = trimmed.strip_prefix('@')
-        && let Some(members) = crate::tools::resolve_tool_group(group_key, &BTreeMap::new())
+        && let Some(members) = crate::tools::resolve_tool_group(group_key, custom_groups)
     {
         return members;
     }
@@ -85,6 +88,7 @@ fn resolve_skill_at(
     raw: &[SkillDefinition],
     name_index: &HashMap<String, usize>,
     cmd_index: &HashMap<String, usize>,
+    custom_groups: &BTreeMap<String, Vec<String>>,
     memo: &mut [Option<SkillDefinition>],
     visiting: &mut Vec<usize>,
 ) -> SkillDefinition {
@@ -96,14 +100,14 @@ fn resolve_skill_at(
     if child.extends.is_empty() {
         let mut resolved = child.clone();
         // Strip any stray `!tool` negations from a root skill without parents,
-        // and expand any built-in `@group` entries.
+        // and expand any `@group` entries.
         let mut expanded_tools = Vec::new();
         for raw_t in &resolved.tools {
             let t = raw_t.trim();
             if t.is_empty() || t.starts_with('!') {
                 continue;
             }
-            for item in expand_skill_tool_token(t) {
+            for item in expand_skill_tool_token(t, custom_groups) {
                 push_unique_string(&mut expanded_tools, &item);
             }
         }
@@ -169,7 +173,15 @@ fn resolve_skill_at(
             continue;
         }
 
-        let parent = resolve_skill_at(p_idx, raw, name_index, cmd_index, memo, visiting);
+        let parent = resolve_skill_at(
+            p_idx,
+            raw,
+            name_index,
+            cmd_index,
+            custom_groups,
+            memo,
+            visiting,
+        );
         for err in &parent.resolution_errors {
             push_unique_string(&mut errors, err);
         }
@@ -220,7 +232,7 @@ fn resolve_skill_at(
             if neg.is_empty() {
                 continue;
             }
-            for item in expand_skill_tool_token(neg) {
+            for item in expand_skill_tool_token(neg, custom_groups) {
                 merged_tools.retain(|t| !t.eq_ignore_ascii_case(&item));
                 if !tools_restricted || merged_tools.iter().any(|t| t == "*") {
                     push_unique_string(&mut excluded_tools, &item);
@@ -231,7 +243,7 @@ fn resolve_skill_at(
             excluded_tools.clear();
         } else if !trimmed.is_empty() {
             tools_restricted = true;
-            for item in expand_skill_tool_token(trimmed) {
+            for item in expand_skill_tool_token(trimmed, custom_groups) {
                 push_unique_string(&mut merged_tools, &item);
                 excluded_tools.retain(|ex| !ex.eq_ignore_ascii_case(&item));
             }
@@ -380,8 +392,12 @@ pub fn replace_super_placeholder(prompt: &str, base: &str) -> Option<String> {
     Some(out)
 }
 
-/// Resolves `extends` inheritance chains across a vector of parsed skills.
-pub fn resolve_skills(raw: Vec<SkillDefinition>) -> Vec<SkillDefinition> {
+/// Resolves `extends` inheritance chains across a vector of parsed skills,
+/// expanding built-in and custom `[tool_groups]` entries in `tools`.
+pub fn resolve_skills_with_groups(
+    raw: Vec<SkillDefinition>,
+    custom_groups: &BTreeMap<String, Vec<String>>,
+) -> Vec<SkillDefinition> {
     let mut name_index = HashMap::with_capacity(raw.len());
     let mut cmd_index = HashMap::new();
     for (idx, skill) in raw.iter().enumerate() {
@@ -396,8 +412,24 @@ pub fn resolve_skills(raw: Vec<SkillDefinition>) -> Vec<SkillDefinition> {
     let mut memo: Vec<Option<SkillDefinition>> = vec![None; raw.len()];
     let mut visiting = Vec::new();
     (0..raw.len())
-        .map(|i| resolve_skill_at(i, &raw, &name_index, &cmd_index, &mut memo, &mut visiting))
+        .map(|i| {
+            resolve_skill_at(
+                i,
+                &raw,
+                &name_index,
+                &cmd_index,
+                custom_groups,
+                &mut memo,
+                &mut visiting,
+            )
+        })
         .collect()
+}
+
+/// Resolves `extends` inheritance chains across a vector of parsed skills
+/// using built-in `@group` definitions only.
+pub fn resolve_skills(raw: Vec<SkillDefinition>) -> Vec<SkillDefinition> {
+    resolve_skills_with_groups(raw, &BTreeMap::new())
 }
 
 pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {

@@ -327,15 +327,14 @@ fn sync_schedules(config: &Config, global: bool) -> Result<String> {
         if sched.prompt.trim().is_empty() {
             bail!("Schedule '{name}' is missing `prompt`.");
         }
-        if let Some(ref tools) = sched.enabled_tools {
-            for t in tools.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                if t != "*" && !crate::tools::is_known_tool_or_group(t, &config.tool_groups) {
-                    bail!(
-                        "Schedule '{name}' specifies unknown tool/group '{t}' in `enabled_tools`. {}",
-                        crate::tools::format_valid_tools_and_groups(&config.tool_groups)
-                    );
-                }
-            }
+        if let Some(ref tools) = sched.enabled_tools
+            && let Err(unknown) = crate::tools::expand_tool_spec_checked(tools, &config.tool_groups)
+        {
+            bail!(
+                "Schedule '{name}' specifies unknown tool/group(s) in `enabled_tools`: {}. {}",
+                unknown.join(", "),
+                crate::tools::format_valid_tools_and_groups(&config.tool_groups)
+            );
         }
         validate_on_calendar(cal)?;
 

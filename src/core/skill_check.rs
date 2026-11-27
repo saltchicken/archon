@@ -5,7 +5,7 @@ use crate::{
         schema_utils,
         skills::{
             HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType, SkillDefinition, SkillHook,
-            TemplateContext, inspect_template, interpolate_hook_args, resolve_skills,
+            TemplateContext, inspect_template, interpolate_hook_args, resolve_skills_with_groups,
             scan_skills_dir, upsert_skill_by_name, validate_arg_json_value,
         },
     },
@@ -703,7 +703,7 @@ pub fn check_scanned_registry(
         def.scope = MemoryScope::Global;
         upsert_skill_by_name(&mut global_defs, def);
     }
-    let resolved_global = resolve_skills(global_defs.clone());
+    let resolved_global = resolve_skills_with_groups(global_defs.clone(), &config.tool_groups);
 
     // Build merged raw definitions (workspace overrides global by name for workspace `extends` resolution).
     let mut merged_defs: Vec<SkillDefinition> = global_defs.clone();
@@ -721,7 +721,7 @@ pub fn check_scanned_registry(
         upsert_skill_by_name(&mut merged_defs, def);
     }
 
-    let resolved_merged = resolve_skills(merged_defs.clone());
+    let resolved_merged = resolve_skills_with_groups(merged_defs.clone(), &config.tool_groups);
     let clean_filter = name_filter
         .map(|f| f.trim().trim_start_matches('@'))
         .filter(|f| !f.is_empty());
@@ -797,10 +797,12 @@ pub fn check_scanned_registry(
                     } else {
                         tmp_defs.push(single);
                     }
-                    owned_resolved = resolve_skills(tmp_defs).into_iter().find(|r| {
-                        r.name.eq_ignore_ascii_case(&d.name)
-                            && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
-                    });
+                    owned_resolved = resolve_skills_with_groups(tmp_defs, &config.tool_groups)
+                        .into_iter()
+                        .find(|r| {
+                            r.name.eq_ignore_ascii_case(&d.name)
+                                && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
+                        });
                     owned_resolved.as_ref()
                 }
                 None => None,
@@ -908,36 +910,52 @@ pub fn check_scanned_registry(
                         "Tool negation '{trimmed}' has no effect on a skill without `extends`"
                     )));
                 }
-                if neg_name.is_empty() || !tools::is_known_tool_or_group(neg_name, &BTreeMap::new())
+                if neg_name.is_empty()
+                    || !tools::is_known_tool_or_group(neg_name, &config.tool_groups)
                 {
                     diagnostics.push(SkillDiagnostic::error(format!(
                         "Unknown tool '{neg_name}' in negated `tools` entry '{trimmed}' ({})",
-                        tools::format_valid_tools_and_groups(&BTreeMap::new())
+                        tools::format_valid_tools_and_groups(&config.tool_groups)
                     )));
+                } else if let Some(neg_group) = neg_name.strip_prefix('@')
+                    && let Some(members) = tools::resolve_tool_group(neg_group, &config.tool_groups)
+                {
+                    for member in members {
+                        if !ALL_TOOL_NAMES.contains(&member.as_str()) {
+                            diagnostics.push(SkillDiagnostic::error(format!(
+                                "Unknown tool/group '{member}' (from negated group '{trimmed}') in `tools` ({})",
+                                tools::format_valid_tools_and_groups(&config.tool_groups)
+                            )));
+                        }
+                    }
                 }
             } else if let Some(group_key) = trimmed.strip_prefix('@') {
-                if let Some(members) = tools::resolve_tool_group(group_key, &BTreeMap::new()) {
-                    if check_enabled {
-                        for member in members {
-                            if !tools::is_tool_enabled(&member, config)
-                                && warned_disabled_tools.insert(member.clone())
-                            {
-                                diagnostics.push(SkillDiagnostic::warning(format!(
-                                    "Tool '{member}' (from group '{trimmed}') is not enabled in current config (`app.enabled_tools`)"
-                                )));
-                            }
+                if let Some(members) = tools::resolve_tool_group(group_key, &config.tool_groups) {
+                    for member in members {
+                        if !ALL_TOOL_NAMES.contains(&member.as_str()) {
+                            diagnostics.push(SkillDiagnostic::error(format!(
+                                "Unknown tool/group '{member}' (from group '{trimmed}') in `tools` ({})",
+                                tools::format_valid_tools_and_groups(&config.tool_groups)
+                            )));
+                        } else if check_enabled
+                            && !tools::is_tool_enabled(&member, config)
+                            && warned_disabled_tools.insert(member.clone())
+                        {
+                            diagnostics.push(SkillDiagnostic::warning(format!(
+                                "Tool '{member}' (from group '{trimmed}') is not enabled in current config (`app.enabled_tools`)"
+                            )));
                         }
                     }
                 } else {
                     diagnostics.push(SkillDiagnostic::error(format!(
                         "Unknown tool group '{trimmed}' in `tools` ({})",
-                        tools::format_valid_tools_and_groups(&BTreeMap::new())
+                        tools::format_valid_tools_and_groups(&config.tool_groups)
                     )));
                 }
             } else if !ALL_TOOL_NAMES.contains(&trimmed) {
                 diagnostics.push(SkillDiagnostic::error(format!(
                     "Unknown tool '{trimmed}' in `tools` ({})",
-                    tools::format_valid_tools_and_groups(&BTreeMap::new())
+                    tools::format_valid_tools_and_groups(&config.tool_groups)
                 )));
             } else if check_enabled
                 && !tools::is_tool_enabled(trimmed, config)
@@ -1207,9 +1225,17 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
                 if !d.exists() {
                     bail!("Skills directory does not exist: {}", d.display());
                 }
-                crate::core::skills::discover_skills(&d.to_string_lossy(), None)
+                crate::core::skills::discover_skills_with_groups(
+                    &d.to_string_lossy(),
+                    None,
+                    &config.tool_groups,
+                )
             } else if global {
-                crate::core::skills::discover_skills(&config.app.skills_dir, None)
+                crate::core::skills::discover_skills_with_groups(
+                    &config.app.skills_dir,
+                    None,
+                    &config.tool_groups,
+                )
             } else {
                 config.skills.clone()
             };

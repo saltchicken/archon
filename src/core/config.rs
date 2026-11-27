@@ -811,9 +811,10 @@ impl Config {
         cfg.global_memory = global_memory;
         cfg.workspace_memory = workspace_memory;
         cfg.provenance = provenance;
-        cfg.skills = crate::core::skills::discover_skills(
+        cfg.skills = crate::core::skills::discover_skills_with_groups(
             &cfg.app.skills_dir,
             Some(ws_skills_dir.as_path()),
+            &cfg.tool_groups,
         );
         cfg.workspace_skills_dir = Some(ws_skills_dir);
         (cfg, err)

@@ -14,6 +14,7 @@ pub struct Tool;
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadToolsArgs {
     /// Tool names (e.g. `["git", "cargo"]`) and/or `@group` names (e.g. `["@git", "@web"]`) to activate so their full schemas are included on subsequent turns.
+    #[serde(deserialize_with = "super::utils::serde_helpers::deserialize_string_list")]
     pub names: Vec<String>,
 }
 
@@ -133,9 +134,29 @@ pub fn resolve_load_tools_request(
         bail!("{}", parts.join(" "));
     }
 
+    // Reject single requests that exceed the available dynamic slot budget so we never
+    // immediately evict newly requested tools in the same call.
+    let core_count = super::core_regular_tools_for_turn(config, session_tools, active_skill).len();
+    if config.app.max_loaded_tools > 0 {
+        let dynamic_cap = config
+            .app
+            .max_loaded_tools
+            .saturating_sub(core_count)
+            .max(1);
+        if newly_loaded.len() > dynamic_cap {
+            bail!(
+                "Requested {} tool(s) ({}), which exceeds the dynamic tool slot budget ({} slot(s) available with max_loaded_tools={} and {} core tool(s)). Load fewer tools at once or raise `app.max_loaded_tools`.",
+                newly_loaded.len(),
+                newly_loaded.join(", "),
+                dynamic_cap,
+                config.app.max_loaded_tools,
+                core_count
+            );
+        }
+    }
+
     // Preview FIFO evictions without mutating the caller's state.
     let mut preview_state = session_tools.clone();
-    let core_count = super::core_regular_tools_for_turn(config, session_tools, active_skill).len();
     let evicted =
         preview_state.apply_loaded(&newly_loaded, core_count, config.app.max_loaded_tools);
 

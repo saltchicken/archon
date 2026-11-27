@@ -50,6 +50,13 @@ fn lookup_raw_group_members<'a>(
         .map(|(_, members)| members.to_vec())
 }
 
+fn canonical_tool_name(raw: &str) -> Option<&'static str> {
+    ALL_TOOL_NAMES
+        .iter()
+        .copied()
+        .find(|&name| name.eq_ignore_ascii_case(raw))
+}
+
 fn resolve_group_recursive(
     key: &str,
     custom_groups: &BTreeMap<String, Vec<String>>,
@@ -74,8 +81,13 @@ fn resolve_group_recursive(
         }
         if let Some(sub) = item.strip_prefix('@') {
             let sub_key = sub.trim();
-            if !sub_key.is_empty() {
-                resolve_group_recursive(sub_key, custom_groups, visiting, out);
+            if !sub_key.is_empty()
+                && !resolve_group_recursive(sub_key, custom_groups, visiting, out)
+            {
+                let unresolved = format!("@{sub_key}");
+                if !out.iter().any(|existing| existing == &unresolved) {
+                    out.push(unresolved);
+                }
             }
         } else if item == "*" {
             for &name in ALL_TOOL_NAMES {
@@ -83,8 +95,11 @@ fn resolve_group_recursive(
                     out.push(name.to_string());
                 }
             }
-        } else if !out.iter().any(|existing| existing == item) {
-            out.push(item.to_string());
+        } else {
+            let canonical = canonical_tool_name(item).unwrap_or(item);
+            if !out.iter().any(|existing| existing == canonical) {
+                out.push(canonical.to_string());
+            }
         }
     }
 
@@ -122,13 +137,16 @@ pub fn expand_tool_list(
         if let Some(group_key) = item.strip_prefix('@') {
             if let Some(members) = resolve_tool_group(group_key, custom_groups) {
                 for m in members {
-                    if !out.iter().any(|existing| existing == &m) {
+                    if !m.starts_with('@') && !out.iter().any(|existing| existing == &m) {
                         out.push(m);
                     }
                 }
             }
-        } else if !out.iter().any(|existing| existing == item) {
-            out.push(item.to_string());
+        } else {
+            let canonical = canonical_tool_name(item).unwrap_or(item);
+            if !out.iter().any(|existing| existing == canonical) {
+                out.push(canonical.to_string());
+            }
         }
     }
     out

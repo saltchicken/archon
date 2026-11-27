@@ -11,7 +11,8 @@ use crate::core::{
     skill_check,
     skills::{
         HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
-        parse_skill_markdown_detailed, resolve_skills, scan_skills_dir, split_toml_frontmatter,
+        parse_skill_markdown_detailed, resolve_skills_with_groups, scan_skills_dir,
+        split_toml_frontmatter,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -430,14 +431,16 @@ fn table_args(table: &toml::Table) -> Option<Vec<SkillArgDef>> {
     val.try_into::<Vec<SkillArgDef>>().ok()
 }
 
-fn check_unknown_tools(tools: &[String]) -> Option<String> {
-    let empty_groups = std::collections::BTreeMap::new();
+fn check_unknown_tools(
+    tools: &[String],
+    custom_groups: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Option<String> {
     let unknown: Vec<&str> = tools
         .iter()
         .map(String::as_str)
         .map(str::trim)
         .map(|t| t.strip_prefix('!').unwrap_or(t).trim())
-        .filter(|&t| !t.is_empty() && t != "*" && !super::is_known_tool_or_group(t, &empty_groups))
+        .filter(|&t| !t.is_empty() && t != "*" && !super::is_known_tool_or_group(t, custom_groups))
         .collect();
     if unknown.is_empty() {
         None
@@ -445,7 +448,7 @@ fn check_unknown_tools(tools: &[String]) -> Option<String> {
         Some(format!(
             "[Note: unrecognized tool name(s) in `tools`: {}. {}]",
             unknown.join(", "),
-            super::format_valid_tools_and_groups(&empty_groups)
+            super::format_valid_tools_and_groups(custom_groups)
         ))
     }
 }
@@ -532,13 +535,18 @@ fn merge_and_format_skill_doc(
     )
 }
 
-fn append_unknown_tools_note(msg: &mut String, doc: &str, path: &Path) {
+fn append_unknown_tools_note(
+    msg: &mut String,
+    doc: &str,
+    path: &Path,
+    custom_groups: &std::collections::BTreeMap<String, Vec<String>>,
+) {
     if let Ok((table, _)) = validate_and_parse_skill_doc(doc, path) {
         let mut all_tools = table_string_vec(&table, "tools").unwrap_or_default();
         if let Some(hooks) = table_hooks(&table) {
             all_tools.extend(hooks.into_iter().map(|h| h.tool));
         }
-        if let Some(note) = check_unknown_tools(&all_tools) {
+        if let Some(note) = check_unknown_tools(&all_tools, custom_groups) {
             let _ = write!(msg, "\n{note}");
         }
     }
@@ -726,7 +734,7 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
 
     // Resolve global skills against global only, and workspace skills against merged global+workspace.
     let global_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Global) {
-        resolve_skills(raw_global.clone())
+        resolve_skills_with_groups(raw_global.clone(), &ctx.config.tool_groups)
     } else {
         Vec::new()
     };
@@ -745,7 +753,7 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
                 merged.push(ws);
             }
         }
-        resolve_skills(merged)
+        resolve_skills_with_groups(merged, &ctx.config.tool_groups)
             .into_iter()
             .filter(|s| ws_names.iter().any(|n| n == &s.name.to_ascii_lowercase()))
             .collect()
@@ -887,10 +895,13 @@ fn resolve_skill_for_read(
             }
         }
     }
-    if let Some(effective) = resolve_skills(defs).into_iter().find(|s| {
-        s.name.eq_ignore_ascii_case(&resolved.definition.name)
-            && s.dir_path.as_deref() == Some(resolved.skill_dir.as_path())
-    }) {
+    if let Some(effective) = resolve_skills_with_groups(defs, &ctx.config.tool_groups)
+        .into_iter()
+        .find(|s| {
+            s.name.eq_ignore_ascii_case(&resolved.definition.name)
+                && s.dir_path.as_deref() == Some(resolved.skill_dir.as_path())
+        })
+    {
         resolved.definition = effective;
     }
     Ok(resolved)
@@ -960,7 +971,12 @@ impl BlockingTool for Tool {
                 atomic_write_file(&target_path, &rendered).context("Error writing skill file")?;
 
                 let mut msg = format!("Successfully created {display}");
-                append_unknown_tools_note(&mut msg, &rendered, &target_path);
+                append_unknown_tools_note(
+                    &mut msg,
+                    &rendered,
+                    &target_path,
+                    &ctx.config.tool_groups,
+                );
                 Ok(msg)
             }
             SkillAction::Modify => {
@@ -972,7 +988,12 @@ impl BlockingTool for Tool {
                 } else {
                     format!("Successfully modified {display}")
                 };
-                append_unknown_tools_note(&mut msg, &updated, &target_path);
+                append_unknown_tools_note(
+                    &mut msg,
+                    &updated,
+                    &target_path,
+                    &ctx.config.tool_groups,
+                );
                 Ok(msg)
             }
         }

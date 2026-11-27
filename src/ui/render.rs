@@ -1179,10 +1179,17 @@ impl TuiApp {
                         active_skill_name,
                     );
                 let is_loaded = active_regular.iter().any(|t| t == tool_name);
-                let is_session_loaded = self.session_tools.is_loaded(tool_name)
-                    || self.session_tools.is_force_enabled(tool_name);
+                let is_force_enabled = self.session_tools.is_force_enabled(tool_name);
+                let is_session_loaded = self.session_tools.is_loaded(tool_name) || is_force_enabled;
                 let is_session_disabled = self.session_tools.is_force_disabled(tool_name);
                 let prov = self.config.tool_provenance(tool_name);
+                let session_or_prov_tag = || {
+                    if is_force_enabled {
+                        ("[+ses]", Style::default().fg(theme::MODAL_HINT))
+                    } else {
+                        (prov.short_tag(), tool_prov_style(prov))
+                    }
+                };
 
                 let (glyph, name_style, state_str, state_style, tag_str, tag_style) =
                     if is_session_disabled {
@@ -1204,13 +1211,14 @@ impl TuiApp {
                             tool_prov_style(prov),
                         )
                     } else if !self.enable_tools {
+                        let (tag, tstyle) = session_or_prov_tag();
                         (
                             "~ ",
                             Style::default().fg(theme::CTX_USAGE_WARN),
                             "^T",
                             Style::default().fg(theme::CTX_USAGE_WARN),
-                            prov.short_tag(),
-                            tool_prov_style(prov),
+                            tag,
+                            tstyle,
                         )
                     } else if !turn_enabled {
                         (
@@ -1238,13 +1246,14 @@ impl TuiApp {
                             tstyle,
                         )
                     } else {
+                        let (tag, tstyle) = session_or_prov_tag();
                         (
                             "○ ",
                             Style::default().fg(theme::STATUS_DEFERRED),
                             "DEF",
                             Style::default().fg(theme::STATUS_DEFERRED),
-                            prov.short_tag(),
-                            tool_prov_style(prov),
+                            tag,
+                            tstyle,
                         )
                     };
 

@@ -1222,6 +1222,28 @@ pub fn active_regular_tools_for_turn(
     active
 }
 
+/// Regular tools enabled for this turn that are not core/skill-declared tools,
+/// independent of `session_tools.loaded`, returned in canonical `ALL_TOOL_NAMES` order.
+///
+/// Keeping this set independent of dynamically loaded tools ensures the
+/// `<deferred_tools>` system-prompt catalog and `load_tools` declaration stay
+/// byte-stable across `load_tools` calls for prompt-cache stability.
+pub fn catalog_deferred_tool_names_for_turn(
+    config: &Config,
+    session_tools: &SessionToolState,
+    active_skill: Option<&str>,
+) -> Vec<String> {
+    let core = core_regular_tools_for_turn(config, session_tools, active_skill);
+    ALL_TOOL_NAMES
+        .iter()
+        .filter(|&&name| {
+            is_tool_enabled_for_turn(name, config, session_tools, active_skill)
+                && !core.iter().any(|c| c == name)
+        })
+        .map(|&name| name.to_string())
+        .collect()
+}
+
 /// Regular tools enabled for this turn but currently deferred (available via `load_tools`),
 /// returned in canonical `ALL_TOOL_NAMES` order.
 pub fn deferred_tool_names_for_turn(
@@ -1243,15 +1265,17 @@ pub fn deferred_tool_names_for_turn(
 /// Ordered tool names whose schemas are sent to the model on this turn.
 ///
 /// Placement of `load_tools` right after `core_tools` (before dynamically `loaded` tools)
-/// keeps tool declarations append-only across `load_tools` calls for prompt-cache stability.
+/// — and keeping it present whenever any non-core enabled tools exist — keeps tool
+/// declarations strictly append-only across `load_tools` calls for prompt-cache stability.
 pub fn active_tool_names_for_turn(
     config: &Config,
     session_tools: &SessionToolState,
     active_skill: Option<&str>,
 ) -> Vec<String> {
     let mut names = core_regular_tools_for_turn(config, session_tools, active_skill);
-    let deferred = deferred_tool_names_for_turn(config, session_tools, active_skill);
-    if !deferred.is_empty() {
+    let has_non_core =
+        !catalog_deferred_tool_names_for_turn(config, session_tools, active_skill).is_empty();
+    if has_non_core {
         names.push(LOAD_TOOLS_NAME.to_string());
     }
     for loaded in &session_tools.loaded {
@@ -1821,10 +1845,16 @@ mod tests {
         // Prompt-cache stability: prefix of Turn 2 matches Turn 1 verbatim.
         assert_eq!(&t2[..t1.len()], &t1[..]);
 
-        // Turn 3: load `cargo` -> no deferred tools left, so `load_tools` is omitted.
+        // Turn 3: load `cargo` -> `load_tools` stays in place so declarations remain
+        // strictly append-only across `load_tools` calls for prompt-cache stability.
         session_tools.apply_loaded(&["cargo".into()], 2, cfg.app.max_loaded_tools);
         let t3 = schema_names(&cfg, &session_tools, None);
-        assert_eq!(t3, vec!["edit_file", "read_file", "git", "cargo"]);
+        assert_eq!(
+            t3,
+            vec!["edit_file", "read_file", "load_tools", "git", "cargo"]
+        );
+        assert_eq!(&t3[..t2.len()], &t2[..]);
+        assert!(super::deferred_tool_names_for_turn(&cfg, &session_tools, None).is_empty());
 
         // When `core_tools = ["*"]`, all enabled tools are active and `load_tools` is omitted.
         cfg.app.core_tools = vec!["*".into()];
@@ -1887,10 +1917,12 @@ mod tests {
     }
 
     #[test]
-    fn deferred_tools_catalog_lists_and_removes_loaded_tools() {
+    fn deferred_tools_catalog_is_cache_stable_and_advertises_custom_groups() {
         let mut cfg = Config::default();
         cfg.app.enabled_tools = vec!["read_file".into(), "git".into(), "cargo".into()];
         cfg.app.core_tools = vec!["read_file".into()];
+        cfg.tool_groups
+            .insert("backend".into(), vec!["git".into(), "cargo".into()]);
 
         let mut st = SessionToolState::default();
         let empty = std::collections::BTreeMap::new();
@@ -1900,6 +1932,7 @@ mod tests {
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
         assert!(sys1.contains("<deferred_tools>"));
+        assert!(sys1.contains("`@backend`"));
         assert!(sys1.contains("- cargo: "));
         assert!(sys1.contains("- git: "));
         assert!(!sys1.contains("- read_file: "));
@@ -1911,21 +1944,25 @@ mod tests {
         );
         assert!(!sys_no_tools.contains("<deferred_tools>"));
 
-        // After loading `git`, it disappears from `<deferred_tools>` while `cargo` remains.
+        // After loading `git`, `deferred_tool_names_for_turn` (used by sidebar / `/tools`)
+        // removes `git`, while the system prompt stays byte-identical for prompt-cache stability.
         st.apply_loaded(&["git".into()], 1, cfg.app.max_loaded_tools);
+        assert_eq!(
+            super::deferred_tool_names_for_turn(&cfg, &st, None),
+            vec!["cargo"]
+        );
         let sys2 = crate::core::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
-        assert!(sys2.contains("<deferred_tools>"));
-        assert!(sys2.contains("- cargo: "));
-        assert!(!sys2.contains("- git: "));
+        assert_eq!(sys2, sys1);
 
-        // After loading `cargo` too, `<deferred_tools>` disappears completely.
+        // After loading `cargo` too, UI deferred list is empty while system prompt remains stable.
         st.apply_loaded(&["cargo".into()], 1, cfg.app.max_loaded_tools);
+        assert!(super::deferred_tool_names_for_turn(&cfg, &st, None).is_empty());
         let sys3 = crate::core::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
-        assert!(!sys3.contains("<deferred_tools>"));
+        assert_eq!(sys3, sys1);
     }
 
     #[tokio::test]
@@ -2007,5 +2044,96 @@ mod tests {
         let evicted2 = st.apply_loaded(&["git".into()], 1, cfg.app.max_loaded_tools);
         assert_eq!(evicted2, vec!["fetch_url"]);
         assert_eq!(st.loaded, vec!["browser", "git"]);
+    }
+
+    #[tokio::test]
+    async fn load_tools_handles_single_string_oversized_budget_zero_limit_and_nested_group_errors()
+    {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec![
+            "read_file".into(),
+            "git".into(),
+            "cargo".into(),
+            "fetch_url".into(),
+            "browser".into(),
+        ];
+        cfg.app.core_tools = vec!["read_file".into()];
+        cfg.app.max_loaded_tools = 3; // 1 core + 2 dynamic slots
+        cfg.tool_groups.insert(
+            "bad_nested".into(),
+            vec!["git".into(), "@typo_group".into()],
+        );
+        cfg.tool_groups
+            .insert("mixed_case".into(), vec!["Git".into(), "Cargo".into()]);
+
+        let mut st = SessionToolState::default();
+
+        // 1. Single-string `"names": "git"` is tolerated via `deserialize_string_list`.
+        let call_single = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": "git" }),
+            },
+            thought_signature: None,
+        };
+        let out_single = super::execute(&call_single, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(!out_single.is_error, "{}", out_single.truncated_output);
+        assert!(out_single.truncated_output.contains("git"));
+
+        // 2. Mixed-case custom group members canonicalize cleanly.
+        let expanded_mixed =
+            super::expand_tool_spec_checked(&["@mixed_case".into()], &cfg.tool_groups).unwrap();
+        assert_eq!(expanded_mixed, vec!["git", "cargo"]);
+
+        // 3. Unknown nested `@group` inside a custom group is surfaced as an error.
+        let err_nested =
+            super::expand_tool_spec_checked(&["@bad_nested".into()], &cfg.tool_groups).unwrap_err();
+        assert_eq!(err_nested, vec!["@typo_group"]);
+
+        let call_nested = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["@bad_nested"] }),
+            },
+            thought_signature: None,
+        };
+        let out_nested = super::execute(&call_nested, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(out_nested.is_error);
+        assert!(out_nested.truncated_output.contains("@typo_group"));
+
+        // 4. Requesting more tools than `dynamic_cap` (3 > 2) fails cleanly rather than
+        //    immediately evicting part of the request.
+        let call_oversized = super::ToolCall {
+            function: super::ToolFunction {
+                name: super::LOAD_TOOLS_NAME.into(),
+                arguments: serde_json::json!({ "names": ["git", "cargo", "browser"] }),
+            },
+            thought_signature: None,
+        };
+        let out_oversized =
+            super::execute(&call_oversized, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(out_oversized.is_error);
+        assert!(
+            out_oversized
+                .truncated_output
+                .contains("exceeds the dynamic tool slot budget")
+        );
+
+        // 5. `max_loaded_tools = 0` disables eviction and allows arbitrary batch sizes.
+        cfg.app.max_loaded_tools = 0;
+        let out_unbounded =
+            super::execute(&call_oversized, &cfg, None, None, &st, 4096, 8192).await;
+        assert!(
+            !out_unbounded.is_error,
+            "{}",
+            out_unbounded.truncated_output
+        );
+        let evicted = st.apply_loaded(
+            &["git".into(), "cargo".into(), "browser".into()],
+            1,
+            cfg.app.max_loaded_tools,
+        );
+        assert!(evicted.is_empty());
+        assert_eq!(st.loaded, vec!["git", "cargo", "browser"]);
     }
 }

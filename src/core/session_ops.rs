@@ -481,15 +481,43 @@ impl CoreEngine {
                 let mut notes = Vec::new();
                 if !expanded_add.is_empty() {
                     notes.push(format!("Loaded/enabled: {}", expanded_add.join(", ")));
+                    if let Some(skill_name) = self.active_turn_skill() {
+                        let blocked_by_skill: Vec<&str> = expanded_add
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|&name| {
+                                !expanded_remove.iter().any(|r| r == name)
+                                    && !tools::is_tool_enabled_for_turn(
+                                        name,
+                                        &self.config,
+                                        &self.session.tools,
+                                        Some(skill_name),
+                                    )
+                            })
+                            .collect();
+                        if !blocked_by_skill.is_empty() {
+                            notes.push(format!(
+                                "Note: still hidden by active skill '@{skill_name}': {}",
+                                blocked_by_skill.join(", ")
+                            ));
+                        }
+                    }
                 }
                 if !expanded_remove.is_empty() {
                     notes.push(format!("Unloaded/disabled: {}", expanded_remove.join(", ")));
                 }
-                format!(
-                    "{}\n\n{}",
-                    notes.join("\n"),
-                    self.format_session_tools_summary()
-                )
+                if notes.is_empty() {
+                    format!(
+                        "No tool changes applied.\n\n{}",
+                        self.format_session_tools_summary()
+                    )
+                } else {
+                    format!(
+                        "{}\n\n{}",
+                        notes.join("\n"),
+                        self.format_session_tools_summary()
+                    )
+                }
             }
         };
 

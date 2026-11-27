@@ -17,12 +17,13 @@ pub use hooks::{
     preview_due_hooks,
 };
 pub use parse::{
-    DetailedSkillParse, ScannedRawSkill, discover_skills, find_skill, parse_at_command,
-    parse_skill_markdown, parse_skill_markdown_detailed, scan_raw_dir, scan_skills_dir,
-    split_toml_frontmatter, upsert_skill_by_name,
+    DetailedSkillParse, ScannedRawSkill, discover_skills, discover_skills_with_groups, find_skill,
+    parse_at_command, parse_skill_markdown, parse_skill_markdown_detailed, scan_raw_dir,
+    scan_skills_dir, split_toml_frontmatter, upsert_skill_by_name,
 };
 pub use resolve::{
     check_skill_activation, missing_skill_tools, replace_super_placeholder, resolve_skills,
+    resolve_skills_with_groups,
 };
 pub use template::{TemplateContext, inspect_template, render_template};
 pub use types::{
@@ -43,9 +44,12 @@ fn get_ci<'a, V>(map: &'a BTreeMap<String, V>, key: &str) -> Option<&'a V> {
     })
 }
 
-/// Formats a compact `<deferred_tools>` catalog block for tools that are enabled
-/// for this turn but not yet loaded into the active tool schema list.
-pub fn format_deferred_tools_catalog(deferred_tools: &[String]) -> Option<String> {
+/// Formats a compact `<deferred_tools>` catalog block for non-core enabled tools
+/// that can be activated on demand with `load_tools`.
+pub fn format_deferred_tools_catalog(
+    deferred_tools: &[String],
+    custom_groups: &BTreeMap<String, Vec<String>>,
+) -> Option<String> {
     if deferred_tools.is_empty() {
         return None;
     }
@@ -54,9 +58,14 @@ pub fn format_deferred_tools_catalog(deferred_tools: &[String]) -> Option<String
         let summary = crate::tools::tool_short_summary(name);
         lines.push(format!("- {name}: {summary}"));
     }
+    let groups_hint = crate::tools::all_group_names(custom_groups)
+        .into_iter()
+        .map(|g| format!("`{g}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     Some(format!(
         "<deferred_tools>\n\
-         Additional enabled tools are available on demand. Call `load_tools(names: [...])` with tool names or `@group` names (e.g. `@git`, `@web`, `@rust`, `@sysadmin`, `@data`, `@planning`, `@code`, `@agent`) to load their full schemas before using them:\n\
+         Additional enabled tools are available on demand. Call `load_tools(names: [...])` with tool names or `@group` names ({groups_hint}) to load their full schemas before using them if not already active:\n\
          {}\n\
          </deferred_tools>",
         lines.join("\n")
@@ -140,8 +149,9 @@ pub fn compose_system_prompt_for_turn(
 
     if enable_tools {
         let deferred =
-            crate::tools::deferred_tool_names_for_turn(config, session_tools, active_skill);
-        if let Some(deferred_block) = format_deferred_tools_catalog(&deferred) {
+            crate::tools::catalog_deferred_tool_names_for_turn(config, session_tools, active_skill);
+        if let Some(deferred_block) = format_deferred_tools_catalog(&deferred, &config.tool_groups)
+        {
             sections.push(deferred_block);
         }
     }

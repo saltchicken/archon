@@ -407,9 +407,10 @@ impl TuiApp {
 
         let mut turn = self.current_turn_config();
         let prompt = if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
-            self.config.skills = skills::discover_skills(
+            self.config.skills = skills::discover_skills_with_groups(
                 &self.config.app.skills_dir,
                 self.config.workspace_skills_dir.as_deref(),
+                &self.config.tool_groups,
             );
             match skills::apply_at_skill_to_turn(&raw_prompt, &mut turn, &self.config) {
                 Ok(p) => p,

@@ -336,9 +336,10 @@ pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
         .collect()
 }
 
-pub fn discover_skills(
+pub fn discover_skills_with_groups(
     skills_dir: &str,
     workspace_skills_dir: Option<&Path>,
+    custom_groups: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Vec<SkillDefinition> {
     let mut merged = Vec::new();
 
@@ -355,7 +356,18 @@ pub fn discover_skills(
         }
     }
 
-    super::resolve::resolve_skills(merged)
+    super::resolve::resolve_skills_with_groups(merged, custom_groups)
+}
+
+pub fn discover_skills(
+    skills_dir: &str,
+    workspace_skills_dir: Option<&Path>,
+) -> Vec<SkillDefinition> {
+    discover_skills_with_groups(
+        skills_dir,
+        workspace_skills_dir,
+        &std::collections::BTreeMap::new(),
+    )
 }
 
 pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a SkillDefinition> {

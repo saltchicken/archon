@@ -320,4 +320,15 @@ mod tests {
     fn manual_browser_colon_action_still_works() {
         assert_eq!(parsed_action("browser:snapshot"), Some("snapshot".into()));
     }
+
+    #[test]
+    fn manual_load_tools_positional_args_collect_into_names_array() {
+        let (call, _) =
+            parse_manual_tool_call("load_tools git @web").expect("manual invocation should parse");
+        assert_eq!(call.function.name, "load_tools");
+        assert_eq!(
+            call.function.arguments,
+            serde_json::json!({ "names": ["git", "@web"] })
+        );
+    }
 }

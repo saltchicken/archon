@@ -390,3 +390,52 @@ fn skill_check_and_resolve_support_tool_groups() {
     assert!(!offline.allows_tool("browser"));
     assert!(offline.allows_tool("git"));
 }
+
+#[test]
+fn skill_check_and_resolve_support_custom_tool_groups_and_catch_bad_members() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    fs::create_dir_all(dir.join("custom-ok")).unwrap();
+    fs::write(
+        dir.join("custom-ok/SKILL.md"),
+        "+++\nname = \"custom-ok\"\ntools = [\"@myteam\"]\n+++\nUse custom team tools.",
+    )
+    .unwrap();
+
+    fs::create_dir_all(dir.join("custom-bad")).unwrap();
+    fs::write(
+        dir.join("custom-bad/SKILL.md"),
+        "+++\nname = \"custom-bad\"\ntools = [\"@broken\"]\n+++\nBroken group.",
+    )
+    .unwrap();
+
+    let mut cfg = Config::default();
+    cfg.tool_groups
+        .insert("myteam".into(), vec!["git".into(), "cargo".into()]);
+    cfg.tool_groups
+        .insert("broken".into(), vec!["git".into(), "@no_such_sub".into()]);
+
+    let report_ok = check_skills_in_dir(dir, "test", &cfg, true, Some("custom-ok"));
+    assert!(
+        report_ok.is_ok(true),
+        "Expected custom tool group skill to pass:\n{}",
+        report_ok.format_report(true)
+    );
+
+    let report_bad = check_skills_in_dir(dir, "test", &cfg, true, Some("custom-bad"));
+    assert!(
+        !report_bad.is_ok(false),
+        "Expected broken nested custom group to fail skill check"
+    );
+
+    let skills = archon::core::skills::discover_skills_with_groups(
+        &dir.to_string_lossy(),
+        None,
+        &cfg.tool_groups,
+    );
+    let custom_ok = skills.iter().find(|s| s.name == "custom-ok").unwrap();
+    assert!(custom_ok.allows_tool("git"));
+    assert!(custom_ok.allows_tool("cargo"));
+    assert!(!custom_ok.allows_tool("browser"));
+}

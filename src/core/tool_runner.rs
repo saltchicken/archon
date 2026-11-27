@@ -77,6 +77,9 @@ impl CoreEngine {
     }
 
     fn is_call_auto_approved(&self, call: &ToolCall) -> bool {
+        if call.function.name == tools::LOAD_TOOLS_NAME {
+            return true;
+        }
         let global_or_session = tools::is_auto_approved(
             call,
             self.config
@@ -781,7 +784,9 @@ Coder."#,
         let mut engine = CoreEngine::new("test-model".to_string(), cfg, tx).unwrap();
         engine.set_save_session(false);
 
-        // `load_tools` is auto-approved by default.
+        // `load_tools` is auto-approved even when `config.app.auto_approve` is empty
+        // (e.g. upgraded user configs that predate `load_tools`).
+        engine.config.app.auto_approve.clear();
         let load_call = ToolCall {
             function: ToolFunction {
                 name: tools::LOAD_TOOLS_NAME.to_string(),
