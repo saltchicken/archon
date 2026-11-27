@@ -438,9 +438,9 @@ impl CoreEngine {
                         .tx
                         .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
                     let prompt = if self.config.app.todo_autoloop_ignore_blocked {
-                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish."
+                        "Continue working through `<todos>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `todo` (`action: \"remove\"`) once finished."
                     } else {
-                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish. If you need user input before proceeding, mark the task `blocked` with `todo` (`action: \"update\"`, `status: \"blocked\"`) and ask your question."
+                        "Continue working through `<todos>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `todo` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
                     };
                     self.session
                         .messages
