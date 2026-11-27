@@ -215,6 +215,10 @@ pub struct AppSettings {
     /// When non-empty, only IPs within these ranges are permitted;
     /// `http_allow_private` is ignored.
     pub http_allowed_cidrs: Vec<String>,
+    /// When `true`, automatically continue into the next model turn when a
+    /// response finishes with no tool calls while active workspace todos remain.
+    /// Default is `false`.
+    pub todo_autoloop: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +345,7 @@ impl Default for AppSettings {
             http_allow_private: false,
             read_roots: Vec::new(),
             http_allowed_cidrs: Vec::new(),
+            todo_autoloop: false,
         }
     }
 }

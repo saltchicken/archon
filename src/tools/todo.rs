@@ -294,6 +294,15 @@ pub fn format_active_todos_for_prompt(config: &Config) -> Option<String> {
     ))
 }
 
+/// Returns `true` if there is at least one active task for the current workspace.
+pub fn has_active_todos(config: &Config) -> bool {
+    let Ok(conn) = open_todo_db(config) else {
+        return false;
+    };
+    let ws = canonical_workspace(config);
+    fetch_todos(&conn, &ws, None).is_ok_and(|rows| !rows.is_empty())
+}
+
 impl BlockingTool for Tool {
     const NAME: &'static str = "todo";
     const DESCRIPTION: &'static str = "Manage a persistent workspace task checklist (`list`, `add`, `update`, `remove`, `clear`) to track multi-step plans across turns and compactions.";

@@ -91,6 +91,7 @@ impl CoreEngine {
         }
         self.save_and_emit_chat(new_images).await;
         if has_valid_prompt {
+            self.session.auto_todo_turns = 0;
             let turn = self.turn.clone();
             self.start_user_turn(&turn).await;
         }
@@ -232,6 +233,7 @@ impl CoreEngine {
             warn!("Auto-declined {skipped} unresolved tool call(s) before new prompt");
         }
 
+        self.session.auto_todo_turns = 0;
         self.turn = turn.clone();
         self.session.messages.push(user_msg);
 
@@ -250,6 +252,7 @@ impl CoreEngine {
         }
 
         info!("User interrupted active turn");
+        self.session.auto_todo_turns = 0;
         self.inflight.pending_stream_done = None;
         let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
         let closed = self.close_unresolved_tool_calls("Cancelled by user.");
@@ -410,6 +413,42 @@ impl CoreEngine {
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else if has_response {
+            // TODO: Extract the magic number for MAX_AUTO_TODO_TURNS. Should be set in config
+            const MAX_AUTO_TODO_TURNS: usize = 25;
+            if self.config.app.todo_autoloop
+                && self.turn.enable_tools
+                && tools::is_tool_enabled_for_turn("todo", &self.config, self.active_turn_skill())
+                && self.inflight.queued_interjections.is_empty()
+                && self.session.auto_todo_turns < MAX_AUTO_TODO_TURNS
+            {
+                let cfg = self.config.clone();
+                let has_todos = tokio::task::spawn_blocking(move || {
+                    tools::todo::has_active_todos(&cfg)
+                })
+                .await
+                .unwrap_or(false);
+
+                if has_todos {
+                    self.session.auto_todo_turns += 1;
+                    info!(
+                        "Active todos remain; auto-continuing todo loop ({}/{MAX_AUTO_TODO_TURNS})",
+                        self.session.auto_todo_turns
+                    );
+                    let _ = self
+                        .tx
+                        .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
+                    self.session.messages.push(ChatMessage::new(
+                        "user",
+                        "Continue working through the remaining tasks in `<todos>`. Handle the next 1–2 items and remove them with `todo` (`action: \"remove\"`) as you finish.",
+                    ));
+                    self.save_and_emit_chat(Vec::new()).await;
+                    let turn = self.turn.clone();
+                    self.spawn_model_turn(&turn).await;
+                    return;
+                }
+            }
+            self.session.auto_todo_turns = 0;
+
             let last_response = self
                 .session
                 .messages
