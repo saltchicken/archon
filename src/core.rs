@@ -9,7 +9,7 @@ pub mod provider;
 pub mod schedule;
 pub(crate) mod schema_utils;
 pub mod session;
-mod session_ops;
+mod handlers;
 pub mod skill_check;
 pub mod skills;
 mod tool_runner;
