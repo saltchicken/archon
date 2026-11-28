@@ -169,21 +169,13 @@ pub fn save_memory_file(mem_path: &Path, mem: &Memory) -> Result<String> {
 fn init_memory_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS workspace_memory (
-             workspace TEXT PRIMARY KEY,
-             enabled INTEGER NOT NULL DEFAULT 1,
+             workspace  TEXT PRIMARY KEY,
+             enabled    INTEGER NOT NULL DEFAULT 1,
+             items      TEXT NOT NULL DEFAULT '',
              updated_at TEXT NOT NULL
-         );
-
-         CREATE TABLE IF NOT EXISTS workspace_memory_items (
-             workspace TEXT NOT NULL,
-             position INTEGER NOT NULL,
-             content TEXT NOT NULL,
-             updated_at TEXT NOT NULL,
-             PRIMARY KEY (workspace, position),
-             FOREIGN KEY (workspace) REFERENCES workspace_memory(workspace) ON DELETE CASCADE
          );",
     )
-    .context("Failed to initialize workspace memory tables")?;
+    .context("Failed to create workspace_memory table")?;
     Ok(())
 }
 
@@ -194,28 +186,21 @@ fn open_memory_db(raw_history_dir: &str) -> Result<Connection> {
 }
 
 fn load_workspace_memory_from_conn(conn: &Connection, workspace_key: &str) -> Result<Memory> {
-    let enabled_opt: Option<i64> = conn
+    let row: Option<(i64, String)> = conn
         .query_row(
-            "SELECT enabled FROM workspace_memory WHERE workspace = ?1",
+            "SELECT enabled, items FROM workspace_memory WHERE workspace = ?1",
             params![workspace_key],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?;
 
-    let Some(enabled_int) = enabled_opt else {
+    let Some((enabled_int, items_blob)) = row else {
         return Ok(Memory::empty());
     };
 
-    let mut stmt = conn.prepare(
-        "SELECT content FROM workspace_memory_items
-         WHERE workspace = ?1
-         ORDER BY position ASC",
-    )?;
-    let raw_items: Vec<String> = stmt
-        .query_map(params![workspace_key], |row| row.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    Ok(Memory::new(raw_items, enabled_int != 0))
+    // `Memory::new` splits each raw entry on newlines and cleans/dedups the lines, so
+    // the whole stored blob can be passed as a single element.
+    Ok(Memory::new(vec![items_blob], enabled_int != 0))
 }
 
 fn save_workspace_memory_to_conn(
@@ -224,31 +209,18 @@ fn save_workspace_memory_to_conn(
     mem: &Memory,
 ) -> Result<()> {
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let tx = conn.unchecked_transaction()?;
+    let items_blob = mem.items.join("\n");
 
-    tx.execute(
-        "INSERT INTO workspace_memory (workspace, enabled, updated_at)
-         VALUES (?1, ?2, ?3)
+    conn.execute(
+        "INSERT INTO workspace_memory (workspace, enabled, items, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(workspace) DO UPDATE SET
              enabled = excluded.enabled,
+             items = excluded.items,
              updated_at = excluded.updated_at",
-        params![workspace_key, i64::from(mem.enabled), now],
+        params![workspace_key, i64::from(mem.enabled), items_blob, now],
     )?;
 
-    tx.execute(
-        "DELETE FROM workspace_memory_items WHERE workspace = ?1",
-        params![workspace_key],
-    )?;
-
-    for (idx, item) in mem.items.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO workspace_memory_items (workspace, position, content, updated_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![workspace_key, (idx + 1) as i64, item, now],
-        )?;
-    }
-
-    tx.commit()?;
     Ok(())
 }
 
