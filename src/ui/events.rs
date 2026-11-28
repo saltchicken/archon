@@ -59,7 +59,11 @@ impl TuiApp {
                     self.active_turn_skill = None;
                 }
                 self.finish_stream();
-                self.used_tokens = prompt_tokens + eval_tokens;
+                let reported_tokens = prompt_tokens.saturating_add(eval_tokens);
+                if reported_tokens > 0 {
+                    self.used_tokens = reported_tokens;
+                    self.used_tokens_estimated = false;
+                }
             }
             EngineEvent::StreamError(err) => {
                 self.active_turn_skill = None;
@@ -127,8 +131,12 @@ impl TuiApp {
                 self.modal = ActiveModal::TruncatedTool;
             }
             EngineEvent::ToolCondensed(_) | EngineEvent::ChatCompacted { .. } => {}
-            EngineEvent::TokenUsageUpdated(tokens) => {
+            EngineEvent::TokenUsageUpdated {
+                tokens,
+                is_estimate,
+            } => {
                 self.used_tokens = tokens;
+                self.used_tokens_estimated = is_estimate;
             }
             EngineEvent::SessionsListed(list) => {
                 self.on_sessions_listed(list);
@@ -172,12 +180,6 @@ impl TuiApp {
         num_ctx: u32,
         system_prompt: &str,
     ) {
-        if messages.is_empty() {
-            self.used_tokens = 0;
-        } else if self.session_id != session_id || messages.len() < self.messages.len() {
-            let approx_chars: usize = messages.iter().map(|m| m.content.len()).sum();
-            self.used_tokens = (approx_chars as u64 / 4).max(1);
-        }
         if self.prompt_history.is_empty() {
             for m in &messages {
                 let trimmed = m.content.trim();

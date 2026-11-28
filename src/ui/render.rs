@@ -892,12 +892,31 @@ impl TuiApp {
         };
 
         let pct = (self.used_tokens as f64 / f64::from(self.num_ctx.max(1))) * 100.0;
+        let auto_compact_pct = self.config.app.effective_auto_compact_threshold() * 100.0;
+        let warn_pct = if self.config.app.auto_compact {
+            auto_compact_pct.min(90.0)
+        } else {
+            75.0
+        };
         let ctx_color = if pct >= 90.0 {
             theme::CTX_USAGE_CRIT
-        } else if pct >= 75.0 {
+        } else if pct >= warn_pct {
             theme::CTX_USAGE_WARN
         } else {
             theme::CTX_USAGE_OK
+        };
+        let ctx_prefix = if self.used_tokens_estimated && self.used_tokens > 0 {
+            "~"
+        } else {
+            ""
+        };
+        let (compact_str, compact_color) = if self.config.app.auto_compact {
+            (
+                format!("ON ({auto_compact_pct:.0}%)"),
+                theme::STATUS_ENABLED,
+            )
+        } else {
+            ("OFF".to_string(), theme::STATUS_DISABLED)
         };
         let dir = self
             .config
@@ -1041,10 +1060,18 @@ impl TuiApp {
             Line::from(vec![
                 Span::raw("Context: "),
                 Span::styled(
-                    format!("{}/{} ({pct:.0}%)", self.used_tokens, self.num_ctx),
+                    format!(
+                        "{ctx_prefix}{}/{} ({pct:.0}%)",
+                        self.used_tokens, self.num_ctx
+                    ),
                     Style::default().fg(ctx_color),
                 ),
                 source_badge_span(prov.models),
+            ]),
+            Line::from(vec![
+                Span::raw("Compact: "),
+                Span::styled(compact_str, Style::default().fg(compact_color)),
+                source_badge_span(prov.auto_compact),
             ]),
             Line::from(vec![
                 Span::raw("System:  "),

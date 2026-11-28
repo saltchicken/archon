@@ -88,6 +88,7 @@ pub struct ConfigProvenance {
     pub dotfiles: ConfigSource,
     pub workspace_snapshot: ConfigSource,
     pub allow_hidden: ConfigSource,
+    pub auto_compact: ConfigSource,
     /// Keys (`section.key` or top-level) set in both Global and Workspace `config.toml`
     /// with different values (Workspace overwrote Global).
     pub overwritten_keys: Vec<String>,
@@ -140,6 +141,26 @@ fn source_for_table_key(
     key: &str,
 ) -> ConfigSource {
     source_for_table_keys(global, ws, section, &[key])
+}
+
+fn combine_table_key_sources(
+    global: Option<&toml::Table>,
+    ws: Option<&toml::Table>,
+    section: &str,
+    keys: &[&str],
+) -> ConfigSource {
+    let mut best = ConfigSource::Default;
+    for key in keys {
+        match source_for_table_key(global, ws, section, key) {
+            ConfigSource::WorkspaceOverridesGlobal => {
+                return ConfigSource::WorkspaceOverridesGlobal;
+            }
+            ConfigSource::Workspace => best = ConfigSource::Workspace,
+            ConfigSource::Global if best == ConfigSource::Default => best = ConfigSource::Global,
+            _ => {}
+        }
+    }
+    best
 }
 
 fn source_for_section(
@@ -247,6 +268,16 @@ pub fn build_provenance(
             ws_table,
             "app",
             &["allow_hidden", "include_hidden"],
+        ),
+        auto_compact: combine_table_key_sources(
+            global_table,
+            ws_table,
+            "app",
+            &[
+                "auto_compact",
+                "auto_compact_threshold",
+                "auto_compact_cooldown_turns",
+            ],
         ),
         overwritten_keys: collect_overwritten_keys(global_table, ws_table),
     }

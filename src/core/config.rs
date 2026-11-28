@@ -197,6 +197,16 @@ pub struct AppSettings {
     /// Optional default compaction-guide skill name used by `/compact` when no
     /// explicit `@name` is given (e.g. `compact_skill = "compact"`).
     pub compact_skill: Option<String>,
+    /// When `true`, automatically compact conversation history before sending a
+    /// model turn whose estimated pre-flight context usage meets or exceeds
+    /// `auto_compact_threshold * num_ctx`. Default is `false`.
+    pub auto_compact: bool,
+    /// Fraction of `num_ctx` at which pre-flight auto-compaction triggers
+    /// (clamped to `0.10..=0.98`). Default is `0.75`.
+    pub auto_compact_threshold: f64,
+    /// Minimum number of model turns between automatic compactions to avoid
+    /// thrashing. Default is `5`.
+    pub auto_compact_cooldown_turns: u32,
     #[serde(alias = "include_hidden")]
     pub allow_hidden: bool,
     pub enabled_tools: Vec<String>,
@@ -305,6 +315,18 @@ pub struct Preset {
     pub prompt: String,
 }
 
+impl AppSettings {
+    /// Returns `auto_compact_threshold` clamped to `[0.10, 0.98]`, falling back
+    /// to `0.75` if non-finite.
+    pub fn effective_auto_compact_threshold(&self) -> f64 {
+        if self.auto_compact_threshold.is_finite() {
+            self.auto_compact_threshold.clamp(0.10, 0.98)
+        } else {
+            0.75
+        }
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -313,6 +335,9 @@ impl Default for AppSettings {
             history_dir: "~/.local/share/archon/sessions".into(),
             skills_dir: "~/.config/archon/skills".into(),
             compact_skill: None,
+            auto_compact: false,
+            auto_compact_threshold: 0.75,
+            auto_compact_cooldown_turns: 5,
             allow_hidden: false,
             enabled_tools: crate::tools::ALL_TOOL_NAMES
                 .iter()
@@ -857,5 +882,47 @@ mod tests {
         let toml_str = "cdp_user_data_dir = \"/tmp/my-chrome-profile\"\n";
         let settings: BrowserSettings = toml::from_str(toml_str).unwrap();
         assert_eq!(settings.cdp_user_data_dir, "/tmp/my-chrome-profile");
+    }
+
+    #[test]
+    fn auto_compact_settings_defaults_and_clamping() {
+        let mut settings = AppSettings::default();
+        assert!(!settings.auto_compact);
+        assert!((settings.auto_compact_threshold - 0.75).abs() < 1e-9);
+        assert_eq!(settings.auto_compact_cooldown_turns, 5);
+        assert!((settings.effective_auto_compact_threshold() - 0.75).abs() < 1e-9);
+
+        settings.auto_compact_threshold = 0.01;
+        assert!((settings.effective_auto_compact_threshold() - 0.10).abs() < 1e-9);
+
+        settings.auto_compact_threshold = 1.5;
+        assert!((settings.effective_auto_compact_threshold() - 0.98).abs() < 1e-9);
+
+        settings.auto_compact_threshold = f64::NAN;
+        assert!((settings.effective_auto_compact_threshold() - 0.75).abs() < 1e-9);
+
+        let partial: AppSettings = toml::from_str("auto_compact = true\n").unwrap();
+        assert!(partial.auto_compact);
+        assert!((partial.auto_compact_threshold - 0.75).abs() < 1e-9);
+        assert_eq!(partial.auto_compact_cooldown_turns, 5);
+    }
+
+    #[test]
+    fn auto_compact_provenance_tracks_overrides_across_keys() {
+        let g: toml::Table = toml::from_str("[app]\nauto_compact = true\n").unwrap();
+        let ws_same: toml::Table = toml::from_str("[app]\nauto_compact_threshold = 0.8\n").unwrap();
+        let ws_override: toml::Table = toml::from_str("[app]\nauto_compact = false\n").unwrap();
+
+        let p_def = provenance::build_provenance(None, None);
+        assert_eq!(p_def.auto_compact, ConfigSource::Default);
+
+        let p_global = provenance::build_provenance(Some(&g), None);
+        assert_eq!(p_global.auto_compact, ConfigSource::Global);
+
+        let p_ws = provenance::build_provenance(Some(&g), Some(&ws_same));
+        assert_eq!(p_ws.auto_compact, ConfigSource::Workspace);
+
+        let p_ov = provenance::build_provenance(Some(&g), Some(&ws_override));
+        assert_eq!(p_ov.auto_compact, ConfigSource::WorkspaceOverridesGlobal);
     }
 }

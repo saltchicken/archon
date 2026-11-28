@@ -187,7 +187,10 @@ pub enum EngineEvent {
         prompt_tokens: u64,
         eval_tokens: u64,
     },
-    TokenUsageUpdated(u64),
+    TokenUsageUpdated {
+        tokens: u64,
+        is_estimate: bool,
+    },
     SessionsListed(Vec<SessionSummary>),
     SkillsUpdated(Vec<SkillDefinition>),
     MemoryUpdated {

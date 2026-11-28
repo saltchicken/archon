@@ -1,5 +1,6 @@
 pub mod attachments;
 pub mod config;
+pub mod context_tokens;
 pub mod db;
 pub mod logger;
 pub mod processes;
@@ -21,6 +22,7 @@ pub use protocol::{
 use crate::tools::{SessionToolState, ToolCall};
 use attachments::ImageStaging;
 use config::Config;
+use context_tokens::TokenCalibration;
 use processes::ProcessRegistry;
 use provider::Provider;
 use reqwest::Client;
@@ -36,7 +38,7 @@ use tokio::{
 };
 use tool_runner::PendingTruncatedTool;
 use tracing::info;
-use turns::QueuedInterjection;
+use turns::{PendingAutoCompact, QueuedInterjection};
 
 struct ActiveSessionState {
     id: String,
@@ -48,6 +50,7 @@ struct ActiveSessionState {
     auto_approve: HashSet<String>,
     executed_skill_hooks: HashSet<String>,
     auto_task_turns: usize,
+    turns_since_auto_compact: u32,
     tools: SessionToolState,
 }
 
@@ -63,6 +66,7 @@ impl ActiveSessionState {
             auto_approve: HashSet::new(),
             executed_skill_hooks: HashSet::new(),
             auto_task_turns: 0,
+            turns_since_auto_compact: u32::MAX,
             tools: SessionToolState::default(),
         }
     }
@@ -75,9 +79,11 @@ struct InFlightState {
     pending_truncated: Option<PendingTruncatedTool>,
     pending_tools: VecDeque<ToolCall>,
     pending_stream_done: Option<EngineEvent>,
+    pending_auto_compact: Option<PendingAutoCompact>,
     queued_interjections: Vec<QueuedInterjection>,
     stream_buffer: String,
     thought_stream_buffer: String,
+    last_preflight_raw_tokens: Option<u64>,
 }
 
 impl InFlightState {
@@ -94,10 +100,12 @@ impl InFlightState {
         self.finish_active_task();
         self.pending_truncated = None;
         self.pending_stream_done = None;
+        self.pending_auto_compact = None;
         self.queued_interjections.clear();
         self.pending_tools.clear();
         self.stream_buffer.clear();
         self.thought_stream_buffer.clear();
+        self.last_preflight_raw_tokens = None;
     }
 }
 
@@ -111,6 +119,7 @@ pub struct CoreEngine {
     session: ActiveSessionState,
     turn: TurnConfig,
     active_max_tool_output_size: usize,
+    token_calibration: TokenCalibration,
     save_session: bool,
     inflight: InFlightState,
     save_task: Option<JoinHandle<()>>,
@@ -151,6 +160,7 @@ impl CoreEngine {
                 skill_inputs: BTreeMap::new(),
             },
             active_max_tool_output_size,
+            token_calibration: TokenCalibration::new(),
             save_session: true,
             inflight: InFlightState::default(),
             save_task: None,
@@ -253,7 +263,41 @@ impl CoreEngine {
         self.turn.active_skill.as_deref()
     }
 
+    pub(super) fn estimate_context_tokens_for(&self, turn: &TurnConfig) -> (u64, u64) {
+        let breakdown = context_tokens::estimate_turn_tokens(
+            &self.config,
+            &self.session.messages,
+            turn,
+            Some(self.session.id.as_str()),
+            &self.session.tools,
+        );
+        let raw = breakdown.total();
+        let calibrated = self.token_calibration.apply(raw);
+        (raw, calibrated)
+    }
+
+    pub(super) fn emit_estimated_token_usage_for(&self, turn: &TurnConfig) -> (u64, u64) {
+        let (raw, calibrated) = self.estimate_context_tokens_for(turn);
+        let _ = self.tx.send(EngineEvent::TokenUsageUpdated {
+            tokens: calibrated,
+            is_estimate: true,
+        });
+        (raw, calibrated)
+    }
+
+    pub(super) fn emit_estimated_token_usage(&self) -> u64 {
+        self.emit_estimated_token_usage_for(&self.turn).1
+    }
+
+    pub(super) fn emit_exact_token_usage(&self, tokens: u64) {
+        let _ = self.tx.send(EngineEvent::TokenUsageUpdated {
+            tokens,
+            is_estimate: false,
+        });
+    }
+
     pub async fn run(mut self, mut cmd_rx: UnboundedReceiver<EngineCommand>) {
+        self.emit_estimated_token_usage();
         loop {
             tokio::select! {
                 maybe_cmd = cmd_rx.recv() => match maybe_cmd {

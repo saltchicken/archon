@@ -1,5 +1,6 @@
 use super::{
     CoreEngine, EngineEvent, TurnConfig,
+    config::Config,
     provider::Provider,
     session::{ChatMessage, ThoughtPart},
     skills,
@@ -15,6 +16,117 @@ pub(super) struct QueuedInterjection {
     pub(super) msg: ChatMessage,
     pub(super) new_images: Vec<(String, Vec<u8>)>,
     pub(super) turn: TurnConfig,
+}
+
+pub(super) struct PendingAutoCompact {
+    pub(super) turn: TurnConfig,
+    pub(super) preserved_trailing: Vec<ChatMessage>,
+    pub(super) pre_tokens: u64,
+    pub(super) compacted_count: usize,
+}
+
+/// Splits `messages` into `(history_to_compact, preserved_trailing)` for
+/// pre-flight auto-compaction. If the conversation ends with an unanswered user
+/// turn (a `user` message plus any pre-turn `hook`/`local` context messages
+/// after the last `assistant` or `tool` message), those trailing messages are
+/// preserved verbatim so the resumed model turn still directly answers them.
+pub(super) fn split_messages_for_auto_compact(
+    messages: &[ChatMessage],
+) -> (&[ChatMessage], Vec<ChatMessage>) {
+    let last_settled_idx = messages
+        .iter()
+        .rposition(|m| matches!(m.role.as_str(), "assistant" | "tool"));
+    if let Some(idx) = last_settled_idx
+        && idx + 1 < messages.len()
+    {
+        let tail = &messages[idx + 1..];
+        let has_trailing_user = tail.iter().any(|m| {
+            m.role == "user"
+                && (!m.content.trim().is_empty()
+                    || m.image_names.as_ref().is_some_and(|i| !i.is_empty())
+                    || m.images.as_ref().is_some_and(|i| !i.is_empty()))
+        });
+        if has_trailing_user {
+            return (&messages[..=idx], tail.to_vec());
+        }
+    }
+    (messages, Vec::new())
+}
+
+/// Returns `true` when pre-flight auto-compaction should run before sending
+/// the next model turn.
+pub(super) fn should_auto_compact(
+    config: &Config,
+    estimated_tokens: u64,
+    num_ctx: u32,
+    history_to_compact: &[ChatMessage],
+    turns_since_auto_compact: u32,
+    has_queued_interjections: bool,
+    allow_auto_compact: bool,
+) -> bool {
+    if !allow_auto_compact || !config.app.auto_compact || has_queued_interjections {
+        return false;
+    }
+    let threshold_tokens =
+        (f64::from(num_ctx.max(1)) * config.app.effective_auto_compact_threshold()).ceil() as u64;
+    if estimated_tokens < threshold_tokens {
+        return false;
+    }
+    if turns_since_auto_compact < config.app.auto_compact_cooldown_turns {
+        return false;
+    }
+    let meaningful_msgs = history_to_compact
+        .iter()
+        .filter(|m| {
+            m.role != "error"
+                && (!m.content.trim().is_empty()
+                    || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty()))
+        })
+        .count();
+    meaningful_msgs >= 2
+}
+
+/// Builds the replacement message list after a successful compaction.
+pub(super) fn build_compacted_messages(
+    summary: &str,
+    prev_count: usize,
+    auto_compact: Option<(u64, Vec<ChatMessage>)>,
+) -> Vec<ChatMessage> {
+    let (header, trailing) = match auto_compact {
+        Some((pre_tokens, preserved)) => (
+            format!(
+                "[Context Auto-Compacted — Prior {prev_count} messages (~{pre_tokens} tokens) summarized into checkpoint below]"
+            ),
+            Some(preserved),
+        ),
+        None => (
+            format!(
+                "[Conversation History Compacted — Prior {prev_count} messages summarized into checkpoint below]"
+            ),
+            None,
+        ),
+    };
+
+    let mut out = vec![
+        ChatMessage::new("user", header),
+        ChatMessage::new(
+            "assistant",
+            format!("### Compacted Context Checkpoint\n\n{}", summary.trim()),
+        ),
+    ];
+
+    if let Some(preserved) = trailing {
+        if !preserved.is_empty() {
+            out.extend(preserved);
+        } else {
+            out.push(ChatMessage::new(
+                "user",
+                "Context was automatically compacted. Continue answering the user's request based on the checkpoint summary above.",
+            ));
+        }
+    }
+
+    out
 }
 
 impl CoreEngine {
@@ -90,6 +202,7 @@ impl CoreEngine {
             has_valid_prompt = true;
         }
         self.save_and_emit_chat(new_images).await;
+        self.emit_estimated_token_usage();
         if has_valid_prompt {
             self.session.auto_task_turns = 0;
             let turn = self.turn.clone();
@@ -159,9 +272,60 @@ impl CoreEngine {
     }
 
     pub(super) async fn spawn_model_turn(&mut self, turn: &TurnConfig) {
+        self.spawn_model_turn_inner(turn, true).await;
+    }
+
+    async fn spawn_model_turn_inner(&mut self, turn: &TurnConfig, allow_auto_compact: bool) {
         self.inflight.stream_buffer.clear();
         self.inflight.thought_stream_buffer.clear();
         self.flush_save_task().await;
+
+        let (raw_tokens, calibrated_tokens) = self.emit_estimated_token_usage_for(turn);
+        debug!(
+            "Pre-flight context estimate: ~{calibrated_tokens} tokens (raw: {raw_tokens}, scale: {:.2}, num_ctx: {})",
+            self.token_calibration.scale(),
+            turn.num_ctx
+        );
+
+        let (history_to_compact, preserved_trailing) =
+            split_messages_for_auto_compact(&self.session.messages);
+        if should_auto_compact(
+            &self.config,
+            calibrated_tokens,
+            turn.num_ctx,
+            history_to_compact,
+            self.session.turns_since_auto_compact,
+            !self.inflight.queued_interjections.is_empty(),
+            allow_auto_compact,
+        ) {
+            let pct = (calibrated_tokens as f64 / f64::from(turn.num_ctx.max(1))) * 100.0;
+            let history_vec = history_to_compact.to_vec();
+            let compacted_count = history_vec.len();
+            info!(
+                "Pre-flight context usage (~{calibrated_tokens}/{} tokens, {pct:.0}%) reached auto-compact threshold ({:.0}%); auto-compacting {compacted_count} message(s) (preserving {} trailing message(s))",
+                turn.num_ctx,
+                self.config.app.effective_auto_compact_threshold() * 100.0,
+                preserved_trailing.len()
+            );
+
+            let instructions = self
+                .resolve_compact_instructions(None, None, true)
+                .unwrap_or(None);
+            self.inflight.pending_auto_compact = Some(PendingAutoCompact {
+                turn: turn.clone(),
+                preserved_trailing,
+                pre_tokens: calibrated_tokens,
+                compacted_count,
+            });
+            self.spawn_compaction_task(
+                history_vec,
+                instructions,
+                format!("auto-compacting context (~{pct:.0}%)"),
+            );
+            return;
+        }
+
+        self.inflight.last_preflight_raw_tokens = Some(raw_tokens);
 
         let sessions = Arc::clone(&self.sessions);
         let session_id = self.session.id.clone();
@@ -256,12 +420,15 @@ impl CoreEngine {
         self.session.messages.push(user_msg);
 
         self.save_and_emit_chat(new_image_blobs).await;
+        self.emit_estimated_token_usage();
         self.start_user_turn(&turn).await;
     }
 
     pub(super) async fn handle_cancel_stream(&mut self) {
         let had_task = self.finish_active_task();
+        let had_pending_auto_compact = self.inflight.pending_auto_compact.take().is_some();
         if !had_task
+            && !had_pending_auto_compact
             && self.inflight.pending_truncated.is_none()
             && self.inflight.pending_tools.is_empty()
             && self.inflight.queued_interjections.is_empty()
@@ -272,6 +439,10 @@ impl CoreEngine {
         info!("User interrupted active turn");
         self.session.auto_task_turns = 0;
         self.inflight.pending_stream_done = None;
+        self.inflight.last_preflight_raw_tokens = None;
+        if had_task || had_pending_auto_compact {
+            let _ = self.tx.send(EngineEvent::ToolCompleted);
+        }
         let flushed = self.flush_interrupted_stream_buffers("Generation cancelled");
         let closed = self.close_unresolved_tool_calls("Cancelled by user.");
 
@@ -283,6 +454,9 @@ impl CoreEngine {
             self.save_session_bg(Vec::new()).await;
         }
         self.emit_chat();
+        if flushed || closed > 0 {
+            self.emit_estimated_token_usage();
+        }
     }
 
     pub(super) async fn handle_switch_model(
@@ -329,9 +503,11 @@ impl CoreEngine {
         self.client = new_client;
         self.turn.num_ctx = num_ctx.max(512);
         self.active_max_tool_output_size = max_tool_output_size.max(1024);
+        self.token_calibration.reset();
 
         self.save_session_bg(Vec::new()).await;
         self.emit_model_config();
+        self.emit_estimated_token_usage();
     }
 
     pub(super) async fn on_stream_done(
@@ -343,6 +519,13 @@ impl CoreEngine {
         thoughts: Vec<ThoughtPart>,
     ) {
         self.finish_active_task();
+        self.session.turns_since_auto_compact =
+            self.session.turns_since_auto_compact.saturating_add(1);
+        if let Some(raw_est) = self.inflight.last_preflight_raw_tokens.take()
+            && prompt_tokens > 0
+        {
+            self.token_calibration.observe(raw_est, prompt_tokens);
+        }
         let final_text = std::mem::take(&mut self.inflight.stream_buffer);
         self.inflight.thought_stream_buffer.clear();
 
@@ -396,9 +579,7 @@ impl CoreEngine {
                         "Active tasks remain; auto-continuing task loop ({}/{max_turns})",
                         self.session.auto_task_turns
                     );
-                    let _ = self
-                        .tx
-                        .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
+                    self.emit_exact_token_usage(prompt_tokens + eval_tokens);
                     let prompt = if self.config.app.task_autoloop_ignore_blocked {
                         "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished."
                     } else {
@@ -432,9 +613,7 @@ impl CoreEngine {
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
             } else {
-                let _ = self
-                    .tx
-                    .send(EngineEvent::TokenUsageUpdated(prompt_tokens + eval_tokens));
+                self.emit_exact_token_usage(prompt_tokens + eval_tokens);
                 self.inflight.pending_stream_done = Some(ev);
                 self.spawn_hooks(after_hooks, self.turn.active_skill.clone(), true);
             }
@@ -446,11 +625,15 @@ impl CoreEngine {
 
     pub(super) async fn on_stream_error(&mut self, ev: EngineEvent, err: String) {
         self.finish_active_task();
-        self.flush_interrupted_stream_buffers("Stream interrupted");
+        self.inflight.last_preflight_raw_tokens = None;
+        let flushed = self.flush_interrupted_stream_buffers("Stream interrupted");
         error!("API Error: {err}");
         self.session.messages.push(ChatMessage::new("error", err));
         self.save_session_bg(Vec::new()).await;
         let _ = self.tx.send(ev);
+        if flushed {
+            self.emit_estimated_token_usage();
+        }
         self.flush_queued_interjections().await;
     }
 
@@ -472,6 +655,9 @@ impl CoreEngine {
         }
         self.session.messages.push(msg);
         self.save_and_emit_chat(Vec::new()).await;
+        if !after_turn {
+            self.emit_estimated_token_usage();
+        }
     }
 
     pub(super) async fn on_hooks_finished(&mut self, after_turn: bool) {
@@ -491,36 +677,15 @@ impl CoreEngine {
         self.spawn_model_turn(&turn).await;
     }
 
-    pub(super) async fn handle_compact_chat(
+    fn resolve_compact_instructions(
         &mut self,
-        skill: Option<String>,
+        skill: Option<&str>,
         instructions: Option<String>,
-    ) {
-        if self.is_turn_active()
-            || self.inflight.pending_truncated.is_some()
-            || !self.inflight.pending_tools.is_empty()
-            || !self.inflight.queued_interjections.is_empty()
-        {
-            self.emit_error("Cannot compact conversation while a turn or tool approval is active.")
-                .await;
-            return;
-        }
-
-        let has_meaningful_msgs = self
-            .session
-            .messages
-            .iter()
-            .any(|m| m.role != "error" && !m.content.trim().is_empty());
-        if !has_meaningful_msgs {
-            self.emit_error("Conversation is empty; nothing to compact.")
-                .await;
-            return;
-        }
-
+        fallback_on_skill_err: bool,
+    ) -> Result<Option<String>, String> {
         // Resolve the effective compaction-guide skill: an explicit `@name`
         // (from `/compact @name`) wins over the `[app] compact_skill` default.
         let effective_skill: Option<String> = skill
-            .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
@@ -534,28 +699,34 @@ impl CoreEngine {
                     .map(str::to_string)
             });
 
-        let instructions = match effective_skill {
+        match effective_skill {
             Some(name) => {
                 // Re-discover skills from disk so freshly added/edited guide
                 // skills are available before we render the instructions.
                 self.refresh_skills();
                 match self.render_compact_skill(&name, instructions.as_deref()) {
-                    Ok(combined) => Some(combined),
-                    Err(e) => {
-                        self.emit_error(e).await;
-                        return;
+                    Ok(combined) => Ok(Some(combined)),
+                    Err(e) if fallback_on_skill_err => {
+                        warn!(
+                            "Auto-compact skill '@{name}' unavailable ({e}); falling back to default compaction prompt."
+                        );
+                        Ok(instructions)
                     }
+                    Err(e) => Err(e),
                 }
             }
-            None => instructions,
-        };
+            None => Ok(instructions),
+        }
+    }
 
-        info!(
-            "Compacting conversation history ({} messages)",
-            self.session.messages.len()
-        );
+    fn spawn_compaction_task(
+        &mut self,
+        messages: Vec<ChatMessage>,
+        instructions: Option<String>,
+        status_summary: String,
+    ) {
         let _ = self.tx.send(EngineEvent::ToolStarted {
-            summary: "compacting conversation context".into(),
+            summary: status_summary,
             index: 1,
             total: 1,
         });
@@ -565,7 +736,6 @@ impl CoreEngine {
         let model = self.model.clone();
         let config = self.config.clone();
         let num_ctx = self.turn.num_ctx;
-        let messages = self.session.messages.clone();
 
         self.spawn_with_tx(move |tx| async move {
             let res = provider
@@ -595,6 +765,53 @@ impl CoreEngine {
                 }
             }
         });
+    }
+
+    pub(super) async fn handle_compact_chat(
+        &mut self,
+        skill: Option<String>,
+        instructions: Option<String>,
+    ) {
+        if self.is_turn_active()
+            || self.inflight.pending_truncated.is_some()
+            || !self.inflight.pending_tools.is_empty()
+            || !self.inflight.queued_interjections.is_empty()
+        {
+            self.emit_error("Cannot compact conversation while a turn or tool approval is active.")
+                .await;
+            return;
+        }
+
+        let has_meaningful_msgs = self
+            .session
+            .messages
+            .iter()
+            .any(|m| m.role != "error" && !m.content.trim().is_empty());
+        if !has_meaningful_msgs {
+            self.emit_error("Conversation is empty; nothing to compact.")
+                .await;
+            return;
+        }
+
+        let instructions =
+            match self.resolve_compact_instructions(skill.as_deref(), instructions, false) {
+                Ok(inst) => inst,
+                Err(e) => {
+                    self.emit_error(e).await;
+                    return;
+                }
+            };
+
+        info!(
+            "Compacting conversation history ({} messages)",
+            self.session.messages.len()
+        );
+        let messages = self.session.messages.clone();
+        self.spawn_compaction_task(
+            messages,
+            instructions,
+            "compacting conversation context".into(),
+        );
     }
 
     /// Renders a compaction-guide skill's prompt body into the compaction
@@ -653,40 +870,359 @@ impl CoreEngine {
     ) {
         self.finish_active_task();
         let _ = self.tx.send(EngineEvent::ToolCompleted);
+        let pending_auto = self.inflight.pending_auto_compact.take();
 
         match res {
             Ok(summary) => {
-                let prev_count = self.session.messages.len();
-                let checkpoint_user = ChatMessage::new(
-                    "user",
-                    format!(
-                        "[Conversation History Compacted — Prior {prev_count} messages summarized into checkpoint below]"
-                    ),
-                );
-                let checkpoint_assistant = ChatMessage::new(
-                    "assistant",
-                    format!("### Compacted Context Checkpoint\n\n{}", summary.trim()),
-                );
-
-                self.session.messages = vec![checkpoint_user, checkpoint_assistant];
-                let estimated_tokens = if eval_tokens > 0 {
-                    eval_tokens + 64
-                } else {
-                    (summary.len() as u64 / 4).max(1)
-                };
-                self.save_and_emit_chat(Vec::new()).await;
-                let _ = self
-                    .tx
-                    .send(EngineEvent::TokenUsageUpdated(estimated_tokens));
-                info!(
-                    "Conversation compacted from {prev_count} messages to 2 checkpoint messages (~{estimated_tokens} tokens)."
-                );
+                self.session.turns_since_auto_compact = 0;
+                match pending_auto {
+                    Some(pending) => {
+                        let prev_count = pending.compacted_count;
+                        let pre_tokens = pending.pre_tokens;
+                        self.session.messages = build_compacted_messages(
+                            &summary,
+                            prev_count,
+                            Some((pre_tokens, pending.preserved_trailing)),
+                        );
+                        self.save_and_emit_chat(Vec::new()).await;
+                        let estimated_tokens = self.emit_estimated_token_usage();
+                        info!(
+                            "Auto-compacted conversation ({prev_count} messages, ~{pre_tokens} -> ~{estimated_tokens} tokens, summary eval: {eval_tokens}); resuming model turn."
+                        );
+                        self.spawn_model_turn_inner(&pending.turn, false).await;
+                    }
+                    None => {
+                        let prev_count = self.session.messages.len();
+                        self.session.messages =
+                            build_compacted_messages(&summary, prev_count, None);
+                        self.save_and_emit_chat(Vec::new()).await;
+                        let estimated_tokens = self.emit_estimated_token_usage();
+                        info!(
+                            "Conversation compacted from {prev_count} messages to 2 checkpoint messages (~{estimated_tokens} tokens, summary eval: {eval_tokens})."
+                        );
+                    }
+                }
             }
             Err(err) => {
-                error!("Failed to compact conversation: {err}");
-                self.emit_error(format!("Failed to compact conversation: {err}"))
-                    .await;
+                if let Some(pending) = pending_auto {
+                    self.session.turns_since_auto_compact = 0;
+                    warn!(
+                        "Auto-compaction failed ({err}); continuing model turn without compacting."
+                    );
+                    self.session.messages.push(ChatMessage::new(
+                        "error",
+                        format!("Auto-compaction failed ({err}); continuing without compacting."),
+                    ));
+                    self.save_and_emit_chat(Vec::new()).await;
+                    self.spawn_model_turn_inner(&pending.turn, false).await;
+                } else {
+                    error!("Failed to compact conversation: {err}");
+                    self.emit_error(format!("Failed to compact conversation: {err}"))
+                        .await;
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolFunction;
+    use serde_json::json;
+
+    fn test_config(auto_compact: bool, threshold: f64, cooldown: u32) -> Config {
+        let mut cfg = Config::default();
+        cfg.app.auto_compact = auto_compact;
+        cfg.app.auto_compact_threshold = threshold;
+        cfg.app.auto_compact_cooldown_turns = cooldown;
+        cfg
+    }
+
+    fn test_turn(num_ctx: u32) -> TurnConfig {
+        TurnConfig {
+            system_prompt: String::new(),
+            num_ctx,
+            enable_tools: true,
+            active_skill: None,
+            skill_args: None,
+            raw_skill_args: None,
+            skill_inputs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn split_messages_preserves_trailing_user_prompt_and_pre_turn_hooks() {
+        let msgs = vec![
+            ChatMessage::new("user", "first question"),
+            ChatMessage::new("assistant", "first answer"),
+            ChatMessage::new("user", "second question"),
+            ChatMessage::new_hook("git status", "clean", false),
+        ];
+
+        let (history, preserved) = split_messages_for_auto_compact(&msgs);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].content, "first question");
+        assert_eq!(history[1].content, "first answer");
+        assert_eq!(preserved.len(), 2);
+        assert_eq!(preserved[0].content, "second question");
+        assert_eq!(preserved[1].role, "hook");
+    }
+
+    #[test]
+    fn split_messages_preserves_image_only_trailing_user_prompt() {
+        let msgs = vec![
+            ChatMessage::new("user", "hello"),
+            ChatMessage::new("assistant", "hi"),
+            ChatMessage {
+                image_names: Some(vec!["screen.png".into()]),
+                ..ChatMessage::new("user", "")
+            },
+        ];
+
+        let (history, preserved) = split_messages_for_auto_compact(&msgs);
+        assert_eq!(history.len(), 2);
+        assert_eq!(preserved.len(), 1);
+        assert_eq!(
+            preserved[0].image_names.as_deref(),
+            Some(&["screen.png".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn split_messages_keeps_all_messages_mid_tool_loop_or_first_turn() {
+        let mid_tool = vec![
+            ChatMessage::new("user", "read file"),
+            ChatMessage {
+                tool_calls: Some(vec![ToolCall {
+                    function: ToolFunction {
+                        name: "read_file".into(),
+                        arguments: json!({ "file_path": "a.rs" }),
+                    },
+                    thought_signature: None,
+                }]),
+                ..ChatMessage::new("assistant", "")
+            },
+            ChatMessage::new_tool("read_file", "huge file contents", false, false),
+        ];
+        let (history, preserved) = split_messages_for_auto_compact(&mid_tool);
+        assert_eq!(history.len(), 3);
+        assert!(preserved.is_empty());
+
+        let first_turn = vec![ChatMessage::new("user", "giant first prompt")];
+        let (history, preserved) = split_messages_for_auto_compact(&first_turn);
+        assert_eq!(history.len(), 1);
+        assert!(preserved.is_empty());
+    }
+
+    #[test]
+    fn should_auto_compact_enforces_flag_threshold_cooldown_queue_and_min_history() {
+        let history = vec![
+            ChatMessage::new("user", "question"),
+            ChatMessage::new("assistant", "answer"),
+        ];
+
+        // Disabled by default.
+        let disabled_cfg = test_config(false, 0.75, 5);
+        assert!(!should_auto_compact(
+            &disabled_cfg,
+            900,
+            1000,
+            &history,
+            u32::MAX,
+            false,
+            true
+        ));
+
+        let cfg = test_config(true, 0.75, 5);
+        // Below threshold (749 < 750).
+        assert!(!should_auto_compact(
+            &cfg,
+            749,
+            1000,
+            &history,
+            u32::MAX,
+            false,
+            true
+        ));
+        // At threshold (750 >= 750) with initial cooldown satisfied.
+        assert!(should_auto_compact(
+            &cfg,
+            750,
+            1000,
+            &history,
+            u32::MAX,
+            false,
+            true
+        ));
+        // Blocked while cooldown hasn't elapsed (4 < 5).
+        assert!(!should_auto_compact(
+            &cfg, 900, 1000, &history, 4, false, true
+        ));
+        // Allowed once cooldown reaches 5.
+        assert!(should_auto_compact(
+            &cfg, 900, 1000, &history, 5, false, true
+        ));
+        // Blocked when queued interjections exist.
+        assert!(!should_auto_compact(
+            &cfg,
+            900,
+            1000,
+            &history,
+            u32::MAX,
+            true,
+            true
+        ));
+        // Blocked on resumed turn (`allow_auto_compact = false`) even when cooldown == 0.
+        let zero_cooldown = test_config(true, 0.75, 0);
+        assert!(!should_auto_compact(
+            &zero_cooldown,
+            950,
+            1000,
+            &history,
+            0,
+            false,
+            false
+        ));
+
+        // Single-turn prompt with no prior history is not compacted (only 1 meaningful message).
+        let single = vec![
+            ChatMessage::new("error", "old error"),
+            ChatMessage::new("user", "only user msg"),
+        ];
+        assert!(!should_auto_compact(
+            &cfg,
+            950,
+            1000,
+            &single,
+            u32::MAX,
+            false,
+            true
+        ));
+
+        // Tool-call-only assistant message counts as meaningful alongside user + tool result.
+        let tool_history = vec![
+            ChatMessage::new("user", "read huge file"),
+            ChatMessage {
+                tool_calls: Some(vec![ToolCall {
+                    function: ToolFunction {
+                        name: "read_file".into(),
+                        arguments: json!({ "file_path": "big.rs" }),
+                    },
+                    thought_signature: None,
+                }]),
+                ..ChatMessage::new("assistant", "")
+            },
+            ChatMessage::new_tool("read_file", "big output", false, false),
+        ];
+        assert!(should_auto_compact(
+            &cfg,
+            900,
+            1000,
+            &tool_history,
+            u32::MAX,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn build_compacted_messages_handles_manual_trailing_prompt_and_tool_loop_continuation() {
+        let manual = build_compacted_messages("Summary body", 12, None);
+        assert_eq!(manual.len(), 2);
+        assert_eq!(manual[0].role, "user");
+        assert!(manual[0].content.contains("Prior 12 messages"));
+        assert_eq!(manual[1].role, "assistant");
+        assert!(manual[1].content.contains("Summary body"));
+
+        let trailing = vec![ChatMessage::new("user", "Please refactor foo.rs")];
+        let with_trailing = build_compacted_messages("Summary body", 8, Some((25_000, trailing)));
+        assert_eq!(with_trailing.len(), 3);
+        assert!(with_trailing[0].content.contains("Auto-Compacted"));
+        assert!(with_trailing[0].content.contains("~25000 tokens"));
+        assert_eq!(with_trailing[1].role, "assistant");
+        assert_eq!(with_trailing[2].role, "user");
+        assert_eq!(with_trailing[2].content, "Please refactor foo.rs");
+
+        // Mid-tool-loop auto-compaction appends a continuation user cue.
+        let mid_tool = build_compacted_messages("Tool findings", 5, Some((28_000, Vec::new())));
+        assert_eq!(mid_tool.len(), 3);
+        assert_eq!(mid_tool[2].role, "user");
+        assert!(mid_tool[2].content.contains("Continue answering"));
+    }
+
+    #[tokio::test]
+    async fn cancel_clears_pending_auto_compact_and_failure_falls_back_to_model_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(true, 0.75, 5);
+        cfg.app.history_dir = tmp.path().to_string_lossy().into_owned();
+        cfg.ollama.base_url = "http://127.0.0.1:1".into();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = CoreEngine::new("qwen3.8:27b".into(), cfg, tx).unwrap();
+        engine.set_save_session(false);
+
+        // 1. Cancelling during auto-compaction clears pending state and emits ToolCompleted.
+        engine.inflight.pending_auto_compact = Some(PendingAutoCompact {
+            turn: test_turn(32_768),
+            preserved_trailing: vec![ChatMessage::new("user", "keep me")],
+            pre_tokens: 26_000,
+            compacted_count: 4,
+        });
+        engine.handle_cancel_stream().await;
+        assert!(engine.inflight.pending_auto_compact.is_none());
+        let mut saw_tool_completed = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, EngineEvent::ToolCompleted) {
+                saw_tool_completed = true;
+            }
+        }
+        assert!(
+            saw_tool_completed,
+            "expected ToolCompleted on cancel during auto-compact"
+        );
+
+        // 2. Auto-compact failure logs a warning message, resets cooldown, and
+        //    proceeds to start the model turn instead of blocking.
+        engine.session.messages = vec![
+            ChatMessage::new("user", "old q"),
+            ChatMessage::new("assistant", "old a"),
+            ChatMessage::new("user", "new q"),
+        ];
+        engine.session.turns_since_auto_compact = 10;
+        engine.inflight.pending_auto_compact = Some(PendingAutoCompact {
+            turn: test_turn(32_768),
+            preserved_trailing: vec![ChatMessage::new("user", "new q")],
+            pre_tokens: 26_000,
+            compacted_count: 2,
+        });
+
+        engine
+            .on_chat_compacted(Err("simulated failure".into()), 0, 0)
+            .await;
+
+        assert!(engine.inflight.pending_auto_compact.is_none());
+        assert_eq!(engine.session.turns_since_auto_compact, 0);
+        assert!(
+            engine
+                .session
+                .messages
+                .iter()
+                .any(|m| { m.role == "error" && m.content.contains("Auto-compaction failed") }),
+            "expected warning message in chat history"
+        );
+        let mut saw_stream_started = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, EngineEvent::StreamStarted) {
+                saw_stream_started = true;
+            }
+        }
+        assert!(
+            saw_stream_started,
+            "expected resumed model turn to emit StreamStarted after compaction failure"
+        );
+
+        // Cleanly abort the spawned background stream task.
+        engine.finish_active_task();
     }
 }

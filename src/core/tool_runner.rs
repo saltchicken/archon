@@ -178,6 +178,12 @@ impl CoreEngine {
         is_error: bool,
     ) {
         let is_model_tool = matches!(source, ToolExecSource::Model { .. });
+        let affects_context = source.include_in_context()
+            || matches!(
+                &source,
+                ToolExecSource::ManualTool { tool_name, .. }
+                    if matches!(tool_name.as_str(), "memory" | "task" | tools::LOAD_TOOLS_NAME)
+            );
         match source {
             ToolExecSource::Model {
                 tool_name,
@@ -223,6 +229,9 @@ impl CoreEngine {
         }
 
         self.save_and_emit_chat(Vec::new()).await;
+        if affects_context {
+            self.emit_estimated_token_usage();
+        }
         let _ = self.tx.send(EngineEvent::ToolCompleted);
         if is_model_tool {
             self.process_pending_tools().await;
@@ -373,6 +382,7 @@ impl CoreEngine {
             if !self.is_call_auto_approved(call) {
                 if modified {
                     self.save_and_emit_chat(Vec::new()).await;
+                    self.emit_estimated_token_usage();
                 }
                 self.prompt_next_tool();
                 return;
@@ -388,6 +398,7 @@ impl CoreEngine {
 
             if modified {
                 self.save_and_emit_chat(Vec::new()).await;
+                self.emit_estimated_token_usage();
             }
             self.spawn_tool_execution(call, index, total, None);
             return;
@@ -395,6 +406,7 @@ impl CoreEngine {
 
         if modified {
             self.save_and_emit_chat(Vec::new()).await;
+            self.emit_estimated_token_usage();
         }
 
         let turn = self.turn.clone();
@@ -445,6 +457,7 @@ impl CoreEngine {
                 false,
             ));
             self.save_and_emit_chat(Vec::new()).await;
+            self.emit_estimated_token_usage();
             info!("Tool declination recorded to chat history.");
             self.process_pending_tools().await;
         }

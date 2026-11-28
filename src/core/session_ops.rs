@@ -172,6 +172,7 @@ impl CoreEngine {
                 self.session.auto_approve.clear();
                 self.session.executed_skill_hooks.clear();
                 self.session.auto_task_turns = 0;
+                self.session.turns_since_auto_compact = u32::MAX;
                 self.session.tools.reset();
                 let _ = self
                     .tx
@@ -193,6 +194,7 @@ impl CoreEngine {
                             self.model = data.model.clone();
                             self.provider = loaded_provider;
                             self.client = new_client;
+                            self.token_calibration.reset();
                         }
                         Err(e) => {
                             let msg = format!(
@@ -213,6 +215,7 @@ impl CoreEngine {
                     .filter(|c| !c.is_empty());
                 self.session.messages = data.messages;
                 self.emit_chat();
+                self.emit_estimated_token_usage();
                 if let Some(err) = model_switch_err {
                     self.emit_error(err).await;
                 }
@@ -253,6 +256,7 @@ impl CoreEngine {
         self.session.auto_approve.clear();
         self.session.executed_skill_hooks.clear();
         self.session.auto_task_turns = 0;
+        self.session.turns_since_auto_compact = u32::MAX;
 
         self.session.messages.truncate(msg_idx + 1);
         if let Some(last) = self.session.messages.last_mut() {
@@ -302,6 +306,7 @@ impl CoreEngine {
             .tx
             .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
         self.save_and_emit_chat(image_blobs).await;
+        self.emit_estimated_token_usage();
     }
 
     pub(super) async fn handle_rename_session(&mut self, new_title: String) {
@@ -378,6 +383,7 @@ impl CoreEngine {
             .tx
             .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
         self.emit_chat();
+        self.emit_estimated_token_usage();
     }
 
     fn format_session_tools_summary(&self) -> String {
@@ -539,12 +545,14 @@ impl CoreEngine {
             ..ChatMessage::new("local", report)
         });
         self.emit_chat();
+        self.emit_estimated_token_usage();
     }
 
     pub(super) async fn handle_set_turn_config(&mut self, new_turn: TurnConfig) {
         self.update_turn_preserving_skill(new_turn);
         self.save_session_bg(Vec::new()).await;
         self.emit_chat();
+        self.emit_estimated_token_usage();
     }
 
     pub(super) async fn handle_set_memory(&mut self, scope: MemoryScope, memory: Memory) {
@@ -578,5 +586,6 @@ impl CoreEngine {
                 self.config.set_scoped_memory(scope, memory);
             }
         }
+        self.emit_estimated_token_usage();
     }
 }
