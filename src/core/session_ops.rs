@@ -428,17 +428,29 @@ impl CoreEngine {
     }
 
     pub(super) async fn handle_manage_session_tools(&mut self, action: SessionToolsAction) {
+        // State-changing actions (reset, +/-) must be visible to the model so it
+        // knows which tools are active vs deferred on the next turn.
+        let include_in_context = !matches!(action, SessionToolsAction::List);
         let report = match action {
             SessionToolsAction::List => self.format_session_tools_summary(),
             SessionToolsAction::Reset => {
+                let was_loaded = self.session.tools.loaded.clone();
                 self.session.tools.reset();
                 let _ = self
                     .tx
                     .send(EngineEvent::SessionToolsUpdated(self.session.tools.clone()));
-                format!(
-                    "Reset session tool overrides back to core_tools.\n\n{}",
-                    self.format_session_tools_summary()
-                )
+                if was_loaded.is_empty() {
+                    format!(
+                        "Reset session tool overrides back to core_tools.\n\n{}",
+                        self.format_session_tools_summary()
+                    )
+                } else {
+                    format!(
+                        "Reset session tools. Previously loaded tool(s) ({}) are no longer active — call `load_tools` to re-activate deferred tools if needed.\n\n{}",
+                        was_loaded.join(", "),
+                        self.format_session_tools_summary()
+                    )
+                }
             }
             SessionToolsAction::Update { add, remove } => {
                 let expanded_add =
@@ -522,7 +534,7 @@ impl CoreEngine {
         };
 
         self.session.messages.push(ChatMessage {
-            include_in_context: false,
+            include_in_context,
             tool_name: Some("/tools".into()),
             ..ChatMessage::new("local", report)
         });

@@ -809,6 +809,12 @@ Coder."#,
         }
         assert!(saw_updated);
 
+        // `/tools list` stays local-only (`include_in_context == false`).
+        engine
+            .handle_manage_session_tools(crate::core::SessionToolsAction::List)
+            .await;
+        assert!(!engine.session.messages.last().unwrap().include_in_context);
+
         // `/tools +browser -read_file` force-enables disabled `browser` and disables core `read_file`.
         engine
             .handle_manage_session_tools(crate::core::SessionToolsAction::Update {
@@ -816,6 +822,7 @@ Coder."#,
                 remove: vec!["read_file".into()],
             })
             .await;
+        assert!(engine.session.messages.last().unwrap().include_in_context);
         assert!(engine.session.tools.is_force_enabled("browser"));
         assert!(engine.session.tools.is_loaded("browser"));
         assert!(engine.session.tools.is_force_disabled("read_file"));
@@ -842,13 +849,16 @@ Coder."#,
         assert_eq!(engine.session.tools.loaded, vec!["git", "browser"]);
         assert!(engine.session.tools.is_force_disabled("read_file"));
 
-        // `/tools reset` clears all overrides back to `core_tools`.
+        // `/tools reset` clears all overrides back to `core_tools` and informs the model.
         engine
             .handle_manage_session_tools(crate::core::SessionToolsAction::Reset)
             .await;
         assert!(engine.session.tools.loaded.is_empty());
         assert!(engine.session.tools.force_enabled.is_empty());
         assert!(engine.session.tools.force_disabled.is_empty());
+        let reset_msg = engine.session.messages.last().unwrap();
+        assert!(reset_msg.include_in_context);
+        assert!(reset_msg.content.contains("git, browser"));
 
         // Reload `git`, then `/reset` clears `session.tools`.
         engine.apply_load_tools_side_effect(&load_call.function.arguments);
