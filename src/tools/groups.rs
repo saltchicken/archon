@@ -1,5 +1,5 @@
-//! Named tool groups (`@code`, `@git`, `@web`, etc.) and custom `[tool_groups]`
-//! expansion helpers.
+//! Named tool groups (`@mygroup`, etc.) defined via `[tool_groups]` in config,
+//! and expansion helpers for resolving them into concrete tool names.
 
 use super::ALL_TOOL_NAMES;
 use std::collections::{BTreeMap, HashSet};
@@ -74,8 +74,8 @@ fn resolve_group_recursive(
     true
 }
 
-/// Resolves a group name (with or without leading `@`) against custom `[tool_groups]`
-/// first, then built-in groups. Returns `None` if the top-level group does not exist.
+/// Resolves a group name (with or without leading `@`) against `[tool_groups]`.
+/// Returns `None` if the group does not exist.
 ///
 /// Note: For custom groups, the returned list may contain unresolved nested `@...`
 /// sentinel tokens or unrecognized tool names so validators (`expand_tool_spec_checked`,

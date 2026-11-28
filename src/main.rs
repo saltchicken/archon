@@ -84,6 +84,15 @@ async fn main() -> Result<()> {
         info!("Archon starting up. Config loaded successfully.");
     }
 
+    let unresolved = config.unresolved_group_refs();
+    if !unresolved.is_empty() {
+        warn!(
+            "Unresolvable tool group(s) in enabled_tools/core_tools: {}. ",
+            unresolved.join(", "),
+        );
+        warn!("Define them under [tool_groups] in your config or remove the references.");
+    }
+
     let target_model = cli_args
         .model
         .clone()

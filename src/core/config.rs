@@ -659,6 +659,24 @@ impl Config {
         Ok(())
     }
 
+    /// Returns `@group` entries in `enabled_tools` or `core_tools` that do not
+    /// resolve against the current `[tool_groups]` definitions.
+    ///
+    /// An empty result means all group references are valid (or no groups are used).
+    pub fn unresolved_group_refs(&self) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for list in [&self.app.enabled_tools, &self.app.core_tools] {
+            if let Err(entries) = crate::tools::expand_tool_spec_checked(list, &self.tool_groups) {
+                for e in entries {
+                    if e.starts_with('@') && !unknown.iter().any(|u| u == &e) {
+                        unknown.push(e);
+                    }
+                }
+            }
+        }
+        unknown
+    }
+
     pub fn restrict_enabled_tools(&mut self, allowed: &[String]) {
         self.provenance.cli_allowed_tools = Some(
             allowed
@@ -924,5 +942,29 @@ mod tests {
 
         let p_ov = provenance::build_provenance(Some(&g), Some(&ws_override));
         assert_eq!(p_ov.auto_compact, ConfigSource::WorkspaceOverridesGlobal);
+    }
+
+    #[test]
+    fn unresolved_group_refs_detects_missing_groups() {
+        let mut cfg = Config::default();
+        // No [tool_groups] defined — any @group reference is unresolvable.
+        cfg.app.enabled_tools = vec!["@code".into(), "read_file".into()];
+        cfg.app.core_tools = vec!["@rust".into()];
+
+        let unresolved = cfg.unresolved_group_refs();
+        assert_eq!(unresolved, vec!["@code".to_string(), "@rust".to_string()]);
+
+        // Defining the groups makes them resolve cleanly.
+        cfg.tool_groups.insert("code".into(), vec!["read_file".into()]);
+        cfg.tool_groups.insert("rust".into(), vec!["cargo".into()]);
+        assert!(cfg.unresolved_group_refs().is_empty());
+    }
+
+    #[test]
+    fn unresolved_group_refs_ignores_wildcard_and_plain_tools() {
+        let mut cfg = Config::default();
+        cfg.app.enabled_tools = vec!["*".into(), "read_file".into(), "search".into()];
+        cfg.app.core_tools = vec!["edit_file".into()];
+        assert!(cfg.unresolved_group_refs().is_empty());
     }
 }
