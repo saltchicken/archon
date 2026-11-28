@@ -70,7 +70,6 @@ pub(super) enum ActiveModal {
     ModelSelect,
     SystemPrompt,
     Memory,
-    PayloadInspector,
 }
 
 pub(super) struct PendingTruncatedUi {
@@ -258,8 +257,6 @@ pub struct TuiApp {
     pub(super) pending_truncated: Option<PendingTruncatedUi>,
     pub(super) tool_feedback: String,
     pub(super) truncated_guide_prompt: String,
-    pub(super) last_payload_preview: String,
-    pub(super) payload_scroll: u16,
 }
 
 fn create_editor_area(title: &'static str, initial: &str) -> TextArea<'static> {
@@ -408,8 +405,6 @@ impl TuiApp {
             pending_truncated: None,
             tool_feedback: String::new(),
             truncated_guide_prompt: String::new(),
-            last_payload_preview: String::new(),
-            payload_scroll: 0,
         }
     }
 
@@ -481,9 +476,7 @@ impl TuiApp {
                         self.prompt_history_idx = None;
                         self.text_area.insert_str(text.replace('\r', ""));
                     }
-                    ActiveModal::Sessions
-                    | ActiveModal::ModelSelect
-                    | ActiveModal::PayloadInspector => {}
+                    ActiveModal::Sessions | ActiveModal::ModelSelect => {}
                 }
             }
             Event::FocusGained => {

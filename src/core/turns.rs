@@ -1,6 +1,6 @@
 use super::{
     CoreEngine, EngineEvent, TurnConfig,
-    provider::{self, Provider},
+    provider::Provider,
     session::{ChatMessage, ThoughtPart},
     skills,
 };
@@ -332,71 +332,6 @@ impl CoreEngine {
 
         self.save_session_bg(Vec::new()).await;
         self.emit_model_config();
-    }
-
-    pub(super) fn handle_inspect_payload(&mut self, draft_prompt: String, mut turn: TurnConfig) {
-        let mut preview_msgs = self
-            .session
-            .messages
-            .iter()
-            .map(ChatMessage::with_ui_image_placeholders)
-            .collect::<Vec<_>>();
-
-        let trimmed_draft = draft_prompt.trim();
-        let effective_draft = if !trimmed_draft.is_empty()
-            && !trimmed_draft.starts_with('/')
-            && !trimmed_draft.starts_with('!')
-            && tools::parse_hash_tool_prefix(trimmed_draft).is_none()
-        {
-            if trimmed_draft.starts_with('@') {
-                self.refresh_skills();
-            }
-            let user_content =
-                skills::apply_at_skill_to_turn(trimmed_draft, &mut turn, &self.config)
-                    .unwrap_or_else(|_| {
-                        skills::parse_at_command(trimmed_draft)
-                            .filter(|(_, args)| !args.is_empty())
-                            .map_or_else(|| trimmed_draft.to_string(), |(_, args)| args.to_string())
-                    });
-            preview_msgs.push(ChatMessage::new("user", user_content.clone()));
-            for summary in skills::preview_due_hooks(
-                &self.config,
-                turn.active_skill.as_deref(),
-                turn.skill_args.as_deref(),
-                turn.raw_skill_args.as_deref(),
-                &turn.skill_inputs,
-                &self.session.executed_skill_hooks,
-                &self.session.messages,
-            ) {
-                preview_msgs.push(ChatMessage::new_hook(
-                    summary,
-                    "[Hook will execute automatically before turn is sent]",
-                    false,
-                ));
-            }
-            Some(user_content)
-        } else {
-            None
-        };
-
-        let (effective_sys, sanitized_msgs, payload) = self.provider.build_turn_payload(
-            &self.model,
-            &self.config,
-            preview_msgs,
-            &turn,
-            Some(self.session.id.as_str()),
-            &self.session.tools,
-        );
-        let formatted = provider::format_payload_inspection(
-            self.provider,
-            &self.model,
-            &turn,
-            &effective_sys,
-            &sanitized_msgs,
-            &payload,
-            effective_draft.as_deref(),
-        );
-        let _ = self.tx.send(EngineEvent::PayloadInspectorOpened(formatted));
     }
 
     pub(super) async fn on_stream_done(

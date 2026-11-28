@@ -17,7 +17,6 @@ pub(super) enum SlashCommand {
     Compact,
     Exit,
     Fork,
-    Inspect,
     Memory,
     Pin,
     Rename,
@@ -32,7 +31,6 @@ impl SlashCommand {
         ("compact", Self::Compact),
         ("exit", Self::Exit),
         ("fork", Self::Fork),
-        ("inspect", Self::Inspect),
         ("memory", Self::Memory),
         ("pin", Self::Pin),
         ("rename", Self::Rename),
@@ -359,11 +357,6 @@ impl TuiApp {
                 } else {
                     self.push_error_message("No assistant response available to fork from.".into());
                 }
-                false
-            }
-            Some(SlashCommand::Inspect) => {
-                self.record_prompt_and_clear(raw_prompt);
-                self.request_payload_inspector();
                 false
             }
             Some(SlashCommand::Pin) => {

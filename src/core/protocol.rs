@@ -122,10 +122,6 @@ pub enum EngineCommand {
         raw_input: String,
         include_in_context: bool,
     },
-    InspectPayload {
-        draft_prompt: String,
-        turn: TurnConfig,
-    },
     ManageSessionTools(SessionToolsAction),
 }
 
@@ -203,7 +199,5 @@ pub enum EngineEvent {
         num_ctx: u32,
         max_tool_output_size: usize,
     },
-    PayloadCaptured(String),
-    PayloadInspectorOpened(String),
     SessionToolsUpdated(SessionToolState),
 }

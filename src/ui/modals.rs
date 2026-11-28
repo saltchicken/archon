@@ -239,14 +239,6 @@ impl TuiApp {
         self.modal = ActiveModal::Memory;
     }
 
-    pub(super) fn request_payload_inspector(&mut self) {
-        let draft_prompt = self.text_area.lines().join("\n");
-        let _ = self.cmd_tx.send(EngineCommand::InspectPayload {
-            draft_prompt,
-            turn: self.current_turn_config(),
-        });
-    }
-
     pub(super) fn resolve_modal_tool(&mut self, approved: bool, always_approve: bool) {
         if self.pending_tool.take().is_some() {
             if approved && always_approve {
@@ -667,40 +659,6 @@ impl TuiApp {
             &self.memory_area,
             " [Tab/^S] Toggle Scope (Global/Workspace)\n [^E] Toggle ON/OFF\n [^X] Clear\n [⇧⏎] Newline\n [⏎] Save & Persist\n [Esc] Cancel",
         );
-    }
-
-    pub(super) fn draw_payload_inspector_modal(&mut self, f: &mut Frame) {
-        let area = centered_rect(85, 80, f.area());
-        f.render_widget(Clear, area);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Fill(1), Constraint::Length(3)])
-            .split(area);
-
-        let lines = format_tool_preview_lines(&self.last_payload_preview);
-        let inner_h = chunks[0].height.saturating_sub(2).max(1);
-        let max_scroll = (lines.len() as u16).saturating_sub(inner_h);
-        self.payload_scroll = self.payload_scroll.min(max_scroll);
-
-        let widget = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((self.payload_scroll, 0))
-            .block(
-                chat_block(" Outgoing Payload & System Prompt Inspector (^G / /inspect) ")
-                    .border_style(Style::default().fg(theme::BORDER_MODAL_ACCENT)),
-            );
-        f.render_widget(widget, chunks[0]);
-
-        let payload_footer: Vec<Line> = [
-            " [↑/↓/PgUp/PgDn/Home/End] Scroll",
-            " [C] Copy to Clipboard",
-            " [Esc/^G] Close",
-        ]
-        .into_iter()
-        .map(hint_line)
-        .collect();
-        f.render_widget(Paragraph::new(payload_footer), chunks[1]);
     }
 
     pub(super) fn draw_context_menu(&self, f: &mut Frame, menu: &super::ContextMenu) {

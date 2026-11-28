@@ -859,7 +859,6 @@ impl TuiApp {
             ActiveModal::ModelSelect => self.draw_model_modal(f),
             ActiveModal::SystemPrompt => self.draw_system_prompt_modal(f),
             ActiveModal::Memory => self.draw_memory_modal(f),
-            ActiveModal::PayloadInspector => self.draw_payload_inspector_modal(f),
             ActiveModal::None => {}
         }
 
@@ -1112,7 +1111,6 @@ impl TuiApp {
             ]));
         }
 
-        lines.push(Line::from("Inspect: Payload (^G)"));
         (config_title, lines)
     }
 

@@ -379,9 +379,6 @@ impl CoreEngine {
                 self.handle_run_manual_tool(raw_input, include_in_context)
                     .await;
             }
-            EngineCommand::InspectPayload { draft_prompt, turn } => {
-                self.handle_inspect_payload(draft_prompt, turn);
-            }
             EngineCommand::ManageSessionTools(action) => {
                 self.handle_manage_session_tools(action).await;
             }

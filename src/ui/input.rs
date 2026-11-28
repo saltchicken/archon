@@ -128,9 +128,6 @@ impl TuiApp {
                     .map(|m| m.name.clone())
                     .unwrap_or_default();
             }
-            ActiveModal::PayloadInspector => {
-                return self.last_payload_preview.clone();
-            }
             ActiveModal::None => {}
         }
 
@@ -336,18 +333,6 @@ impl TuiApp {
                 }
                 return;
             }
-            ActiveModal::PayloadInspector => {
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        self.payload_scroll = self.payload_scroll.saturating_sub(3);
-                    }
-                    MouseEventKind::ScrollDown => {
-                        self.payload_scroll = self.payload_scroll.saturating_add(3);
-                    }
-                    _ => {}
-                }
-                return;
-            }
             _ => {}
         }
 
@@ -474,7 +459,6 @@ impl TuiApp {
             ActiveModal::ModelSelect => self.handle_model_select_key(key.code),
             ActiveModal::SystemPrompt => self.handle_system_prompt_key(key, ctrl, shift),
             ActiveModal::Memory => self.handle_memory_key(key, ctrl, shift),
-            ActiveModal::PayloadInspector => self.handle_payload_inspector_key(key.code, ctrl),
             ActiveModal::None => return self.handle_main_key(key, ctrl),
         }
         false
@@ -720,33 +704,6 @@ impl TuiApp {
         }
     }
 
-    fn handle_payload_inspector_key(&mut self, code: KeyCode, ctrl: bool) {
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => self.modal = ActiveModal::None,
-            KeyCode::Char('g') if ctrl => self.modal = ActiveModal::None,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.payload_scroll = self.payload_scroll.saturating_sub(1);
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.payload_scroll = self.payload_scroll.saturating_add(1);
-            }
-            KeyCode::PageUp => {
-                self.payload_scroll = self.payload_scroll.saturating_sub(15);
-            }
-            KeyCode::PageDown => {
-                self.payload_scroll = self.payload_scroll.saturating_add(15);
-            }
-            KeyCode::Home => self.payload_scroll = 0,
-            KeyCode::End => self.payload_scroll = u16::MAX,
-            KeyCode::Char('c') => {
-                if let Err(e) = copy_text_to_clipboard(&self.last_payload_preview) {
-                    self.push_error_message(format!("Failed to copy payload: {e}"));
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn handle_memory_key(&mut self, key: KeyEvent, ctrl: bool, shift: bool) {
         match key.code {
             KeyCode::Esc => self.modal = ActiveModal::None,
@@ -879,9 +836,6 @@ impl TuiApp {
             }
             KeyCode::Char('p') if ctrl => {
                 self.open_memory_modal();
-            }
-            KeyCode::Char('g') if ctrl => {
-                self.request_payload_inspector();
             }
             _ => {
                 self.prompt_history_idx = None;

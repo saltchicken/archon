@@ -52,30 +52,6 @@ pub fn is_hook_already_in_session(
         })
 }
 
-pub fn preview_due_hooks(
-    config: &Config,
-    active_skill: Option<&str>,
-    skill_args: Option<&str>,
-    raw_skill_args: Option<&str>,
-    skill_inputs: &BTreeMap<String, Value>,
-    executed_hooks: &HashSet<String>,
-    messages: &[ChatMessage],
-) -> Vec<String> {
-    let mut temp = executed_hooks.clone();
-    collect_due_hooks(
-        config,
-        active_skill,
-        skill_args,
-        raw_skill_args,
-        skill_inputs,
-        &mut temp,
-        messages,
-    )
-    .into_iter()
-    .map(|(summary, _)| summary)
-    .collect()
-}
-
 fn last_assistant_response(messages: &[ChatMessage]) -> &str {
     messages
         .iter()

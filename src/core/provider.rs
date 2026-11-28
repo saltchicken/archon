@@ -274,7 +274,7 @@ impl Provider {
         turn: &TurnConfig,
         session_id: Option<&str>,
         session_tools: &tools::SessionToolState,
-    ) -> (String, Vec<ChatMessage>, Value) {
+    ) -> Value {
         let active_skill = turn.active_skill.as_deref();
         let skill_args = turn.skill_args.as_deref();
         let raw_skill_args = turn.raw_skill_args.as_deref();
@@ -298,7 +298,7 @@ impl Provider {
 
         let sanitized_messages = sanitize_messages_for_turn(messages);
 
-        let payload = match self {
+        match self {
             Self::Ollama => ollama::build_payload(
                 model,
                 &sanitized_messages,
@@ -309,9 +309,7 @@ impl Provider {
             Self::Gemini => {
                 gemini::build_payload(&sanitized_messages, &effective_system_prompt, tools_schema)
             }
-        };
-
-        (effective_system_prompt, sanitized_messages, payload)
+        }
     }
 
     async fn stream_payload(
@@ -655,7 +653,7 @@ impl Provider {
         session_tools: tools::SessionToolState,
         tx: UnboundedSender<EngineEvent>,
     ) {
-        let (effective_system_prompt, sanitized_msgs, payload) = self.build_turn_payload(
+        let payload = self.build_turn_payload(
             &model,
             &config,
             messages,
@@ -663,186 +661,9 @@ impl Provider {
             session_id.as_deref(),
             &session_tools,
         );
-
-        let inspection = format_payload_inspection(
-            *self,
-            &model,
-            &turn,
-            &effective_system_prompt,
-            &sanitized_msgs,
-            &payload,
-            None,
-        );
-        let _ = tx.send(EngineEvent::PayloadCaptured(inspection));
         self.stream_payload(client, model, config, payload, tx)
             .await;
     }
-}
-
-fn redact_base64_in_value(val: &mut Value) {
-    match val {
-        Value::Object(obj) => {
-            if let Some(inline) = obj.get_mut("inlineData").and_then(Value::as_object_mut)
-                && let Some(data_len) = inline.get("data").and_then(Value::as_str).map(str::len)
-            {
-                inline.insert(
-                    "data".into(),
-                    json!(format!("<base64 image data: {data_len} chars>")),
-                );
-            }
-            if let Some(imgs) = obj.get_mut("images").and_then(Value::as_array_mut) {
-                for item in imgs {
-                    if let Some(len) = item.as_str().map(str::len) {
-                        *item = json!(format!("<base64 image data: {len} chars>"));
-                    }
-                }
-            }
-            for v in obj.values_mut() {
-                redact_base64_in_value(v);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                redact_base64_in_value(v);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub fn format_payload_inspection(
-    provider: Provider,
-    model: &str,
-    turn: &TurnConfig,
-    effective_system_prompt: &str,
-    messages: &[ChatMessage],
-    payload: &Value,
-    draft_prompt: Option<&str>,
-) -> String {
-    let mut out = String::new();
-
-    let _ = writeln!(out, "--- METADATA ---");
-    let _ = writeln!(out, "  provider: {:?}", provider);
-    let _ = writeln!(out, "  model: {}", model);
-    let _ = writeln!(out, "  num_ctx: {}", turn.num_ctx);
-    let _ = writeln!(out, "  tools_enabled: {}", turn.enable_tools);
-    let _ = writeln!(
-        out,
-        "  active_skill: {}",
-        turn.active_skill.as_deref().unwrap_or("None")
-    );
-    if let Some(args) = turn.skill_args.as_deref().filter(|s| !s.is_empty()) {
-        let _ = writeln!(out, "  skill_args: {}", args);
-    }
-    if !turn.skill_inputs.is_empty() {
-        let pairs: Vec<String> = turn
-            .skill_inputs
-            .iter()
-            .map(|(k, v)| format!("{k}={}", crate::core::skills::format_arg_value(v)))
-            .collect();
-        let _ = writeln!(out, "  skill_inputs: {}", pairs.join(", "));
-    }
-
-    let _ = writeln!(out, "\n--- EFFECTIVE SYSTEM MESSAGE ---");
-    if effective_system_prompt.trim().is_empty() {
-        let _ = writeln!(out, "(Empty — no system message will be sent)");
-    } else {
-        let _ = writeln!(out, "{}", effective_system_prompt);
-    }
-
-    if let Some(draft) = draft_prompt.filter(|d| !d.trim().is_empty()) {
-        let _ = writeln!(out, "\n--- DRAFT PROMPT (UNSENT) ---");
-        let _ = writeln!(out, "{}", draft);
-    }
-
-    let _ = writeln!(out, "\n--- CONVERSATION MESSAGES ({}) ---", messages.len());
-    if messages.is_empty() {
-        let _ = writeln!(out, "(No messages in context)");
-    } else {
-        for (idx, m) in messages.iter().enumerate() {
-            let mut tags = Vec::new();
-            if let Some(ref name) = m.tool_name {
-                tags.push(format!("tool_name={name}"));
-            }
-            let img_count = m
-                .images
-                .as_ref()
-                .map_or(0, Vec::len)
-                .max(m.image_names.as_ref().map_or(0, Vec::len));
-            if img_count > 0 {
-                tags.push(format!("images={img_count}"));
-            }
-            if let Some(ref tc) = m.tool_calls {
-                tags.push(format!("tool_calls={}", tc.len()));
-            }
-            if let Some(ref th) = m.thoughts {
-                tags.push(format!("thoughts={}", th.len()));
-            }
-            let meta = if tags.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", tags.join(", "))
-            };
-            let _ = writeln!(out, "[#{} {}]{}", idx + 1, m.role.to_uppercase(), meta);
-            if let Some(ref th) = m.thoughts {
-                for tp in th {
-                    if let Some(text) = tp.text.as_ref().filter(|s| !s.trim().is_empty()) {
-                        let _ = writeln!(out, "<thinking>\n{}\n</thinking>", text.trim());
-                    }
-                }
-            }
-            if !m.content.is_empty() {
-                let _ = writeln!(out, "{}", m.content);
-            }
-            if let Some(ref calls) = m.tool_calls {
-                for c in calls {
-                    let _ = writeln!(
-                        out,
-                        "  -> call: {}({})",
-                        c.function.name, c.function.arguments
-                    );
-                }
-            }
-            let _ = writeln!(out);
-        }
-    }
-
-    let mut clean_payload = payload.clone();
-    redact_base64_in_value(&mut clean_payload);
-    if let Some(obj) = clean_payload.as_object_mut()
-        && let Some(tools_val) = obj.get_mut("tools")
-    {
-        let tool_names: Vec<String> = match provider {
-            Provider::Ollama => tools_val
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|t| t.get("function")?.get("name")?.as_str().map(String::from))
-                .collect(),
-            Provider::Gemini => tools_val
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|t| t.get("functionDeclarations")?.as_array())
-                .flatten()
-                .filter_map(|d| d.get("name")?.as_str().map(String::from))
-                .collect(),
-        };
-        *tools_val = json!(format!(
-            "[{} tool declarations: {}]",
-            tool_names.len(),
-            tool_names.join(", ")
-        ));
-    }
-
-    let _ = writeln!(out, "--- WIRE PAYLOAD JSON ---");
-    let _ = writeln!(
-        out,
-        "{}",
-        serde_json::to_string_pretty(&clean_payload).unwrap_or_default()
-    );
-
-    out.trim_end().to_string()
 }
 
 pub fn sanitize_messages_for_turn(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {

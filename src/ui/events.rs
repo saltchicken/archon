@@ -155,14 +155,6 @@ impl TuiApp {
                     self.model_idx = idx;
                 }
             }
-            EngineEvent::PayloadCaptured(preview) => {
-                self.last_payload_preview = preview;
-            }
-            EngineEvent::PayloadInspectorOpened(preview) => {
-                self.last_payload_preview = preview;
-                self.payload_scroll = 0;
-                self.modal = ActiveModal::PayloadInspector;
-            }
             EngineEvent::SessionToolsUpdated(session_tools) => {
                 self.session_tools = session_tools;
             }
