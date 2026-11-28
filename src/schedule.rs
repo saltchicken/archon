@@ -166,6 +166,10 @@ fn validate_on_calendar(expr: &str) -> Result<()> {
     Ok(())
 }
 
+fn format_workspace_header_value(working_dir: &Path) -> String {
+    working_dir.to_string_lossy().replace(['\n', '\r'], " ")
+}
+
 pub fn render_service(
     sched: &ScheduleConfig,
     scope: &str,
@@ -218,7 +222,7 @@ pub fn render_service(
 
     let exec_start = args.join(" ");
     let wd_raw = working_dir.to_string_lossy();
-    let wd_header = wd_raw.replace(['\n', '\r'], " ");
+    let wd_header = format_workspace_header_value(working_dir);
     let wd_unit = escape_systemd_specifiers(&wd_raw);
     let desc_name = escape_systemd_specifiers(sched.name.trim());
 
@@ -240,7 +244,7 @@ pub fn render_timer(
     working_dir: &Path,
     service_unit: &str,
 ) -> String {
-    let wd_header = working_dir.to_string_lossy().replace(['\n', '\r'], " ");
+    let wd_header = format_workspace_header_value(working_dir);
     let persistent = if sched.persistent { "true" } else { "false" };
     let desc_name = escape_systemd_specifiers(sched.name.trim());
     let cal = escape_systemd_specifiers(sched.on_calendar.trim());
@@ -259,11 +263,84 @@ pub fn render_timer(
     )
 }
 
-fn is_managed_file_for_scope(path: &Path, scope: &str) -> bool {
-    let expected = format!("{MANAGED_HEADER_PREFIX} (scope={scope},");
-    fs::read_to_string(path)
-        .map(|content| content.starts_with(&expected))
-        .unwrap_or(false)
+#[derive(Debug, PartialEq, Eq)]
+enum ManagedUnitMatch {
+    NotManaged,
+    Owned,
+    OtherWorkspace(String),
+}
+
+fn inspect_managed_unit_for_scope(
+    path: &Path,
+    scope: &str,
+    working_dir: &Path,
+) -> ManagedUnitMatch {
+    let Ok(content) = fs::read_to_string(path) else {
+        return ManagedUnitMatch::NotManaged;
+    };
+    let Some(first_line) = content.lines().next() else {
+        return ManagedUnitMatch::NotManaged;
+    };
+    let scope_prefix = format!("{MANAGED_HEADER_PREFIX} (scope={scope},");
+    let Some(rest) = first_line.strip_prefix(&scope_prefix) else {
+        return ManagedUnitMatch::NotManaged;
+    };
+    if scope == "global" {
+        return ManagedUnitMatch::Owned;
+    }
+    let Some(ws_raw) = rest
+        .trim_start()
+        .strip_prefix("workspace=")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return ManagedUnitMatch::Owned;
+    };
+
+    let current_wd = format_workspace_header_value(working_dir);
+    if ws_raw == current_wd
+        || dunce::canonicalize(Path::new(ws_raw))
+            .ok()
+            .is_some_and(|p| p == working_dir)
+    {
+        ManagedUnitMatch::Owned
+    } else {
+        ManagedUnitMatch::OtherWorkspace(ws_raw.to_string())
+    }
+}
+
+fn scan_scope_units(unit_dir: &Path, scope: &str, working_dir: &Path) -> Result<Vec<PathBuf>> {
+    if !unit_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let prefix = scope_unit_prefix(scope);
+    let mut owned = Vec::new();
+    let entries = fs::read_dir(unit_dir).with_context(|| {
+        format!(
+            "Failed to read systemd user unit directory {}",
+            unit_dir.display()
+        )
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with(&prefix) {
+            continue;
+        }
+        match inspect_managed_unit_for_scope(&path, scope, working_dir) {
+            ManagedUnitMatch::NotManaged => {}
+            ManagedUnitMatch::Owned => owned.push(path),
+            ManagedUnitMatch::OtherWorkspace(other_ws) => {
+                bail!(
+                    "Schedule scope '{scope}' is already used by workspace '{other_ws}' ({file_name}). \
+                     Set a distinct table key or `name` for this workspace in {} to avoid collisions.",
+                    workspaces_config_path().display()
+                );
+            }
+        }
+    }
+    Ok(owned)
 }
 
 fn run_systemctl(args: &[&str], allow_failure: bool) -> Result<()> {
@@ -300,8 +377,6 @@ fn sync_schedules(config: &Config, global: bool) -> Result<String> {
     let (scope, working_dir) = resolve_scope(config, global, true)?;
     let schedules = schedules_for_scope(config, global);
     let unit_dir = systemd_user_dir()?;
-    fs::create_dir_all(&unit_dir)
-        .with_context(|| format!("Failed to create {}", unit_dir.display()))?;
 
     let exe_path =
         env::current_exe().context("Failed to resolve current archon executable path")?;
@@ -343,31 +418,28 @@ fn sync_schedules(config: &Config, global: bool) -> Result<String> {
         }
     }
 
+    let existing_units = scan_scope_units(&unit_dir, &scope, &working_dir)?;
+    fs::create_dir_all(&unit_dir)
+        .with_context(|| format!("Failed to create {}", unit_dir.display()))?;
+
     // Prune stale managed units for this scope
-    let prefix = scope_unit_prefix(&scope);
     let mut removed = 0usize;
-    if let Ok(entries) = fs::read_dir(&unit_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !file_name.starts_with(&prefix) || !is_managed_file_for_scope(&path, &scope) {
-                continue;
+    for path in existing_units {
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let base = file_name
+            .strip_suffix(".timer")
+            .or_else(|| file_name.strip_suffix(".service"));
+        let Some(base) = base else {
+            continue;
+        };
+        if !desired_bases.contains(base) {
+            if file_name.ends_with(".timer") {
+                let _ = run_systemctl(&["disable", "--now", file_name], true);
             }
-            let base = file_name
-                .strip_suffix(".timer")
-                .or_else(|| file_name.strip_suffix(".service"));
-            let Some(base) = base else {
-                continue;
-            };
-            if !desired_bases.contains(base) {
-                if file_name.ends_with(".timer") {
-                    let _ = run_systemctl(&["disable", "--now", file_name], true);
-                }
-                if fs::remove_file(&path).is_ok() {
-                    removed += 1;
-                }
+            if fs::remove_file(&path).is_ok() {
+                removed += 1;
             }
         }
     }
@@ -409,7 +481,10 @@ fn sync_schedules(config: &Config, global: bool) -> Result<String> {
 }
 
 fn list_schedules(config: &Config, global: bool) -> Result<String> {
-    let (scope, _) = resolve_scope(config, global, true)?;
+    let (scope, working_dir) = resolve_scope(config, global, true)?;
+    if let Ok(unit_dir) = systemd_user_dir() {
+        scan_scope_units(&unit_dir, &scope, &working_dir)?;
+    }
     let schedules = schedules_for_scope(config, global);
     let mut out = String::new();
 
@@ -471,7 +546,10 @@ fn list_schedules(config: &Config, global: bool) -> Result<String> {
 }
 
 fn run_schedule(config: &Config, name: &str, global: bool) -> Result<String> {
-    let (scope, _) = resolve_scope(config, global, false)?;
+    let (scope, working_dir) = resolve_scope(config, global, false)?;
+    if let Ok(unit_dir) = systemd_user_dir() {
+        scan_scope_units(&unit_dir, &scope, &working_dir)?;
+    }
     let service_name = format!("{}.service", unit_base_name(&scope, name));
     run_systemctl(&["start", &service_name], false)?;
     Ok(format!("Completed {service_name}."))
@@ -483,7 +561,10 @@ fn logs_schedule(
     lines: usize,
     global: bool,
 ) -> Result<String> {
-    let (scope, _) = resolve_scope(config, global, false)?;
+    let (scope, working_dir) = resolve_scope(config, global, false)?;
+    if let Ok(unit_dir) = systemd_user_dir() {
+        scan_scope_units(&unit_dir, &scope, &working_dir)?;
+    }
     let unit_filter = match name {
         Some(n) => format!("{}.service", unit_base_name(&scope, n)),
         None => format!("{}*.service", scope_unit_prefix(&scope)),
@@ -515,22 +596,18 @@ fn logs_schedule(
 }
 
 fn clean_schedules(config: &Config, global: bool) -> Result<String> {
-    let (scope, _) = resolve_scope(config, global, false)?;
+    let (scope, working_dir) = resolve_scope(config, global, false)?;
     let unit_dir = systemd_user_dir()?;
     if !unit_dir.exists() {
         return Ok("No systemd user unit directory found; nothing to clean.".to_string());
     }
 
-    let prefix = scope_unit_prefix(&scope);
+    let existing_units = scan_scope_units(&unit_dir, &scope, &working_dir)?;
     let mut removed = 0usize;
-    for entry in fs::read_dir(&unit_dir)?.flatten() {
-        let path = entry.path();
+    for path in existing_units {
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !file_name.starts_with(&prefix) || !is_managed_file_for_scope(&path, &scope) {
-            continue;
-        }
         if file_name.ends_with(".timer") {
             let _ = run_systemctl(&["disable", "--now", file_name], true);
         }
@@ -545,4 +622,117 @@ fn clean_schedules(config: &Config, global: bool) -> Result<String> {
     Ok(format!(
         "Cleaned {removed} managed unit file(s) for scope '{scope}'."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_schedule() -> ScheduleConfig {
+        ScheduleConfig {
+            name: "daily".to_string(),
+            enabled: true,
+            on_calendar: "daily".to_string(),
+            persistent: true,
+            skill: None,
+            prompt: "Summarize".to_string(),
+            model: None,
+            system_prompt: None,
+            auto_approve: false,
+            no_tools: true,
+            enabled_tools: None,
+            save_session: false,
+        }
+    }
+
+    #[test]
+    fn scan_scope_units_allows_same_workspace_and_paths_with_parens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_dir = tmp.path().join("units");
+        let ws = tmp.path().join("my (app)");
+        fs::create_dir_all(&unit_dir).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        let ws = dunce::canonicalize(&ws).unwrap();
+
+        let sched = sample_schedule();
+        let base = unit_base_name("my-app", &sched.name);
+        let svc_name = format!("{base}.service");
+        let tmr_name = format!("{base}.timer");
+
+        fs::write(
+            unit_dir.join(&svc_name),
+            render_service(&sched, "my-app", &ws, Path::new("/usr/bin/archon")),
+        )
+        .unwrap();
+        fs::write(
+            unit_dir.join(&tmr_name),
+            render_timer(&sched, "my-app", &ws, &svc_name),
+        )
+        .unwrap();
+        // Unrelated scope unit and unmanaged file should be ignored.
+        fs::write(
+            unit_dir.join("archon-sched-other--daily.service"),
+            render_service(
+                &sched,
+                "other",
+                Path::new("/tmp/other"),
+                Path::new("/usr/bin/archon"),
+            ),
+        )
+        .unwrap();
+        fs::write(unit_dir.join("custom.service"), "[Unit]\n").unwrap();
+
+        let found = scan_scope_units(&unit_dir, "my-app", &ws).unwrap();
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn scan_scope_units_rejects_colliding_workspace_for_same_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_dir = tmp.path().join("units");
+        let ws_work = tmp.path().join("work").join("api");
+        let ws_personal = tmp.path().join("personal").join("api");
+        fs::create_dir_all(&unit_dir).unwrap();
+        fs::create_dir_all(&ws_work).unwrap();
+        fs::create_dir_all(&ws_personal).unwrap();
+        let ws_work = dunce::canonicalize(&ws_work).unwrap();
+        let ws_personal = dunce::canonicalize(&ws_personal).unwrap();
+
+        let sched = sample_schedule();
+        let base = unit_base_name("api", &sched.name);
+        fs::write(
+            unit_dir.join(format!("{base}.service")),
+            render_service(&sched, "api", &ws_work, Path::new("/usr/bin/archon")),
+        )
+        .unwrap();
+
+        let err = scan_scope_units(&unit_dir, "api", &ws_personal).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("already used by workspace"), "{msg}");
+        assert!(msg.contains(&ws_work.display().to_string()), "{msg}");
+        assert!(msg.contains("workspaces.toml"), "{msg}");
+    }
+
+    #[test]
+    fn scan_scope_units_allows_global_scope_without_workspace_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_dir = tmp.path().join("units");
+        fs::create_dir_all(&unit_dir).unwrap();
+
+        let sched = sample_schedule();
+        let base = unit_base_name("global", &sched.name);
+        fs::write(
+            unit_dir.join(format!("{base}.service")),
+            render_service(
+                &sched,
+                "global",
+                Path::new("/home/alice"),
+                Path::new("/usr/bin/archon"),
+            ),
+        )
+        .unwrap();
+
+        let found = scan_scope_units(&unit_dir, "global", Path::new("/home/bob")).unwrap();
+        assert_eq!(found.len(), 1);
+    }
 }
