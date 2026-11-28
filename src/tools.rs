@@ -33,7 +33,7 @@ pub mod workspace_snapshot;
 
 pub use approval::format_approval;
 pub use groups::{
-    BUILTIN_TOOL_GROUPS, all_group_names, expand_tool_list, expand_tool_spec_checked,
+    all_group_names, default_tool_groups, expand_tool_list, expand_tool_spec_checked,
     format_valid_tools_and_groups, is_known_tool_or_group, resolve_tool_group,
 };
 pub use manual::parse_manual_tool_call;
@@ -1795,22 +1795,23 @@ mod tests {
     }
 
     #[test]
-    fn builtin_tool_groups_cover_all_registered_tools_without_unknowns() {
+    fn default_tool_groups_cover_all_registered_tools_without_unknowns() {
+        let groups = super::default_tool_groups();
         let mut covered = std::collections::HashSet::new();
-        for &(group, members) in super::BUILTIN_TOOL_GROUPS {
+        for (group, members) in &groups {
             assert!(!members.is_empty(), "group @{group} must not be empty");
-            for &member in members {
+            for member in members {
                 assert!(
-                    super::ALL_TOOL_NAMES.contains(&member),
+                    super::ALL_TOOL_NAMES.contains(&member.as_str()),
                     "group @{group} references unknown tool '{member}'"
                 );
-                covered.insert(member);
+                covered.insert(member.as_str());
             }
         }
         for &tool in super::ALL_TOOL_NAMES {
             assert!(
                 covered.contains(tool),
-                "registered tool '{tool}' is missing from BUILTIN_TOOL_GROUPS"
+                "registered tool '{tool}' is missing from default tool groups"
             );
             assert_ne!(
                 super::tool_short_summary(tool),

@@ -377,7 +377,8 @@ fn skill_check_and_resolve_support_tool_groups() {
         report.format_report(true)
     );
 
-    let skills = archon::core::skills::discover_skills(&dir.to_string_lossy(), None);
+    let skills =
+        archon::core::skills::discover_skills_with_groups(&dir.to_string_lossy(), None, &cfg.tool_groups);
     let git_helper = skills.iter().find(|s| s.name == "git-helper").unwrap();
     assert!(git_helper.allows_tool("git"));
     assert!(git_helper.allows_tool("github_repo"));

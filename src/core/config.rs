@@ -437,7 +437,7 @@ impl Default for Config {
                 chat_timeout: 600,
                 status_timeout: 5,
             },
-            tool_groups: BTreeMap::new(),
+            tool_groups: crate::tools::groups::default_tool_groups(),
             models: vec![
                 ModelPreset {
                     name: "qwen3.8:27b".into(),

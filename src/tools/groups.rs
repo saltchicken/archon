@@ -4,38 +4,47 @@
 use super::ALL_TOOL_NAMES;
 use std::collections::{BTreeMap, HashSet};
 
-/// Built-in named tool groups (stored without the leading `@`).
-pub const BUILTIN_TOOL_GROUPS: &[(&str, &[&str])] = &[
-    (
-        "code",
-        &[
-            "read_file",
-            "edit_file",
-            "create_file",
-            "search",
-            "repo_map",
-            "fs",
-            "workspace_snapshot",
+/// Returns the default tool groups that are seeded into `Config::default()`.
+/// Users can override or remove any of these via `[tool_groups]` in their config.
+pub fn default_tool_groups() -> BTreeMap<String, Vec<String>> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        "code".into(),
+        vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "create_file".into(),
+            "search".into(),
+            "repo_map".into(),
+            "fs".into(),
+            "workspace_snapshot".into(),
         ],
-    ),
-    ("rust", &["cargo"]),
-    ("git", &["git", "github_repo"]),
-    ("web", &["fetch_url", "curl", "browser"]),
-    (
-        "sysadmin",
-        &[
-            "system",
-            "dotfiles",
-            "process",
-            "schedule",
-            "notify",
-            "clipboard",
+    );
+    m.insert("rust".into(), vec!["cargo".into()]);
+    m.insert("git".into(), vec!["git".into(), "github_repo".into()]);
+    m.insert(
+        "web".into(),
+        vec!["fetch_url".into(), "curl".into(), "browser".into()],
+    );
+    m.insert(
+        "sysadmin".into(),
+        vec![
+            "system".into(),
+            "dotfiles".into(),
+            "process".into(),
+            "schedule".into(),
+            "notify".into(),
+            "clipboard".into(),
         ],
-    ),
-    ("data", &["sqlite", "memory", "session"]),
-    ("planning", &["task", "todo"]),
-    ("agent", &["skill", "subagent"]),
-];
+    );
+    m.insert(
+        "data".into(),
+        vec!["sqlite".into(), "memory".into(), "session".into()],
+    );
+    m.insert("planning".into(), vec!["task".into(), "todo".into()]);
+    m.insert("agent".into(), vec!["skill".into(), "subagent".into()]);
+    m
+}
 
 fn normalize_group_key(raw: &str) -> &str {
     raw.trim().trim_start_matches('@').trim()
@@ -45,16 +54,10 @@ fn lookup_raw_group_members<'a>(
     key: &str,
     custom_groups: &'a BTreeMap<String, Vec<String>>,
 ) -> Option<Vec<&'a str>> {
-    if let Some((_, members)) = custom_groups
+    custom_groups
         .iter()
         .find(|(k, _)| normalize_group_key(k).eq_ignore_ascii_case(key))
-    {
-        return Some(members.iter().map(String::as_str).collect());
-    }
-    BUILTIN_TOOL_GROUPS
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(key))
-        .map(|(_, members)| members.to_vec())
+        .map(|(_, members)| members.iter().map(String::as_str).collect())
 }
 
 fn canonical_tool_name(raw: &str) -> Option<&'static str> {
@@ -232,12 +235,9 @@ pub fn is_known_tool_or_group(spec: &str, custom_groups: &BTreeMap<String, Vec<S
     }
 }
 
-/// Returns sorted list of all available `@group` names (built-in + custom).
+/// Returns sorted list of all available `@group` names from `custom_groups`.
 pub fn all_group_names(custom_groups: &BTreeMap<String, Vec<String>>) -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_TOOL_GROUPS
-        .iter()
-        .map(|(k, _)| format!("@{k}"))
-        .collect();
+    let mut names: Vec<String> = Vec::new();
     for raw_key in custom_groups.keys() {
         let key = normalize_group_key(raw_key);
         if key.is_empty() {
