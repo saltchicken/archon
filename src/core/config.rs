@@ -955,7 +955,8 @@ mod tests {
         assert_eq!(unresolved, vec!["@code".to_string(), "@rust".to_string()]);
 
         // Defining the groups makes them resolve cleanly.
-        cfg.tool_groups.insert("code".into(), vec!["read_file".into()]);
+        cfg.tool_groups
+            .insert("code".into(), vec!["read_file".into()]);
         cfg.tool_groups.insert("rust".into(), vec!["cargo".into()]);
         assert!(cfg.unresolved_group_refs().is_empty());
     }

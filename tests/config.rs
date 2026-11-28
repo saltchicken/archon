@@ -129,9 +129,11 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
             "workspace_snapshot".into(),
         ],
     );
-    cfg.tool_groups.insert("git".into(), vec!["git".into(), "github_repo".into()]);
+    cfg.tool_groups
+        .insert("git".into(), vec!["git".into(), "github_repo".into()]);
     cfg.tool_groups.insert("rust".into(), vec!["cargo".into()]);
-    cfg.tool_groups.insert("planning".into(), vec!["task".into(), "todo".into()]);
+    cfg.tool_groups
+        .insert("planning".into(), vec!["task".into(), "todo".into()]);
     cfg.tool_groups
         .insert("mycustom".into(), vec!["sqlite".into(), "@planning".into()]);
     cfg.tool_groups
