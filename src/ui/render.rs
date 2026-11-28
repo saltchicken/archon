@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     core::{
-        config::{ConfigSource, MemoryScope, ToolProvenance},
+        config::{ConfigSource, ToolProvenance},
         session::{ChatMessage, truncate_str},
         skills::{self, SkillDefinition},
     },
@@ -1282,131 +1282,11 @@ impl TuiApp {
         (title, lines)
     }
 
-    fn build_sidebar_skill_lines(&self) -> (String, Vec<Line<'static>>) {
-        if self.config.skills.is_empty() {
-            return (
-                " Skills (0 loaded) ".to_string(),
-                vec![Line::from(Span::styled(
-                    "No skills loaded",
-                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
-                ))],
-            );
-        }
-
-        let active_skill_name = self.effective_sidebar_skill().map(|s| s.name.as_str());
-        let mut ready_count = 0usize;
-        let mut invocable_count = 0usize;
-        let mut lines = Vec::with_capacity(self.config.skills.len());
-
-        for skill in &self.config.skills {
-            if !skill.is_abstract {
-                invocable_count += 1;
-            }
-            let missing = skills::missing_skill_tools(skill, &self.config);
-            let needs_tools = !skill.tools.is_empty() || !skill.hooks.is_empty();
-            let is_active = active_skill_name.is_some_and(|a| a.eq_ignore_ascii_case(&skill.name));
-
-            let (glyph, name_style, detail, state_style) = if !skill.resolution_errors.is_empty() {
-                (
-                    "✗ ",
-                    Style::default().fg(theme::STATUS_DISABLED),
-                    "ERR extends".to_string(),
-                    Style::default().fg(theme::STATUS_DISABLED),
-                )
-            } else if skill.is_abstract {
-                let t_cnt = skill.tools.len();
-                let h_cnt = skill.hooks.len();
-                let d = match (t_cnt, h_cnt) {
-                    (0, 0) => "BASE".to_string(),
-                    (t, 0) => format!("BASE ({t}t)"),
-                    (0, h) => format!("BASE ({h}h)"),
-                    (t, h) => format!("BASE ({t}t,{h}h)"),
-                };
-                (
-                    "· ",
-                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
-                    d,
-                    Style::default().fg(theme::SIDEBAR_EMPTY_IMAGES),
-                )
-            } else if !missing.is_empty() {
-                let d = if missing.len() == 1 && missing[0].len() <= 5 {
-                    format!("OFF no:{}", missing[0])
-                } else {
-                    format!("OFF no:{}t", missing.len())
-                };
-                (
-                    "✗ ",
-                    Style::default().fg(theme::STATUS_DISABLED),
-                    d,
-                    Style::default().fg(theme::STATUS_DISABLED),
-                )
-            } else if needs_tools && !self.enable_tools {
-                (
-                    "~ ",
-                    Style::default().fg(theme::CTX_USAGE_WARN),
-                    "^T  (muted)".to_string(),
-                    Style::default().fg(theme::CTX_USAGE_WARN),
-                )
-            } else {
-                ready_count += 1;
-                let t_cnt = skill.tools.len();
-                let h_cnt = skill.hooks.len();
-                let d = match (t_cnt, h_cnt) {
-                    (0, 0) => "ON  (prompt)".to_string(),
-                    (t, 0) => format!("ON  ({t}t)"),
-                    (0, h) => format!("ON  ({h}h)"),
-                    (t, h) => format!("ON  ({t}t,{h}h)"),
-                };
-                let style = if is_active {
-                    Style::default()
-                        .fg(theme::SELECTION_HIGHLIGHT)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::STATUS_ENABLED)
-                };
-                ("✓ ", style, d, style)
-            };
-
-            let (scope_tag, scope_style) = if skill.overrides_global {
-                (
-                    "[G→WS]",
-                    Style::default()
-                        .fg(theme::TAB_WORKSPACE_ACTIVE)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                match skill.scope {
-                    MemoryScope::Global => ("[G]", Style::default().fg(theme::TAB_GLOBAL_ACTIVE)),
-                    MemoryScope::Workspace => {
-                        ("[WS]", Style::default().fg(theme::TAB_WORKSPACE_ACTIVE))
-                    }
-                }
-            };
-
-            let display_name = if skill.is_abstract {
-                skill.name.clone()
-            } else {
-                format!("@{}", skill.trigger())
-            };
-            let trigger = truncate_str(&display_name, 12);
-            lines.push(Line::from(vec![
-                Span::styled(format!("{glyph}{trigger:<12} "), name_style),
-                Span::styled(format!("{detail:<12} "), state_style),
-                Span::styled(format!("{scope_tag:>6}"), scope_style),
-            ]));
-        }
-
-        let title = format!(" Skills ({ready_count}/{invocable_count} ready) ");
-        (title, lines)
-    }
-
     fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {
         let (config_title, settings_text) = self.build_sidebar_config_lines();
         let (tools_title, tool_lines) = self.build_sidebar_tool_lines();
-        let (skills_title, skill_lines) = self.build_sidebar_skill_lines();
 
-        let config_h = (settings_text.len() as u16 + 2).min(area.height.saturating_sub(9).max(5));
-        let skills_h = (skill_lines.len().clamp(1, 5) as u16) + 2;
+        let config_h = (settings_text.len() as u16 + 2).min(area.height.saturating_sub(6).max(5));
         let images_h = (self.attachments.len().clamp(1, 4) as u16) + 2;
 
         let chunks = Layout::default()
@@ -1414,7 +1294,6 @@ impl TuiApp {
             .constraints([
                 Constraint::Length(config_h),
                 Constraint::Fill(1),
-                Constraint::Length(skills_h),
                 Constraint::Length(images_h),
             ])
             .split(area);
@@ -1445,11 +1324,6 @@ impl TuiApp {
             f.render_stateful_widget(scrollbar, chunks[1], &mut sb_state);
         }
 
-        f.render_widget(
-            Paragraph::new(skill_lines).block(titled_block(skills_title)),
-            chunks[2],
-        );
-
         let items: Vec<ListItem> = if self.attachments.is_empty() {
             vec![
                 ListItem::new("No images attached")
@@ -1471,7 +1345,7 @@ impl TuiApp {
                 " Images ({}) ",
                 self.attachments.len()
             ))),
-            chunks[3],
+            chunks[2],
         );
     }
 
