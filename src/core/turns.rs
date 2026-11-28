@@ -77,10 +77,19 @@ pub(super) fn should_auto_compact(
     }
     let meaningful_msgs = history_to_compact
         .iter()
-        .filter(|m| {
-            m.role != "error"
-                && (!m.content.trim().is_empty()
-                    || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty()))
+        .filter(|m| match m.role.as_str() {
+            "error" => false,
+            "local" | "hook" => m.include_in_context && !m.content.trim().is_empty(),
+            "assistant" => {
+                !m.content.trim().is_empty()
+                    || m.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+                    || m.thoughts.as_ref().is_some_and(|t| !t.is_empty())
+            }
+            _ => {
+                !m.content.trim().is_empty()
+                    || m.image_names.as_ref().is_some_and(|i| !i.is_empty())
+                    || m.images.as_ref().is_some_and(|i| !i.is_empty())
+            }
         })
         .count();
     meaningful_msgs >= 2
@@ -579,7 +588,10 @@ impl CoreEngine {
                         "Active tasks remain; auto-continuing task loop ({}/{max_turns})",
                         self.session.auto_task_turns
                     );
-                    self.emit_exact_token_usage(prompt_tokens + eval_tokens);
+                    let reported_tokens = prompt_tokens.saturating_add(eval_tokens);
+                    if reported_tokens > 0 {
+                        self.emit_exact_token_usage(reported_tokens);
+                    }
                     let prompt = if self.config.app.task_autoloop_ignore_blocked {
                         "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished."
                     } else {
@@ -613,7 +625,10 @@ impl CoreEngine {
                 let _ = self.tx.send(ev);
                 self.flush_queued_interjections().await;
             } else {
-                self.emit_exact_token_usage(prompt_tokens + eval_tokens);
+                let reported_tokens = prompt_tokens.saturating_add(eval_tokens);
+                if reported_tokens > 0 {
+                    self.emit_exact_token_usage(reported_tokens);
+                }
                 self.inflight.pending_stream_done = Some(ev);
                 self.spawn_hooks(after_hooks, self.turn.active_skill.clone(), true);
             }
@@ -885,7 +900,8 @@ impl CoreEngine {
                             Some((pre_tokens, pending.preserved_trailing)),
                         );
                         self.save_and_emit_chat(Vec::new()).await;
-                        let estimated_tokens = self.emit_estimated_token_usage();
+                        let (_, estimated_tokens) =
+                            self.emit_estimated_token_usage_for(&pending.turn);
                         info!(
                             "Auto-compacted conversation ({prev_count} messages, ~{pre_tokens} -> ~{estimated_tokens} tokens, summary eval: {eval_tokens}); resuming model turn."
                         );
@@ -1085,9 +1101,17 @@ mod tests {
             false
         ));
 
-        // Single-turn prompt with no prior history is not compacted (only 1 meaningful message).
+        // Single-turn prompt with excluded local/hook/error messages is not compacted.
         let single = vec![
             ChatMessage::new("error", "old error"),
+            ChatMessage {
+                include_in_context: false,
+                ..ChatMessage::new("local", "ignored shell output")
+            },
+            ChatMessage {
+                include_in_context: false,
+                ..ChatMessage::new_hook("after_hook", "ignored hook output", false)
+            },
             ChatMessage::new("user", "only user msg"),
         ];
         assert!(!should_auto_compact(
@@ -1095,6 +1119,30 @@ mod tests {
             950,
             1000,
             &single,
+            u32::MAX,
+            false,
+            true
+        ));
+
+        // Image-only user message + thought-only assistant message count as meaningful.
+        let non_text = vec![
+            ChatMessage {
+                image_names: Some(vec!["shot.png".into()]),
+                ..ChatMessage::new("user", "")
+            },
+            ChatMessage {
+                thoughts: Some(vec![ThoughtPart {
+                    text: Some("thinking".into()),
+                    thought_signature: None,
+                }]),
+                ..ChatMessage::new("assistant", "")
+            },
+        ];
+        assert!(should_auto_compact(
+            &cfg,
+            950,
+            1000,
+            &non_text,
             u32::MAX,
             false,
             true
@@ -1223,6 +1271,63 @@ mod tests {
         );
 
         // Cleanly abort the spawned background stream task.
+        engine.finish_active_task();
+    }
+
+    #[tokio::test]
+    async fn auto_compact_success_replaces_history_preserves_tail_and_resumes_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(true, 0.75, 5);
+        cfg.app.history_dir = tmp.path().to_string_lossy().into_owned();
+        cfg.ollama.base_url = "http://127.0.0.1:1".into();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut engine = CoreEngine::new("qwen3.8:27b".into(), cfg, tx).unwrap();
+        engine.set_save_session(false);
+
+        engine.session.messages = vec![
+            ChatMessage::new("user", "old q"),
+            ChatMessage::new("assistant", "old a"),
+            ChatMessage::new("user", "current q"),
+        ];
+        engine.session.turns_since_auto_compact = 10;
+        engine.inflight.pending_auto_compact = Some(PendingAutoCompact {
+            turn: test_turn(32_768),
+            preserved_trailing: vec![ChatMessage::new("user", "current q")],
+            pre_tokens: 26_000,
+            compacted_count: 2,
+        });
+
+        engine
+            .on_chat_compacted(Ok("Checkpoint summary".into()), 500, 120)
+            .await;
+
+        assert!(engine.inflight.pending_auto_compact.is_none());
+        assert_eq!(engine.session.turns_since_auto_compact, 0);
+        assert_eq!(engine.session.messages.len(), 3);
+        assert!(
+            engine.session.messages[0]
+                .content
+                .contains("Prior 2 messages")
+        );
+        assert!(
+            engine.session.messages[1]
+                .content
+                .contains("Checkpoint summary")
+        );
+        assert_eq!(engine.session.messages[2].content, "current q");
+
+        let mut saw_stream_started = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, EngineEvent::StreamStarted) {
+                saw_stream_started = true;
+            }
+        }
+        assert!(
+            saw_stream_started,
+            "expected resumed model turn to emit StreamStarted after compaction success"
+        );
+
         engine.finish_active_task();
     }
 }

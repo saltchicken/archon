@@ -211,7 +211,9 @@ impl TuiApp {
                 .any(|(old, new)| old != new);
 
         let prev_msg_count = if is_reset_or_reload {
-            self.active_turn_skill = None;
+            if session_changed || messages.is_empty() {
+                self.active_turn_skill = None;
+            }
             self.msg_states.clear();
             self.styled_messages.clear();
             self.copied_code_flash = None;
