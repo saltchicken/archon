@@ -1030,6 +1030,13 @@ pub fn preview_restore(args: &DotfilesArgs, config: &Config) -> Result<(usize, S
 impl BlockingTool for Tool {
     const NAME: &'static str = "dotfiles";
     const DESCRIPTION: &'static str = "Manage personal user configuration files in `~/.config` (list, read, search, edit, create, validate, status, diff, restore, sync). Tracks `dotfiles.allowed_dirs` in a bare git repo (`~/.local/share/archon/dotfiles.git`).";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore", "sync",
+    ];
+    const PARAM_HINT: &'static str =
+        "<list|read|search|edit|create|validate|status|diff|restore|sync> [path] [pattern]";
+    const SHORT_SUMMARY: &'static str =
+        "Read, search, edit, validate, diff, restore, and git-sync personal configs in ~/.config.";
     type Args = DotfilesArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

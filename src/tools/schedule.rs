@@ -42,6 +42,10 @@ pub struct ScheduleArgs {
 impl BlockingTool for Tool {
     const NAME: &'static str = "schedule";
     const DESCRIPTION: &'static str = "Manage Archon's systemd user schedules: list configured timers, inspect journalctl logs, trigger a schedule immediately, sync unit files from config.toml, or clean managed units.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "logs", "run", "sync", "clean"];
+    const PARAM_HINT: &'static str = "<list|logs|run|sync|clean> [name=...] [global=true]";
+    const SHORT_SUMMARY: &'static str =
+        "List, inspect logs, trigger, sync, or clean Archon systemd user schedules.";
     type Args = ScheduleArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

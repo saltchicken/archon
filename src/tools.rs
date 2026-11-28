@@ -161,6 +161,9 @@ const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
 pub trait BlockingTool {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    const SUBACTIONS: &'static [&'static str] = &[];
+    const PARAM_HINT: &'static str = "[key=value | JSON]";
+    const SHORT_SUMMARY: &'static str;
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String>;
@@ -169,6 +172,9 @@ pub trait BlockingTool {
 pub trait AsyncTool {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
+    const SUBACTIONS: &'static [&'static str] = &[];
+    const PARAM_HINT: &'static str = "[key=value | JSON]";
+    const SHORT_SUMMARY: &'static str;
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
 
     fn execute(
@@ -925,179 +931,6 @@ pub fn parse_hash_tool_prefix(raw_prompt: &str) -> Option<(bool, &str)> {
     Some((include_in_context, rest))
 }
 
-pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
-    match tool_name {
-        "cargo" => &[
-            "check",
-            "clippy",
-            "test",
-            "fmt_check",
-            "fmt",
-            "doc",
-            "metadata",
-            "info",
-            "tree",
-            "build",
-            "add",
-            "update",
-        ],
-        "git" => &[
-            "status",
-            "diff",
-            "log",
-            "show",
-            "blame",
-            "branch",
-            "add",
-            "unstage",
-            "commit",
-            "stash",
-            "stash_pop",
-            "switch",
-            "merge",
-            "branch_delete",
-        ],
-        "fs" => &["list", "rename", "copy", "remove"],
-        "repo_map" => &["map", "definition", "references"],
-        "github_repo" => &["fetch", "list", "read", "search"],
-        "memory" => &[
-            "list", "read", "add", "remove", "set", "clear", "enable", "disable",
-        ],
-        "session" => &["list", "search", "read", "stats", "rename", "pin"],
-        "skill" => &["list", "read", "create", "modify", "check"],
-        "dotfiles" => &[
-            "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore",
-            "sync",
-        ],
-        "system" => &[
-            "overview",
-            "journal",
-            "services",
-            "processes",
-            "fish",
-            "hyprland",
-            "btrfs",
-            "packages",
-        ],
-        "process" => &["list", "output", "poll", "kill", "clean"],
-        "browser" => &[
-            "goto",
-            "read",
-            "click",
-            "type",
-            "paste",
-            "eval",
-            "extract",
-            "find",
-            "screenshot",
-            "snapshot",
-            "status",
-            "close",
-        ],
-        "schedule" => &["list", "logs", "run", "sync", "clean"],
-        "sqlite" => &["tables", "schema", "query"],
-        "clipboard" => &["read", "write", "read_image", "write_image", "clear"],
-        "task" => &["list", "add", "update", "remove", "clear"],
-        "todo" => &["list", "add", "update", "remove", "clear"],
-        _ => &[],
-    }
-}
-
-pub fn tool_param_hint(tool_name: &str) -> &'static str {
-    match tool_name {
-        "workspace_snapshot" => "[tree_only=true|false]",
-        "read_file" => "<file_path> [start_line=N] [end_line=N]",
-        "search" => "<pattern> [path=...] [files_with_matches=true]",
-        "repo_map" => "[map|definition|references] [symbol=...] [max_tokens=N]",
-        "github_repo" => {
-            "[fetch|list|read|search] repo=<owner/repo> [path=...] [pattern=...] [git_ref=...]"
-        }
-        "cargo" => {
-            "[check|clippy|test|fmt_check|fmt|doc|metadata|info|tree] [package=...] [bin=...]"
-        }
-        "clipboard" => "[read|write|read_image|write_image|clear] [text=...] [file_path=...]",
-        "git" => "[status|diff|log|show|blame|branch|add|...] [target=...] [path=...]",
-        "fs" => "[list|rename|copy|remove] [path=...] [destination=...]",
-        "fetch_url" => "<url> [raw=true|false]",
-        "curl" => {
-            "<url> [method=post] [headers=...] [body=... | json=...] [head=true] [show_headers=true]"
-        }
-        "memory" => {
-            "[list|read|add|remove|clear|enable|disable] [scope=global|workspace] [item=...]"
-        }
-        "notify" => "<summary> [body=...] [urgency=low|normal|critical] [timeout_ms=N]",
-        "session" => {
-            "[list|search|read|stats|rename|pin] [id=...] [query=...] [start_message=N] [end_message=N]"
-        }
-        "skill" => "[list|read|create|modify|check] [name=...]",
-        "dotfiles" => "[list|read|search|edit|create|validate|status|diff|restore|sync] [path=...]",
-        "system" => {
-            "[overview|journal|services|processes|fish|hyprland|btrfs|packages] [query=...]"
-        }
-        "process" => "[list|output|poll|kill|clean] [id=...] [tail_lines=N | wait_ms=N]",
-        "browser" => {
-            "[goto|read|click|type|paste|eval|extract|find|screenshot|snapshot|status|close] [url=...] [selector=...] [text=...] [source=clipboard|workspace_snapshot|workspace_snapshot_tree] [script=...]"
-        }
-        "schedule" => "[list|logs|run|sync|clean] [name=...] [lines=N] [global=true|false]",
-        "sqlite" => "[tables|schema|query] path=<db_path> [table=...] [sql=...] [limit=N]",
-        "task" => {
-            "[list|add|update|remove|clear] [id=N] [title=...] [status=pending|in_progress|blocked]"
-        }
-        "todo" => {
-            "[list|add|update|remove|clear] [scope=workspace|global] [id=N] [title=...] [status=pending|in_progress|blocked] [priority=low|medium|high]"
-        }
-        "create_file" => "file_path=... content=...",
-        "edit_file" => "{\"file_path\": \"...\", \"edits\": [...]}",
-        "load_tools" => "names=[\"git\",\"@web\"]",
-        _ => "[key=value | JSON]",
-    }
-}
-
-/// Concise one-line summary for each tool, used in the `<deferred_tools>` catalog.
-pub fn tool_short_summary(tool_name: &str) -> &'static str {
-    match tool_name {
-        "browser" => {
-            "Control Chrome via CDP to navigate, read, click, type, extract, and screenshot pages."
-        }
-        "cargo" => {
-            "Run Cargo commands (check, clippy, test, fmt, build, doc, metadata, info, tree, add, update)."
-        }
-        "clipboard" => "Read, write, or clear text and images in the system clipboard.",
-        "create_file" => "Create a new file in the workspace.",
-        "curl" => {
-            "Make HTTP requests (GET/POST/PUT/PATCH/DELETE) with custom headers, body, or JSON."
-        }
-        "dotfiles" => "Inspect, edit, validate, diff, restore, and sync user dotfiles.",
-        "edit_file" => "Apply exact search/replace edits to an existing workspace file.",
-        "fetch_url" => "Fetch a web page or URL and return readable text or raw content.",
-        "fs" => "List directories or rename, copy, and remove files in the workspace.",
-        "git" => {
-            "Run Git operations (status, diff, log, show, blame, branch, add, commit, stash, switch, merge)."
-        }
-        "github_repo" => "Fetch, list, read, and search cached GitHub repositories.",
-        "memory" => "Read or update persistent global and workspace MEMORY.md facts.",
-        "notify" => "Send a desktop notification.",
-        "process" => "List, inspect, poll, kill, or clean up background processes.",
-        "read_file" => {
-            "Read a file in the workspace (or configured read_roots) with optional line range."
-        }
-        "repo_map" => "AST code map, symbol definitions, and references via Tree-sitter.",
-        "schedule" => "List, view logs, run, sync, or clean Archon systemd scheduled tasks.",
-        "search" => "Search workspace files using regex or literal text patterns.",
-        "session" => "List, search, read, inspect stats, rename, or pin past Archon sessions.",
-        "skill" => "List, read, create, modify, or validate Archon SKILL.md definitions.",
-        "sqlite" => "Inspect tables/schemas and run read-only SQL queries on SQLite databases.",
-        "subagent" => "Delegate a multi-step task to an isolated subagent with its own context.",
-        "system" => {
-            "Inspect local system status, journal logs, systemd services, processes, Hyprland, btrfs, and packages."
-        }
-        "task" => "Manage session-scoped active execution tasks across turns and compactions.",
-        "todo" => "Manage persistent workspace or global todo backlogs.",
-        "workspace_snapshot" => "Generate a workspace directory tree and optional file dump.",
-        _ => "Built-in tool.",
-    }
-}
-
 pub fn matching_tool_triggers(prefix_mark: &str, query: &str) -> Vec<String> {
     let lower = query.to_ascii_lowercase();
     if let Some((tool_part, sub_part)) = lower.split_once(':') {
@@ -1306,6 +1139,31 @@ macro_rules! register_tools {
     ($( $kind:ident : $mod:ident ),* $(,)?) => {
         pub const ALL_TOOL_NAMES: &[&str] = &[ $( $mod::Tool::NAME ),* ];
 
+        pub fn tool_subactions(tool_name: &str) -> &'static [&'static str] {
+            match tool_name {
+                LOAD_TOOLS_NAME => register_tools!(@subactions blocking, load_tools),
+                $( $mod::Tool::NAME => register_tools!(@subactions $kind, $mod), )*
+                _ => &[],
+            }
+        }
+
+        pub fn tool_param_hint(tool_name: &str) -> &'static str {
+            match tool_name {
+                LOAD_TOOLS_NAME => register_tools!(@param_hint blocking, load_tools),
+                $( $mod::Tool::NAME => register_tools!(@param_hint $kind, $mod), )*
+                _ => "[key=value | JSON]",
+            }
+        }
+
+        /// Concise one-line summary for each tool, used in the `<deferred_tools>` catalog.
+        pub fn tool_short_summary(tool_name: &str) -> &'static str {
+            match tool_name {
+                LOAD_TOOLS_NAME => register_tools!(@short_summary blocking, load_tools),
+                $( $mod::Tool::NAME => register_tools!(@short_summary $kind, $mod), )*
+                _ => "Built-in tool.",
+            }
+        }
+
         pub fn tool_schema_by_name(name: &str) -> Option<Value> {
             match name {
                 LOAD_TOOLS_NAME => Some(register_tools!(@schema blocking, load_tools)),
@@ -1370,6 +1228,24 @@ macro_rules! register_tools {
                 _ => bail!("Unknown tool: '{name}'"),
             }
         }
+    };
+    (@subactions blocking, $mod:ident) => {
+        <$mod::Tool as BlockingTool>::SUBACTIONS
+    };
+    (@subactions async, $mod:ident) => {
+        <$mod::Tool as AsyncTool>::SUBACTIONS
+    };
+    (@param_hint blocking, $mod:ident) => {
+        <$mod::Tool as BlockingTool>::PARAM_HINT
+    };
+    (@param_hint async, $mod:ident) => {
+        <$mod::Tool as AsyncTool>::PARAM_HINT
+    };
+    (@short_summary blocking, $mod:ident) => {
+        <$mod::Tool as BlockingTool>::SHORT_SUMMARY
+    };
+    (@short_summary async, $mod:ident) => {
+        <$mod::Tool as AsyncTool>::SHORT_SUMMARY
     };
     (@schema blocking, $mod:ident) => {
         auto_schema::<<$mod::Tool as BlockingTool>::Args>($mod::Tool::NAME, $mod::Tool::DESCRIPTION)

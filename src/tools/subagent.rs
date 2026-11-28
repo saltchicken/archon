@@ -25,6 +25,8 @@ pub struct Tool;
 impl AsyncTool for Tool {
     const NAME: &'static str = "subagent";
     const DESCRIPTION: &'static str = "Delegate a task to a fresh subagent that runs in its own isolated context. The subagent can use tools across multiple turns and returns its final response. Use this for complex multi-step tasks, research, analysis, or work that benefits from a clean context separate from the main conversation.";
+    const PARAM_HINT: &'static str = "task=<description> [skill=...] [tools=[...]]";
+    const SHORT_SUMMARY: &'static str = "Delegate a multi-turn task to a fresh isolated subagent with optional skill and tool subset.";
     type Args = SubagentArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

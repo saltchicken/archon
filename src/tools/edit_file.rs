@@ -52,6 +52,9 @@ pub fn fallback_hunk_preview(args: &EditFileArgs) -> (String, String) {
 impl BlockingTool for Tool {
     const NAME: &'static str = "edit_file";
     const DESCRIPTION: &'static str = "Modify an existing file in the workspace by applying one or more disjoint, exact, unique search/replace hunks atomically. Always use this instead of `create_file` when the file already exists.";
+    const PARAM_HINT: &'static str = "{\"file_path\": \"...\", \"edits\": [...]}";
+    const SHORT_SUMMARY: &'static str =
+        "Apply exact search/replace edits to an existing workspace file.";
     type Args = EditFileArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

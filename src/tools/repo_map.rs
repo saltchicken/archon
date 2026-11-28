@@ -1636,6 +1636,10 @@ fn execute_references(
 impl BlockingTool for Tool {
     const NAME: &'static str = "repo_map";
     const DESCRIPTION: &'static str = "AST-accurate code intelligence powered by Tree-sitter across Rust, TypeScript/JavaScript, Python, Go, and Lua. Supports three actions: `map` (generates a PageRank-ranked repository map of signatures and 1-based line ranges), `definition` (reads the exact source implementation of a symbol without needing its file path or line range), and `references` (finds all AST call sites and usages of a symbol grouped by enclosing function/scope). Pass `crate_name` (or a `~/.cargo/registry/src/...` `target_path`) to inspect installed Rust crate APIs and definitions directly, or `github_repo` (e.g. `owner/repo`) to inspect a cached GitHub repository fetched with the `github_repo` tool (`action: fetch`).";
+    const SUBACTIONS: &'static [&'static str] = &["map", "definition", "references"];
+    const PARAM_HINT: &'static str =
+        "[map|definition|references] [symbol] [target_path] [crate_name=...]";
+    const SHORT_SUMMARY: &'static str = "Tree-sitter AST code intelligence: PageRank repo map, symbol definitions, and call-site references.";
     type Args = RepoMapArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

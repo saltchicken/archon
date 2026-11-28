@@ -195,6 +195,9 @@ fn validate_extra_file(
 impl BlockingTool for Tool {
     const NAME: &'static str = "workspace_snapshot";
     const DESCRIPTION: &'static str = "Generates a workspace directory tree and optionally dumps file contents as configured in config.toml (pass `tree_only: true` to only show the directory tree). For navigating medium-to-large codebases with code signatures, prefer `repo_map`.";
+    const PARAM_HINT: &'static str = "[tree_only=true]";
+    const SHORT_SUMMARY: &'static str =
+        "Generate a workspace directory tree and optionally dump configured file contents.";
     type Args = WorkspaceSnapshotArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

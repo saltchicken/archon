@@ -954,6 +954,10 @@ fn execute_check(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
 impl BlockingTool for Tool {
     const NAME: &'static str = "skill";
     const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions) across workspace and global skill directories.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "read", "create", "modify", "check"];
+    const PARAM_HINT: &'static str = "<list|read|create|modify|check> [name]";
+    const SHORT_SUMMARY: &'static str =
+        "List, read, create, modify, and validate Archon SKILL.md definitions.";
     type Args = SkillArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

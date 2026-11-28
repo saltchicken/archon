@@ -136,6 +136,13 @@ pub(super) fn preview_mutation(
 impl BlockingTool for Tool {
     const NAME: &'static str = "memory";
     const DESCRIPTION: &'static str = "Reads or updates persistent user & workspace memory (`MEMORY.md`) that is automatically injected into the system prompt across sessions.";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "list", "read", "add", "remove", "set", "clear", "enable", "disable",
+    ];
+    const PARAM_HINT: &'static str =
+        "<list|read|add|remove|set|clear|enable|disable> [global|workspace] [item]";
+    const SHORT_SUMMARY: &'static str =
+        "Read or update persistent global and workspace memory (MEMORY.md).";
     type Args = MemoryArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

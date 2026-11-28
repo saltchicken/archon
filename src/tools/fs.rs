@@ -266,6 +266,10 @@ pub fn preview_action(
 impl BlockingTool for Tool {
     const NAME: &'static str = "fs";
     const DESCRIPTION: &'static str = "Performs workspace filesystem operations: list directory contents, rename/move paths, copy files/directories, or remove files/directories.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "rename", "copy", "remove"];
+    const PARAM_HINT: &'static str = "<list|rename|copy|remove> [path] [destination]";
+    const SHORT_SUMMARY: &'static str =
+        "List directory contents or rename, copy, and remove files/directories in the workspace.";
     type Args = FsArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

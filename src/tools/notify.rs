@@ -61,6 +61,8 @@ pub struct Tool;
 impl AsyncTool for Tool {
     const NAME: &'static str = "notify";
     const DESCRIPTION: &'static str = "Send a desktop notification via notify-send (dunst). Supports optional action buttons (e.g. Retry, Dismiss) that block until the user clicks one; the selected action name is retrievable via the `process` tool (action=poll).";
+    const PARAM_HINT: &'static str = "[low|normal|critical] <summary> [body]";
+    const SHORT_SUMMARY: &'static str = "Send a desktop notification via notify-send (dunst), optionally with interactive action buttons.";
     type Args = NotifyArgs;
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {

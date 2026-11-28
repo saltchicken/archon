@@ -176,6 +176,8 @@ pub fn resolve_load_tools_request(
 impl BlockingTool for Tool {
     const NAME: &'static str = "load_tools";
     const DESCRIPTION: &'static str = "Activate one or more deferred tools (or `@group` names like `@git`, `@web`) so their full JSON schemas become available on the next turn.";
+    const PARAM_HINT: &'static str = "<tool|@group> [tool|@group ...]";
+    const SHORT_SUMMARY: &'static str = "Activate deferred tools or @groups on demand so their full schemas are loaded on the next turn.";
     type Args = LoadToolsArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

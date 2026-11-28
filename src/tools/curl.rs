@@ -202,6 +202,8 @@ fn maybe_pretty_json(content_type: &str, body: &str) -> String {
 impl AsyncTool for Tool {
     const NAME: &'static str = "curl";
     const DESCRIPTION: &'static str = "General-purpose HTTP/HTTPS client (like `curl`): send a request with a custom method, headers, and a body (raw string or JSON) and return the status line, headers, and body. Only public URLs are allowed (same SSRF protections as `fetch_url`). Prefer `fetch_url` when you want an HTML page converted to readable text.";
+    const PARAM_HINT: &'static str = "<url> [method] [body] [headers={...}]";
+    const SHORT_SUMMARY: &'static str = "Send custom HTTP/HTTPS requests (method, headers, raw/JSON body) and inspect status, headers, and body.";
     type Args = CurlArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

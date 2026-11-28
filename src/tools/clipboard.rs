@@ -43,6 +43,11 @@ pub struct ClipboardArgs {
 impl BlockingTool for Tool {
     const NAME: &'static str = "clipboard";
     const DESCRIPTION: &'static str = "Read/write text or images with the system clipboard (`read`, `write`, `read_image`, `write_image`, `clear`).";
+    const SUBACTIONS: &'static [&'static str] =
+        &["read", "write", "read_image", "write_image", "clear"];
+    const PARAM_HINT: &'static str = "<read|write|read_image|write_image|clear> [text|file_path]";
+    const SHORT_SUMMARY: &'static str =
+        "Read, write, or clear text and images on the system clipboard.";
     type Args = ClipboardArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

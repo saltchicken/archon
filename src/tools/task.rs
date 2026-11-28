@@ -285,6 +285,11 @@ pub fn delete_session_tasks(config: &Config, session_id: &str) -> Result<()> {
 impl BlockingTool for Tool {
     const NAME: &'static str = "task";
     const DESCRIPTION: &'static str = "Manage a session-scoped execution plan (`list`, `add`, `update`, `remove`, `clear`) to track active multi-step work across turns and compactions. Valid statuses are only `pending`, `in_progress`, `blocked`. There is NO completed/done status: when a task finishes, remove it with `action: \"remove\"` and its `id`.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "add", "update", "remove", "clear"];
+    const PARAM_HINT: &'static str =
+        "<list|add|update|remove|clear> [id=...] [title=...] [status=...]";
+    const SHORT_SUMMARY: &'static str =
+        "Manage a session-scoped execution plan of active tasks across turns and compactions.";
     type Args = TaskArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

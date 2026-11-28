@@ -127,6 +127,11 @@ fn format_message_for_read(
 impl BlockingTool for Tool {
     const NAME: &'static str = "session";
     const DESCRIPTION: &'static str = "Inspect and search past Archon chat sessions stored in archon.db. Supports listing, searching transcripts, reading message slices, viewing workspace stats, and renaming or pinning sessions.";
+    const SUBACTIONS: &'static [&'static str] =
+        &["list", "search", "read", "stats", "rename", "pin"];
+    const PARAM_HINT: &'static str = "<list|search|read|stats|rename|pin> [id=...] [query=...]";
+    const SHORT_SUMMARY: &'static str =
+        "List, search, read slices, view stats, rename, or pin past Archon chat sessions.";
     type Args = SessionArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

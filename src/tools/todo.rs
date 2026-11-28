@@ -287,6 +287,10 @@ fn format_todo_list(rows: &[TodoRow], scope: TodoScope) -> String {
 impl BlockingTool for Tool {
     const NAME: &'static str = "todo";
     const DESCRIPTION: &'static str = "Manage a persistent workspace or global todo backlog (`list`, `add`, `update`, `remove`, `clear`). Passive tracker — does not trigger autoloop or inject into the system prompt.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "add", "update", "remove", "clear"];
+    const PARAM_HINT: &'static str =
+        "<list|add|update|remove|clear> [scope=workspace|global] [id=...] [title=...]";
+    const SHORT_SUMMARY: &'static str = "Manage a persistent workspace or global todo backlog.";
     type Args = TodoArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

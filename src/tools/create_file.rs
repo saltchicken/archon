@@ -19,6 +19,9 @@ pub struct CreateFileArgs {
 impl BlockingTool for Tool {
     const NAME: &'static str = "create_file";
     const DESCRIPTION: &'static str = "Create a brand-new file in the workspace. Fails if the file already exists—always use `edit_file` to modify or overwrite existing files, and check with `read_file` or `search` first if unsure whether a file exists.";
+    const PARAM_HINT: &'static str = "<file_path> <content>";
+    const SHORT_SUMMARY: &'static str =
+        "Create a brand-new file in the workspace (fails if it already exists).";
     type Args = CreateFileArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

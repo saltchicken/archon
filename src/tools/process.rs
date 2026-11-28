@@ -59,6 +59,10 @@ fn require_id(args: &ProcessArgs) -> Result<String> {
 impl AsyncTool for Tool {
     const NAME: &'static str = "process";
     const DESCRIPTION: &'static str = "Manage background jobs started by purpose-built tools (list, peek at output, poll for new output, kill, clean). This tool cannot start new processes.";
+    const SUBACTIONS: &'static [&'static str] = &["list", "output", "poll", "kill", "clean"];
+    const PARAM_HINT: &'static str = "<list|output|poll|kill|clean> [id]";
+    const SHORT_SUMMARY: &'static str =
+        "List, peek output, poll, kill, or clean up background jobs started by other tools.";
     type Args = ProcessArgs;
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {

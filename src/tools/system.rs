@@ -778,6 +778,19 @@ async fn run_packages(args: &SystemArgs, ctx: &ToolContext) -> Result<String> {
 impl AsyncTool for Tool {
     const NAME: &'static str = "system";
     const DESCRIPTION: &'static str = "Monitor and diagnose CachyOS system state: hardware/scx/PSI (`overview`), systemd logs (`journal`), units/boot (`services`), top tasks (`processes`), Fish shell history/abbreviations (`fish`), Hyprland compositor (`hyprland`), Btrfs storage (`btrfs`), and `paru`/`pacman` packages (`packages`).";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "overview",
+        "journal",
+        "services",
+        "processes",
+        "fish",
+        "hyprland",
+        "btrfs",
+        "packages",
+    ];
+    const PARAM_HINT: &'static str =
+        "<overview|journal|services|processes|fish|hyprland|btrfs|packages> [query] [target]";
+    const SHORT_SUMMARY: &'static str = "Inspect CachyOS system state: hardware/scx/PSI, journal, services, processes, Fish, Hyprland, Btrfs, and packages.";
     type Args = SystemArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

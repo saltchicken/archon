@@ -105,6 +105,24 @@ fn push_optional_path(cmd_args: &mut Vec<String>, raw_path: &str, ctx: &ToolCont
 impl AsyncTool for Tool {
     const NAME: &'static str = "git";
     const DESCRIPTION: &'static str = "Executes git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, stash_pop, switch, merge, branch_delete) within the workspace.";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "status",
+        "diff",
+        "log",
+        "show",
+        "blame",
+        "branch",
+        "add",
+        "unstage",
+        "commit",
+        "stash",
+        "stash_pop",
+        "switch",
+        "merge",
+        "branch_delete",
+    ];
+    const PARAM_HINT: &'static str = "<status|diff|log|show|blame|branch|add|unstage|commit|stash|stash_pop|switch|merge|branch_delete> [target|path]";
+    const SHORT_SUMMARY: &'static str = "Run workspace git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, switch, merge).";
     type Args = GitArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

@@ -146,6 +146,9 @@ fn html_to_text(raw_html: &str) -> String {
 impl AsyncTool for Tool {
     const NAME: &'static str = "fetch_url";
     const DESCRIPTION: &'static str = "Fetches content from a public HTTP/HTTPS URL. Automatically converts HTML pages into readable text and serializes JSON as compact output unless `raw: true` is set.";
+    const PARAM_HINT: &'static str = "<url> [raw=true]";
+    const SHORT_SUMMARY: &'static str =
+        "Fetch a public HTTP/HTTPS URL and convert HTML to readable text or compact JSON.";
     type Args = FetchUrlArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

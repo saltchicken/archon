@@ -47,6 +47,9 @@ pub struct SearchArgs {
 impl BlockingTool for Tool {
     const NAME: &'static str = "search";
     const DESCRIPTION: &'static str = "Searches file contents in the workspace using regular expressions or literal strings. Use `files_with_matches` to survey all matching files and counts across large codebases. For AST symbol definitions or call sites, prefer `repo_map` (`action: \"definition\"` or `\"references\"`). Respects .gitignore and outputs 1-based line numbers.";
+    const PARAM_HINT: &'static str = "<pattern> [path] [include=...] [files_with_matches=true]";
+    const SHORT_SUMMARY: &'static str =
+        "Search workspace or read_roots file contents with regex or literal strings.";
     type Args = SearchArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

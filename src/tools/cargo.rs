@@ -108,6 +108,23 @@ fn validate_features(raw: &str) -> Result<Vec<String>> {
 impl AsyncTool for Tool {
     const NAME: &'static str = "cargo";
     const DESCRIPTION: &'static str = "Executes Cargo commands (check, clippy, test, fmt_check, fmt, doc, metadata, info, tree, build, add, update) within the workspace.";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "check",
+        "clippy",
+        "test",
+        "fmt_check",
+        "fmt",
+        "doc",
+        "metadata",
+        "info",
+        "tree",
+        "build",
+        "add",
+        "update",
+    ];
+    const PARAM_HINT: &'static str =
+        "<check|clippy|test|fmt|fmt_check|doc|metadata|info|tree|build|add|update> [package]";
+    const SHORT_SUMMARY: &'static str = "Run Cargo commands (check, clippy, test, fmt, doc, build, add, update, metadata, info, tree).";
     type Args = CargoArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

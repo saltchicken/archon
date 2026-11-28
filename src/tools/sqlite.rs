@@ -219,6 +219,9 @@ fn run_query(conn: &Connection, sql: &str, limit: usize) -> Result<String> {
 impl BlockingTool for Tool {
     const NAME: &'static str = "sqlite";
     const DESCRIPTION: &'static str = "Inspect SQLite databases strictly read-only: list tables/views, view CREATE schemas, or run SELECT/PRAGMA/EXPLAIN queries formatted as Markdown tables.";
+    const SUBACTIONS: &'static [&'static str] = &["tables", "schema", "query"];
+    const PARAM_HINT: &'static str = "<tables|schema|query> path=<db> [table=...] [sql=...]";
+    const SHORT_SUMMARY: &'static str = "Inspect SQLite databases read-only (list tables, view schema, run SELECT/PRAGMA/EXPLAIN queries).";
     type Args = SqliteArgs;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {

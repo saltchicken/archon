@@ -545,14 +545,8 @@ impl CdpSession {
             .get("y")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| anyhow::anyhow!("Element '{sel}' is no longer available to click"))?;
-        let w = coords
-            .get("w")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let h = coords
-            .get("h")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
+        let w = coords.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let h = coords.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
         // Add small positional jitter so we don't always hit the exact center,
         // but clamp it to stay within the element bounds (leave 1 px margin).
@@ -1384,6 +1378,22 @@ fn extract_from_html(source: &str, selector: &str) -> Result<serde_json::Value> 
 impl AsyncTool for Tool {
     const NAME: &'static str = "browser";
     const DESCRIPTION: &'static str = "Controls a visible Chrome browser via CDP to render JS pages, interact with DOM elements, evaluate JavaScript, extract structured data, list interactive elements, paste large text (explicit text, the clipboard, or a generated workspace snapshot) into input, textarea, and contenteditable fields, capture accessibility tree snapshots, and take screenshots. Attaches to a running Chrome on browser.cdp_port, or spawns a visible Chrome instance if none is listening.";
+    const SUBACTIONS: &'static [&'static str] = &[
+        "goto",
+        "read",
+        "click",
+        "type",
+        "paste",
+        "eval",
+        "extract",
+        "find",
+        "screenshot",
+        "snapshot",
+        "status",
+        "close",
+    ];
+    const PARAM_HINT: &'static str = "<action> [url|selector] [text|source] [key=val]";
+    const SHORT_SUMMARY: &'static str = "Control a visible Chrome browser via CDP (navigate, read, click, type, paste, eval, extract, screenshot, snapshot).";
     type Args = BrowserArgs;
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
