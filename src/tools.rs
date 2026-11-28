@@ -1,7 +1,6 @@
 mod approval;
 pub(crate) mod browser;
 mod cargo;
-mod clipboard;
 mod create_file;
 mod curl;
 mod dotfiles;
@@ -929,7 +928,6 @@ pub fn call_signature(call: &ToolCall) -> String {
             ("memory", "get") => "read",
             ("memory", "delete" | "rm") => "remove",
             ("dotfiles", "revert" | "checkout") => "restore",
-            ("clipboard", "") => "read",
             (_, r) => r,
         }
     } else {
@@ -1383,7 +1381,6 @@ macro_rules! register_tools {
 register_tools! {
     async: browser,
     async: cargo,
-    blocking: clipboard,
     blocking: create_file,
     blocking: dotfiles,
     blocking: edit_file,

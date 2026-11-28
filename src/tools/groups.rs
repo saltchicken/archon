@@ -34,7 +34,6 @@ pub fn default_tool_groups() -> BTreeMap<String, Vec<String>> {
             "process".into(),
             "schedule".into(),
             "notify".into(),
-            "clipboard".into(),
         ],
     );
     m.insert(

@@ -2,18 +2,14 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{ImageBuffer, ImageFormat, Rgba};
 use std::{
-    borrow::Cow,
     fs,
-    io::{Cursor, Read},
+    io::Read,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
 use wl_clipboard_rs::{
-    copy::{
-        ClipboardType as CopyClipboardType, MimeType as CopyMimeType, Options as CopyOptions,
-        Seat as CopySeat, Source as CopySource, clear as wl_clear,
-    },
+    copy::{MimeType as CopyMimeType, Options as CopyOptions, Source as CopySource},
     paste::{ClipboardType, MimeType, Seat, get_contents},
 };
 
@@ -72,49 +68,6 @@ pub fn read_image_from_clipboard() -> Result<image::DynamicImage> {
     }
 
     bail!("No valid image found in clipboard")
-}
-
-pub fn clear_clipboard() -> Result<()> {
-    if wl_clear(CopyClipboardType::Regular, CopySeat::All).is_ok() {
-        return Ok(());
-    }
-
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.clear())
-        .context("Failed to clear clipboard")
-}
-
-pub fn copy_image_to_clipboard(path: &Path) -> Result<(u32, u32)> {
-    let img =
-        image::open(path).with_context(|| format!("Cannot open image: {}", path.display()))?;
-    let dims = (img.width(), img.height());
-
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        let mut png_bytes = Vec::new();
-        img.write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
-            .context("Failed to encode image as PNG")?;
-
-        if CopyOptions::new()
-            .copy(
-                CopySource::Bytes(png_bytes.into_boxed_slice()),
-                CopyMimeType::Specific("image/png".into()),
-            )
-            .is_ok()
-        {
-            return Ok(dims);
-        }
-    }
-
-    let rgba = img.to_rgba8();
-    let img_data = arboard::ImageData {
-        width: dims.0 as usize,
-        height: dims.1 as usize,
-        bytes: Cow::Owned(rgba.into_raw()),
-    };
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_image(img_data))
-        .context("Failed to copy image to clipboard")?;
-    Ok(dims)
 }
 
 fn read_wayland_clipboard_image() -> Option<Vec<u8>> {

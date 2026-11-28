@@ -215,36 +215,4 @@ mod tests {
             serde_json::json!({ "names": ["git", "@web"] })
         );
     }
-
-    #[test]
-    fn manual_clipboard_positional_actions_and_args_map_correctly() {
-        for action in ["read", "write", "read_image", "write_image", "clear"] {
-            assert_eq!(
-                parsed_action(&format!("clipboard {action}")),
-                Some(action.to_string()),
-                "positional token '{action}' should map to action"
-            );
-        }
-
-        let (write_call, _) = parse_manual_tool_call("clipboard write 'hello world'")
-            .expect("clipboard write should parse");
-        assert_eq!(
-            write_call.function.arguments,
-            serde_json::json!({ "action": "write", "text": "hello world" })
-        );
-
-        let (read_img_call, _) = parse_manual_tool_call("clipboard read_image shots/clip.png")
-            .expect("clipboard read_image should parse");
-        assert_eq!(
-            read_img_call.function.arguments,
-            serde_json::json!({ "action": "read_image", "file_path": "shots/clip.png" })
-        );
-
-        let (write_img_call, _) = parse_manual_tool_call("clipboard:write_image assets/logo.png")
-            .expect("clipboard:write_image should parse");
-        assert_eq!(
-            write_img_call.function.arguments,
-            serde_json::json!({ "action": "write_image", "file_path": "assets/logo.png" })
-        );
-    }
 }
