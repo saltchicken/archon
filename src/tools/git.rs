@@ -67,6 +67,10 @@ fn validate_git_target(raw: &str, allow_staged: bool) -> Result<Option<&str>> {
     if allow_staged && matches!(trimmed, "--staged" | "--cached") {
         return Ok(Some(trimmed));
     }
+    // Safe read-only output-formatting flags (no side effects, no file I/O).
+    if matches!(trimmed, "--stat" | "--name-only" | "--shortstat" | "--numstat") {
+        return Ok(Some(trimmed));
+    }
     if trimmed.starts_with('-') {
         bail!("Security violation: git target cannot start with '-': '{trimmed}'");
     }

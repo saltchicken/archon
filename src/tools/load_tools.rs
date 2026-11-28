@@ -13,7 +13,7 @@ pub struct Tool;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadToolsArgs {
-    /// Tool names (e.g. `["git", "cargo"]`) and/or `@group` names (e.g. `["@git", "@web"]`) to activate so their full schemas are included on subsequent turns.
+    /// Tool names (e.g. `["git", "cargo"]`) and/or `@group` names (e.g. `["@mygroup"]`) to activate so their full schemas are included on subsequent turns.
     #[serde(deserialize_with = "super::utils::serde_helpers::deserialize_string_list")]
     pub names: Vec<String>,
 }
@@ -175,7 +175,7 @@ pub fn resolve_load_tools_request(
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "load_tools";
-    const DESCRIPTION: &'static str = "Activate one or more deferred tools (or `@group` names like `@git`, `@web`) so their full JSON schemas become available on the next turn.";
+    const DESCRIPTION: &'static str = "Activate one or more deferred tools (or `@group` names) so their full JSON schemas become available on the next turn.";
     const PARAM_HINT: &'static str = "<tool|@group> [tool|@group ...]";
     const SHORT_SUMMARY: &'static str = "Activate deferred tools or @groups on demand so their full schemas are loaded on the next turn.";
     type Args = LoadToolsArgs;
