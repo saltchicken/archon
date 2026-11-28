@@ -16,7 +16,6 @@ fn parse_skill_subcommands_and_flags() {
         SkillCommand::Check {
             name: None,
             dir: None,
-            global: false,
             strict: false,
         }
     );
@@ -25,19 +24,17 @@ fn parse_skill_subcommands_and_flags() {
         SkillCommand::Check {
             name: Some("coder".to_string()),
             dir: Some(PathBuf::from("./skills")),
-            global: false,
             strict: true,
         }
     );
     assert_eq!(
-        parse_skill(&["list", "--global"]).unwrap(),
+        parse_skill(&["list", "--dir", "./skills"]).unwrap(),
         SkillCommand::List {
-            dir: None,
-            global: true,
+            dir: Some(PathBuf::from("./skills")),
         }
     );
     assert!(parse_skill(&["check", "a", "b"]).is_err());
-    assert!(parse_skill(&["check", "--dir", "./skills", "--global"]).is_err());
+    assert!(parse_skill(&["check", "--global"]).is_err());
     assert!(parse_skill(&["list", "--strict"]).is_err());
     assert!(parse_skill(&["list", "extra"]).is_err());
     assert!(parse_skill(&["bogus"]).is_err());

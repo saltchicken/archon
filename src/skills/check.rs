@@ -1,11 +1,12 @@
+use super::parse::{ScannedRawSkill, scan_raw_dir};
 use crate::{
     cli::SkillCommand,
-    config::{Config, MemoryScope, expand_tilde, format_tilde_path},
+    config::{Config, expand_tilde, format_tilde_path},
     schema_utils,
     skills::{
         HookTrigger, RESERVED_ARG_NAMES, SkillArgDef, SkillArgType, SkillDefinition, SkillHook,
         TemplateContext, inspect_template, interpolate_hook_args, resolve_skills_with_groups,
-        scan_skills_dir, upsert_skill_by_name, validate_arg_json_value,
+        validate_arg_json_value,
     },
     tools::{self, ALL_TOOL_NAMES},
 };
@@ -676,50 +677,17 @@ fn validate_hooks(
     }
 }
 
-pub use crate::skills::{ScannedRawSkill, scan_raw_dir};
-
-pub fn check_scanned_registry(
+fn check_scanned_registry(
     scanned: Vec<ScannedRawSkill>,
-    fallback_parents: &[SkillDefinition],
     config: &Config,
     check_enabled: bool,
     name_filter: Option<&str>,
 ) -> Vec<SkillCheckResult> {
-    // Resolve global skills against the global-only registry so workspace overrides
-    // never overwrite global skills during validation.
-    let mut global_defs: Vec<SkillDefinition> = fallback_parents.to_vec();
-    for item in &scanned {
-        if item.scope != MemoryScope::Global {
-            continue;
-        }
-        let Some(ref parsed) = item.parsed else {
-            continue;
-        };
-        let Some(mut def) = parsed.definition.clone() else {
-            continue;
-        };
-        def.scope = MemoryScope::Global;
-        upsert_skill_by_name(&mut global_defs, def);
-    }
-    let resolved_global = resolve_skills_with_groups(global_defs.clone(), &config.tool_groups);
-
-    // Build merged raw definitions (workspace overrides global by name for workspace `extends` resolution).
-    let mut merged_defs: Vec<SkillDefinition> = global_defs.clone();
-    for item in &scanned {
-        if item.scope == MemoryScope::Global {
-            continue;
-        }
-        let Some(ref parsed) = item.parsed else {
-            continue;
-        };
-        let Some(mut def) = parsed.definition.clone() else {
-            continue;
-        };
-        def.scope = item.scope;
-        upsert_skill_by_name(&mut merged_defs, def);
-    }
-
-    let resolved_merged = resolve_skills_with_groups(merged_defs.clone(), &config.tool_groups);
+    let defs: Vec<SkillDefinition> = scanned
+        .iter()
+        .filter_map(|item| item.parsed.as_ref()?.definition.clone())
+        .collect();
+    let resolved_all = resolve_skills_with_groups(defs, &config.tool_groups);
     let clean_filter = name_filter
         .map(|f| f.trim().trim_start_matches('@'))
         .filter(|f| !f.is_empty());
@@ -767,46 +735,12 @@ pub fn check_scanned_registry(
             .map(|d| d.name.clone())
             .unwrap_or(fallback_name);
 
-        let pool = if item.scope == MemoryScope::Global {
-            &resolved_global
-        } else {
-            &resolved_merged
-        };
-        let owned_resolved;
-        let resolved = match raw_def.as_ref() {
-            Some(d) => match pool.iter().find(|r| {
+        let resolved = raw_def.as_ref().and_then(|d| {
+            resolved_all.iter().find(|r| {
                 r.name.eq_ignore_ascii_case(&d.name)
                     && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
-            }) {
-                Some(r) => Some(r),
-                None if !d.extends.is_empty() => {
-                    let mut tmp_defs = if item.scope == MemoryScope::Global {
-                        global_defs.clone()
-                    } else {
-                        merged_defs.clone()
-                    };
-                    let mut single = d.clone();
-                    single.scope = item.scope;
-                    if let Some(existing) = tmp_defs
-                        .iter_mut()
-                        .find(|s| s.name.eq_ignore_ascii_case(&single.name))
-                    {
-                        *existing = single;
-                    } else {
-                        tmp_defs.push(single);
-                    }
-                    owned_resolved = resolve_skills_with_groups(tmp_defs, &config.tool_groups)
-                        .into_iter()
-                        .find(|r| {
-                            r.name.eq_ignore_ascii_case(&d.name)
-                                && r.dir_path.as_deref() == Some(item.skill_dir.as_path())
-                        });
-                    owned_resolved.as_ref()
-                }
-                None => None,
-            },
-            None => None,
-        };
+            })
+        });
 
         if let Some(filter) = clean_filter {
             let matches_name = display_name.eq_ignore_ascii_case(filter);
@@ -1115,75 +1049,35 @@ pub fn check_skills_in_dir(
     check_enabled: bool,
     name_filter: Option<&str>,
 ) -> SkillCheckReport {
-    let scanned = scan_raw_dir(dir, scope_label, MemoryScope::Workspace);
-    let results = check_scanned_registry(scanned, &[], config, check_enabled, name_filter);
+    let scanned = scan_raw_dir(dir, scope_label);
+    let results = check_scanned_registry(scanned, config, check_enabled, name_filter);
     SkillCheckReport { results }
 }
 
-/// Validates workspace skills while allowing `extends` references to resolve against global skills.
-pub fn check_workspace_skills(
-    ws_dir: &Path,
-    global_dir: &Path,
-    config: &Config,
-    check_enabled: bool,
-    name_filter: Option<&str>,
-) -> SkillCheckReport {
-    let fallback_parents = scan_skills_dir(global_dir);
-    let scanned = scan_raw_dir(ws_dir, "workspace", MemoryScope::Workspace);
-    let results = check_scanned_registry(
-        scanned,
-        &fallback_parents,
-        config,
-        check_enabled,
-        name_filter,
-    );
-    SkillCheckReport { results }
-}
-
-/// Validates skills across configured directories (global, workspace, and optional repo `./skills`).
+/// Validates skills in the configured skills directory (and optional repo `./skills`).
 pub fn check_configured_skills(
     config: &Config,
     name_filter: Option<&str>,
     dir_override: Option<&Path>,
-    global_only: bool,
-    include_repo_dir: bool,
 ) -> SkillCheckReport {
     if let Some(dir) = dir_override {
         return check_skills_in_dir(dir, "dir", config, false, name_filter);
     }
 
-    let global_dir = expand_tilde(&config.app.skills_dir);
-    if global_only {
-        return check_skills_in_dir(&global_dir, "global", config, true, name_filter);
-    }
+    let skills_dir = expand_tilde(&config.app.skills_dir);
+    let mut results = check_skills_in_dir(&skills_dir, "global", config, true, name_filter).results;
 
-    let mut active_scanned = scan_raw_dir(&global_dir, "global", MemoryScope::Global);
-    let ws_dir = config.workspace_skills_dir.as_deref();
-    if let Some(ws) = ws_dir {
-        active_scanned.extend(scan_raw_dir(ws, "workspace", MemoryScope::Workspace));
-    }
-    let mut results = check_scanned_registry(active_scanned, &[], config, true, name_filter);
-
-    if include_repo_dir {
-        let cwd_skills = std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.join("skills"))
-            .filter(|p| dir_contains_skill_md(p));
-        if let Some(repo_skills) = cwd_skills {
-            let canon_repo = dunce::canonicalize(&repo_skills).unwrap_or(repo_skills.clone());
-            let canon_global = dunce::canonicalize(&global_dir).unwrap_or(global_dir);
-            let canon_ws =
-                ws_dir.map(|w| dunce::canonicalize(w).unwrap_or_else(|_| w.to_path_buf()));
-            if canon_repo != canon_global && canon_ws.as_deref() != Some(canon_repo.as_path()) {
-                let repo_scanned = scan_raw_dir(&repo_skills, "repo", MemoryScope::Workspace);
-                results.extend(check_scanned_registry(
-                    repo_scanned,
-                    &[],
-                    config,
-                    true,
-                    name_filter,
-                ));
-            }
+    let cwd_skills = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join("skills"))
+        .filter(|p| dir_contains_skill_md(p));
+    if let Some(repo_skills) = cwd_skills {
+        let canon_repo = dunce::canonicalize(&repo_skills).unwrap_or(repo_skills.clone());
+        let canon_skills = dunce::canonicalize(&skills_dir).unwrap_or(skills_dir);
+        if canon_repo != canon_skills {
+            results.extend(
+                check_skills_in_dir(&repo_skills, "repo", config, true, name_filter).results,
+            );
         }
     }
 
@@ -1192,20 +1086,14 @@ pub fn check_configured_skills(
 
 pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
     match cmd {
-        SkillCommand::Check {
-            name,
-            dir,
-            global,
-            strict,
-        } => {
+        SkillCommand::Check { name, dir, strict } => {
             let dir = dir.map(|d| expand_tilde(&d.to_string_lossy()));
             if let Some(ref d) = dir
                 && !d.exists()
             {
                 bail!("Skills directory does not exist: {}", d.display());
             }
-            let report =
-                check_configured_skills(config, name.as_deref(), dir.as_deref(), global, true);
+            let report = check_configured_skills(config, name.as_deref(), dir.as_deref());
             println!("{}", report.format_report(strict));
             if !report.is_ok(strict) {
                 bail!(
@@ -1216,22 +1104,14 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
             }
             Ok(())
         }
-        SkillCommand::List { dir, global } => {
+        SkillCommand::List { dir } => {
             let dir = dir.map(|d| expand_tilde(&d.to_string_lossy()));
-            let is_dir_override = dir.is_some();
             let skills = if let Some(ref d) = dir {
                 if !d.exists() {
                     bail!("Skills directory does not exist: {}", d.display());
                 }
                 crate::skills::discover_skills_with_groups(
                     &d.to_string_lossy(),
-                    None,
-                    &config.tool_groups,
-                )
-            } else if global {
-                crate::skills::discover_skills_with_groups(
-                    &config.app.skills_dir,
-                    None,
                     &config.tool_groups,
                 )
             } else {
@@ -1245,16 +1125,6 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
 
             println!("Loaded skills ({}):", skills.len());
             for s in &skills {
-                let scope_tag = if is_dir_override {
-                    "dir"
-                } else if s.overrides_global {
-                    "global→workspace"
-                } else {
-                    match s.scope {
-                        MemoryScope::Global => "global",
-                        MemoryScope::Workspace => "workspace",
-                    }
-                };
                 let kind = if s.is_abstract {
                     "abstract base".to_string()
                 } else {
@@ -1271,10 +1141,9 @@ pub fn handle_command(cmd: SkillCommand, config: &Config) -> Result<()> {
                     format!(" | args: {}", s.args_usage_hint())
                 };
                 println!(
-                    "  - {} ({}) [{}]{}{} | {} tools, {} hooks",
+                    "  - {} ({}){}{} | {} tools, {} hooks",
                     s.name,
                     kind,
-                    scope_tag,
                     ext,
                     args_str,
                     s.tools.len(),

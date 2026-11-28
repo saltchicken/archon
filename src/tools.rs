@@ -532,17 +532,10 @@ impl ToolContext {
             return Ok(canon);
         }
 
-        let global_skills_root = expand_tilde(&self.config.app.skills_dir);
-        let canon_global = dunce::canonicalize(&global_skills_root).unwrap_or(global_skills_root);
-        let canon_ws = self
-            .config
-            .workspace_skills_dir
-            .as_ref()
-            .map(|d| dunce::canonicalize(d).unwrap_or_else(|_| d.clone()));
+        let skills_root = expand_tilde(&self.config.app.skills_dir);
+        let canon_skills = dunce::canonicalize(&skills_root).unwrap_or(skills_root);
 
-        if canon.starts_with(&canon_global)
-            || canon_ws.as_ref().is_some_and(|ws| canon.starts_with(ws))
-        {
+        if canon.starts_with(&canon_skills) {
             let allowed = self
                 .active_skill
                 .as_deref()
@@ -567,11 +560,7 @@ impl ToolContext {
             return Ok(canon);
         }
 
-        if !candidate.starts_with(&canon_global)
-            && !canon_ws
-                .as_ref()
-                .is_some_and(|ws| candidate.starts_with(ws))
-        {
+        if !candidate.starts_with(&canon_skills) {
             self.ensure_not_excluded(&candidate)?;
         }
         let canon = match self.ensure_within_workspace(&canon, trimmed) {

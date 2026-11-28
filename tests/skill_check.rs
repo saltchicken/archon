@@ -1,49 +1,17 @@
 use std::fs;
 use std::path::Path;
 
-use archon::config::{Config, MemoryScope};
-use archon::skills::check::{
-    check_scanned_registry, check_skills_in_dir, check_workspace_skills, scan_raw_dir,
-};
+use archon::config::Config;
+use archon::skills::check::check_skills_in_dir;
 
 #[test]
-fn skill_check_isolates_global_overrides_supports_cross_scope_extends_and_checks_optional_hook_args()
- {
+fn skill_check_flags_optional_no_default_arg_for_required_hook_param() {
     let tmp = tempfile::tempdir().unwrap();
-    let global_dir = tmp.path().join("global");
-    let ws_dir = tmp.path().join("workspace");
+    let dir = tmp.path();
 
-    // Global: valid base + valid skill `shared`
-    fs::create_dir_all(global_dir.join("base-rust")).unwrap();
+    fs::create_dir_all(dir.join("opt-hook")).unwrap();
     fs::write(
-        global_dir.join("base-rust/SKILL.md"),
-        "+++\nname = \"base-rust\"\nabstract = true\ntools = [\"read_file\"]\n+++\nBase.",
-    )
-    .unwrap();
-    fs::create_dir_all(global_dir.join("shared")).unwrap();
-    fs::write(
-        global_dir.join("shared/SKILL.md"),
-        "+++\nname = \"shared\"\nextends = \"base-rust\"\n+++\nGlobal shared.",
-    )
-    .unwrap();
-
-    // Workspace: broken override of `shared` + valid `ws-child` extending global `base-rust`
-    // + skill with optional no-default arg wired to a required tool parameter
-    fs::create_dir_all(ws_dir.join("shared")).unwrap();
-    fs::write(
-        ws_dir.join("shared/SKILL.md"),
-        "+++\nname = \"shared\"\nextends = \"missing-parent\"\n+++\nBroken ws override.",
-    )
-    .unwrap();
-    fs::create_dir_all(ws_dir.join("ws-child")).unwrap();
-    fs::write(
-        ws_dir.join("ws-child/SKILL.md"),
-        "+++\nname = \"ws-child\"\nextends = \"base-rust\"\n+++\nChild.",
-    )
-    .unwrap();
-    fs::create_dir_all(ws_dir.join("opt-hook")).unwrap();
-    fs::write(
-        ws_dir.join("opt-hook/SKILL.md"),
+        dir.join("opt-hook/SKILL.md"),
         r#"+++
 name = "opt-hook"
 tools = ["read_file"]
@@ -63,43 +31,8 @@ Read optional file."#,
     .unwrap();
 
     let cfg = Config::default();
-
-    // Combined check: global `shared` must stay passing while workspace `shared` fails.
-    let mut combined = scan_raw_dir(&global_dir, "global", MemoryScope::Global);
-    combined.extend(scan_raw_dir(&ws_dir, "workspace", MemoryScope::Workspace));
-    let results = check_scanned_registry(combined, &[], &cfg, false, None);
-
-    let global_shared = results
-        .iter()
-        .find(|r| r.name == "shared" && r.scope_label == "global")
-        .unwrap();
-    assert!(
-        global_shared.is_ok(true),
-        "global shared should not inherit workspace override errors: {:?}",
-        global_shared.diagnostics
-    );
-
-    let ws_shared = results
-        .iter()
-        .find(|r| r.name == "shared" && r.scope_label == "workspace")
-        .unwrap();
-    assert!(!ws_shared.is_ok(false));
-
-    // Workspace-only check resolves `ws-child` against global `base-rust`.
-    let ws_report = check_workspace_skills(&ws_dir, &global_dir, &cfg, false, None);
-    let ws_child = ws_report
-        .results
-        .iter()
-        .find(|r| r.name == "ws-child")
-        .unwrap();
-    assert!(
-        ws_child.is_ok(true),
-        "ws-child should extend global base-rust cleanly: {:?}",
-        ws_child.diagnostics
-    );
-
-    // Optional no-default arg wired to required `read_file.file_path` must be flagged.
-    let opt_hook = ws_report
+    let report = check_skills_in_dir(dir, "global", &cfg, false, None);
+    let opt_hook = report
         .results
         .iter()
         .find(|r| r.name == "opt-hook")
@@ -384,7 +317,7 @@ fn skill_check_and_resolve_support_tool_groups() {
     );
 
     let skills =
-        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), None, &cfg.tool_groups);
+        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), &cfg.tool_groups);
     let git_helper = skills.iter().find(|s| s.name == "git-helper").unwrap();
     assert!(git_helper.allows_tool("git"));
     assert!(git_helper.allows_tool("github_repo"));
@@ -445,7 +378,7 @@ fn skill_check_and_resolve_support_custom_tool_groups_and_catch_bad_members() {
     );
 
     let skills =
-        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), None, &cfg.tool_groups);
+        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), &cfg.tool_groups);
     let custom_ok = skills.iter().find(|s| s.name == "custom-ok").unwrap();
     assert!(custom_ok.allows_tool("git"));
     assert!(custom_ok.allows_tool("cargo"));

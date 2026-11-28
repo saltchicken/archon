@@ -38,12 +38,10 @@ pub enum SkillCommand {
     Check {
         name: Option<String>,
         dir: Option<PathBuf>,
-        global: bool,
         strict: bool,
     },
     List {
         dir: Option<PathBuf>,
-        global: bool,
     },
 }
 
@@ -280,7 +278,6 @@ impl CliArgs {
         }
 
         let mut dir: Option<PathBuf> = None;
-        let mut global = false;
         let mut strict = false;
         let mut positional = Vec::new();
 
@@ -290,7 +287,6 @@ impl CliArgs {
                     Self::print_skill_help();
                     std::process::exit(0);
                 }
-                "-g" | "--global" => global = true,
                 "-d" | "--dir" => {
                     let val = Self::require_value(&mut args, arg)?;
                     dir = Some(PathBuf::from(val));
@@ -301,19 +297,14 @@ impl CliArgs {
             }
         }
 
-        if dir.is_some() && global {
-            bail!("`--dir` and `--global` cannot be used together.");
-        }
-
         match sub.as_str() {
             "check" => {
                 if positional.len() > 1 {
-                    bail!("Usage: archon skill check [NAME] [--dir PATH] [--global] [--strict]");
+                    bail!("Usage: archon skill check [NAME] [--dir PATH] [--strict]");
                 }
                 Ok(SkillCommand::Check {
                     name: positional.pop(),
                     dir,
-                    global,
                     strict,
                 })
             }
@@ -324,7 +315,7 @@ impl CliArgs {
                 if let Some(extra) = positional.first() {
                     bail!("Unexpected argument '{extra}' for `archon skill list`.");
                 }
-                Ok(SkillCommand::List { dir, global })
+                Ok(SkillCommand::List { dir })
             }
             other => bail!("Unknown skill subcommand: '{other}'. Run `archon skill --help`."),
         }
@@ -338,7 +329,6 @@ impl CliArgs {
                list                    List loaded skills with inheritance, typed args, tools, and hooks\n\n\
              Options:\n  \
                -d, --dir <PATH>        Validate or list skills from a specific directory\n  \
-               -g, --global            Operate only on global ~/.config/archon/skills\n  \
                --strict                Treat warnings as errors during `check`\n  \
                -h, --help              Print help"
         );

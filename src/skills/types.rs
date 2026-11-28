@@ -1,7 +1,6 @@
 //! Core data types for the skill system: triggers, hooks, argument definitions,
 //! and the `SkillDefinition` struct.
 
-use crate::config::MemoryScope;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -182,8 +181,6 @@ pub struct SkillDefinition {
     pub prompt: String,
     pub dir_path: Option<PathBuf>,
     pub inherited_dirs: Vec<PathBuf>,
-    pub scope: MemoryScope,
-    pub overrides_global: bool,
     pub resolution_errors: Vec<String>,
 }
 

@@ -5,62 +5,42 @@ use std::path::Path;
 
 use serde_json::json;
 
-use archon::config::{Config, MemoryScope};
+use archon::config::Config;
 use archon::session::ChatMessage;
 use archon::skills::{
     HookTrigger, TemplateContext, check_skill_activation, collect_after_turn_hooks,
-    collect_due_hooks, compose_system_prompt, discover_skills, inspect_template,
+    collect_due_hooks, compose_system_prompt, discover_skills_with_groups, inspect_template,
     parse_skill_markdown, render_template, replace_super_placeholder, resolve_skill_inputs,
     resolve_skills,
 };
 
 #[test]
-fn discover_skills_tracks_scope_and_global_overrides() {
+fn discover_skills_with_groups_loads_skills_from_dir() {
     let tmp = tempfile::tempdir().unwrap();
-    let global_dir = tmp.path().join("global_skills");
-    let ws_dir = tmp.path().join("ws_skills");
+    let skills_dir = tmp.path().join("skills");
 
-    fs::create_dir_all(global_dir.join("coder")).unwrap();
-    fs::create_dir_all(global_dir.join("commit")).unwrap();
-    fs::create_dir_all(ws_dir.join("coder")).unwrap();
-    fs::create_dir_all(ws_dir.join("local-only")).unwrap();
+    fs::create_dir_all(skills_dir.join("coder")).unwrap();
+    fs::create_dir_all(skills_dir.join("commit")).unwrap();
 
     fs::write(
-        global_dir.join("coder/SKILL.md"),
-        "+++\nname = \"coder\"\ncommand = \"coder\"\n+++\nGlobal coder",
+        skills_dir.join("coder/SKILL.md"),
+        "+++\nname = \"coder\"\ncommand = \"coder\"\n+++\nCoder prompt",
     )
     .unwrap();
     fs::write(
-        global_dir.join("commit/SKILL.md"),
-        "+++\nname = \"commit\"\ncommand = \"commit\"\n+++\nGlobal commit",
-    )
-    .unwrap();
-    fs::write(
-        ws_dir.join("coder/SKILL.md"),
-        "+++\nname = \"coder\"\ncommand = \"coder\"\n+++\nWorkspace coder",
-    )
-    .unwrap();
-    fs::write(
-        ws_dir.join("local-only/SKILL.md"),
-        "+++\nname = \"local-only\"\n+++\nWorkspace local",
+        skills_dir.join("commit/SKILL.md"),
+        "+++\nname = \"commit\"\ncommand = \"commit\"\n+++\nCommit prompt",
     )
     .unwrap();
 
-    let skills = discover_skills(&global_dir.to_string_lossy(), Some(&ws_dir));
-    assert_eq!(skills.len(), 3);
+    let skills = discover_skills_with_groups(&skills_dir.to_string_lossy(), &BTreeMap::new());
+    assert_eq!(skills.len(), 2);
 
     let coder = skills.iter().find(|s| s.name == "coder").unwrap();
-    assert_eq!(coder.scope, MemoryScope::Workspace);
-    assert!(coder.overrides_global);
-    assert_eq!(coder.prompt, "Workspace coder");
+    assert_eq!(coder.prompt, "Coder prompt");
 
     let commit = skills.iter().find(|s| s.name == "commit").unwrap();
-    assert_eq!(commit.scope, MemoryScope::Global);
-    assert!(!commit.overrides_global);
-
-    let local = skills.iter().find(|s| s.name == "local-only").unwrap();
-    assert_eq!(local.scope, MemoryScope::Workspace);
-    assert!(!local.overrides_global);
+    assert_eq!(commit.prompt, "Commit prompt");
 }
 
 #[test]

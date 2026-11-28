@@ -561,16 +561,17 @@ impl CoreEngine {
             memory.items.len()
         );
         let mem_to_save = memory.clone();
-        let ws_dir = self.config.workspace_config_dir();
+        let history_dir = self.config.app.history_dir.clone();
+        let ws_key = self.config.workspace_key();
         let save_res = tokio::task::spawn_blocking(move || {
-            config::save_scoped_memory(scope, ws_dir.as_deref(), &mem_to_save)
+            config::save_scoped_memory(scope, &history_dir, &ws_key, &mem_to_save)
         })
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
 
         match save_res {
-            Ok(_) => {
+            Ok(()) => {
                 let (global_memory, workspace_memory) = config::reload_memories(&self.config);
                 self.config.global_memory = global_memory.clone();
                 self.config.workspace_memory = workspace_memory.clone();

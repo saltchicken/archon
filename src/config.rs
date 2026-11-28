@@ -3,8 +3,8 @@ mod provenance;
 
 pub use memory::{
     Memory, MemoryScope, archon_config_root, clean_memory_item, global_memory_path, load_memories,
-    load_scoped_memory_file, reload_memories, save_memory_file, save_scoped_memory,
-    workspace_memory_path,
+    load_scoped_memory, load_scoped_memory_file, load_workspace_memory_db, reload_memories,
+    save_memory_file, save_scoped_memory, save_workspace_memory_db,
 };
 pub use provenance::{
     ConfigProvenance, ConfigSource, ToolProvenance, build_provenance, tool_list_contains,
@@ -143,8 +143,6 @@ pub struct Config {
     pub global_schedules: Vec<ScheduleConfig>,
     #[serde(skip)]
     pub skills: Vec<SkillDefinition>,
-    #[serde(skip)]
-    pub workspace_skills_dir: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip)]
@@ -507,7 +505,6 @@ impl Default for Config {
             schedules: Vec::new(),
             global_schedules: Vec::new(),
             skills: Vec::new(),
-            workspace_skills_dir: None,
             workspace: None,
             provenance: ConfigProvenance::default(),
         }
@@ -576,9 +573,8 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
 
-    let skills_dir = ws_dir.join("skills");
-    fs::create_dir_all(&skills_dir)
-        .with_context(|| format!("Failed to create directory {}", skills_dir.display()))?;
+    fs::create_dir_all(&ws_dir)
+        .with_context(|| format!("Failed to create directory {}", ws_dir.display()))?;
 
     let escaped_ws = canon
         .to_string_lossy()
@@ -735,25 +731,20 @@ impl Config {
         Memory::new(combined_items, enabled)
     }
 
-    pub fn workspace_config_dir(&self) -> Option<PathBuf> {
-        self.workspace_skills_dir
+    pub fn workspace_key(&self) -> String {
+        self.workspace
             .as_deref()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .or_else(|| {
-                self.workspace
-                    .as_deref()
-                    .map(Path::new)
-                    .map(workspace_config_dir_for)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(expand_tilde)
+            .or_else(|| std::env::current_dir().ok())
+            .map(|p| {
+                dunce::canonicalize(&p)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .into_owned()
             })
-    }
-
-    pub fn workspace_memory_path(&self) -> PathBuf {
-        let ws_dir = self.workspace_config_dir().unwrap_or_else(|| {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            workspace_config_dir_for(&cwd)
-        });
-        workspace_memory_path(&ws_dir)
+            .unwrap_or_default()
     }
 
     pub fn find_model(&self, model: &str) -> Option<&ModelPreset> {
@@ -806,8 +797,6 @@ impl Config {
 
         let ws_dir = workspace_config_dir.as_ref();
         let local_config_path = ws_dir.join("config.toml");
-        let ws_skills_dir = ws_dir.join("skills");
-        let (global_memory, workspace_memory) = load_memories(Some(ws_dir));
 
         let global_table = fs::read_to_string(base_path)
             .ok()
@@ -869,15 +858,13 @@ impl Config {
             ),
         };
 
+        let ws_key = cfg.workspace_key();
+        let (global_memory, workspace_memory) = load_memories(&cfg.app.history_dir, &ws_key);
         cfg.global_memory = global_memory;
         cfg.workspace_memory = workspace_memory;
         cfg.provenance = provenance;
-        cfg.skills = crate::skills::discover_skills_with_groups(
-            &cfg.app.skills_dir,
-            Some(ws_skills_dir.as_path()),
-            &cfg.tool_groups,
-        );
-        cfg.workspace_skills_dir = Some(ws_skills_dir);
+        cfg.skills =
+            crate::skills::discover_skills_with_groups(&cfg.app.skills_dir, &cfg.tool_groups);
         (cfg, err)
     }
 }

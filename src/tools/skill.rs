@@ -8,7 +8,7 @@ use super::{
     },
     parse_args,
 };
-use crate::config::{Config, expand_tilde, format_tilde_path, workspace_config_dir_for};
+use crate::config::{Config, expand_tilde, format_tilde_path};
 use crate::skills::check as skill_check;
 use crate::skills::{
     HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
@@ -29,7 +29,7 @@ pub struct Tool;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillAction {
-    /// List available skills (across workspace and global skill directories) with their trigger commands, scopes, tools, and descriptions.
+    /// List available skills in the configured skills directory with their trigger commands, tools, and descriptions.
     List,
     /// Read a skill's `SKILL.md` definition with optional 1-based `[start_line, end_line]`.
     Read,
@@ -42,18 +42,6 @@ pub enum SkillAction {
     Check,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillScope {
-    /// Default: searches workspace skills first then global skills (for `list`/`read`/`modify`), and creates new skills in the workspace skills directory (`create`).
-    #[default]
-    Auto,
-    /// Workspace skills directory (`~/.config/archon/workspaces/<workspace>/skills`).
-    Workspace,
-    /// Global user skills directory (`~/.config/archon/skills`).
-    Global,
-}
-
 #[derive(Deserialize, JsonSchema)]
 pub struct SkillArgs {
     /// The skill operation to perform: `list`, `read`, `create`, `modify`, or `check`.
@@ -61,9 +49,6 @@ pub struct SkillArgs {
     /// Skill name or `@command` trigger (required for `read`, `create`, and `modify`; optional filter for `list` and `check`).
     #[serde(default)]
     pub name: String,
-    /// Target skill scope: `auto` (default), `workspace`, or `global`.
-    #[serde(default)]
-    pub scope: SkillScope,
     /// Optional short description of the skill (for `create` or `modify` frontmatter).
     #[serde(default)]
     pub description: Option<String>,
@@ -130,27 +115,12 @@ impl SkillArgs {
 
 struct ResolvedSkill {
     definition: SkillDefinition,
-    scope_label: &'static str,
     skill_dir: PathBuf,
     skill_md_path: PathBuf,
 }
 
-fn skill_roots(ctx: &ToolContext) -> (PathBuf, PathBuf) {
-    let global_dir = expand_tilde(&ctx.config.app.skills_dir);
-    let ws_dir = ctx
-        .config
-        .workspace_skills_dir
-        .clone()
-        .unwrap_or_else(|| workspace_config_dir_for(&ctx.root).join("skills"));
-    (ws_dir, global_dir)
-}
-
-fn create_root_dir(scope: SkillScope, ctx: &ToolContext) -> PathBuf {
-    let (ws_dir, global_dir) = skill_roots(ctx);
-    match scope {
-        SkillScope::Global => global_dir,
-        SkillScope::Auto | SkillScope::Workspace => ws_dir,
-    }
+fn skills_root(ctx: &ToolContext) -> PathBuf {
+    expand_tilde(&ctx.config.app.skills_dir)
 }
 
 fn clean_skill_query(raw: &str) -> &str {
@@ -174,11 +144,7 @@ fn validate_skill_slug(raw: &str, field: &str) -> Result<String> {
     Ok(cleaned.to_string())
 }
 
-fn locate_skill_in_dir(
-    root: &Path,
-    query: &str,
-    scope_label: &'static str,
-) -> Option<ResolvedSkill> {
+fn locate_skill_in_dir(root: &Path, query: &str) -> Option<ResolvedSkill> {
     for skill in scan_skills_dir(root) {
         let dir_path = skill.dir_path.clone()?;
         let dir_name = dir_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -199,7 +165,6 @@ fn locate_skill_in_dir(
 
         return Some(ResolvedSkill {
             definition: skill,
-            scope_label,
             skill_dir: dir_path,
             skill_md_path,
         });
@@ -207,29 +172,15 @@ fn locate_skill_in_dir(
     None
 }
 
-fn resolve_existing_skill(
-    raw_name: &str,
-    scope: SkillScope,
-    ctx: &ToolContext,
-) -> Result<ResolvedSkill> {
+fn resolve_existing_skill(raw_name: &str, ctx: &ToolContext) -> Result<ResolvedSkill> {
     let query = clean_skill_query(raw_name);
     if query.is_empty() {
         bail!("'name' is required to identify the skill");
     }
 
-    let (ws_dir, global_dir) = skill_roots(ctx);
-    let found = match scope {
-        SkillScope::Workspace => locate_skill_in_dir(&ws_dir, query, "workspace"),
-        SkillScope::Global => locate_skill_in_dir(&global_dir, query, "global"),
-        SkillScope::Auto => locate_skill_in_dir(&ws_dir, query, "workspace")
-            .or_else(|| locate_skill_in_dir(&global_dir, query, "global")),
-    };
-
-    found.with_context(|| match scope {
-        SkillScope::Workspace => format!("Skill '{query}' not found in workspace skills directory"),
-        SkillScope::Global => format!("Skill '{query}' not found in global skills directory"),
-        SkillScope::Auto => format!("Skill '{query}' not found in workspace or global skills"),
-    })
+    let root = skills_root(ctx);
+    locate_skill_in_dir(&root, query)
+        .with_context(|| format!("Skill '{query}' not found in skills directory"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,7 +505,7 @@ fn append_unknown_tools_note(
 
 fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, String, String)> {
     let slug = validate_skill_slug(&args.name, "name")?;
-    let root_dir = create_root_dir(args.scope, ctx);
+    let root_dir = skills_root(ctx);
     let skill_dir = root_dir.join(&slug);
 
     let target_path = skill_dir.join("SKILL.md");
@@ -660,7 +611,7 @@ fn preview_modify(
     args: &SkillArgs,
     ctx: &ToolContext,
 ) -> Result<(PathBuf, String, String, String, usize)> {
-    let resolved = resolve_existing_skill(&args.name, args.scope, ctx)?;
+    let resolved = resolve_existing_skill(&args.name, ctx)?;
 
     let target_path = resolved.skill_md_path;
     let display = format_tilde_path(&target_path);
@@ -722,70 +673,23 @@ fn preview_modify(
 }
 
 fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
-    let (ws_dir, global_dir) = skill_roots(ctx);
+    let root_dir = skills_root(ctx);
     let filter = clean_skill_query(&args.name);
 
-    let raw_global = scan_skills_dir(&global_dir);
-    let raw_ws = if matches!(args.scope, SkillScope::Auto | SkillScope::Workspace) {
-        scan_skills_dir(&ws_dir)
-    } else {
-        Vec::new()
-    };
-
-    // Resolve global skills against global only, and workspace skills against merged global+workspace.
-    let global_skills = if matches!(args.scope, SkillScope::Auto | SkillScope::Global) {
-        resolve_skills_with_groups(raw_global.clone(), &ctx.config.tool_groups)
-    } else {
-        Vec::new()
-    };
-    let ws_skills = if raw_ws.is_empty() {
-        Vec::new()
-    } else {
-        let ws_names: Vec<String> = raw_ws.iter().map(|s| s.name.to_ascii_lowercase()).collect();
-        let mut merged = raw_global;
-        for ws in raw_ws {
-            if let Some(existing) = merged
-                .iter_mut()
-                .find(|s| s.name.eq_ignore_ascii_case(&ws.name))
-            {
-                *existing = ws;
-            } else {
-                merged.push(ws);
-            }
-        }
-        resolve_skills_with_groups(merged, &ctx.config.tool_groups)
-            .into_iter()
-            .filter(|s| ws_names.iter().any(|n| n == &s.name.to_ascii_lowercase()))
-            .collect()
-    };
-
-    let mut entries: Vec<(&str, &SkillDefinition, bool)> = Vec::new();
-    for s in &ws_skills {
-        entries.push(("workspace", s, false));
-    }
-    for s in &global_skills {
-        let shadowed = ws_skills
-            .iter()
-            .any(|ws| ws.name.eq_ignore_ascii_case(&s.name));
-        entries.push(("global", s, shadowed));
-    }
+    let raw_skills = scan_skills_dir(&root_dir);
+    let mut skills = resolve_skills_with_groups(raw_skills, &ctx.config.tool_groups);
 
     if !filter.is_empty() {
-        entries.retain(|(_, s, _)| {
+        skills.retain(|s| {
             s.name.eq_ignore_ascii_case(filter)
                 || (!s.command.is_empty() && s.command.eq_ignore_ascii_case(filter))
         });
     }
 
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Skill directories:\n  workspace: {}\n  global:    {}\n",
-        format_tilde_path(&ws_dir),
-        format_tilde_path(&global_dir),
-    );
+    let _ = writeln!(out, "Skills directory: {}\n", format_tilde_path(&root_dir));
 
-    if entries.is_empty() {
+    if skills.is_empty() {
         if filter.is_empty() {
             let _ = writeln!(out, "No skills found.");
         } else {
@@ -794,14 +698,9 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         return Ok(out.trim_end().to_string());
     }
 
-    let _ = writeln!(out, "Declared skills ({}):", entries.len());
-    for (scope, skill, shadowed) in entries {
+    let _ = writeln!(out, "Declared skills ({}):", skills.len());
+    for skill in &skills {
         let trigger = skill.trigger();
-        let shadow_note = if shadowed {
-            " (overridden by workspace skill)"
-        } else {
-            ""
-        };
         let tools_str = if skill.tools.is_empty() {
             if skill.tools_restricted || skill.excluded_tools.is_empty() {
                 "(none)".to_string()
@@ -834,11 +733,7 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         } else {
             format!("@{trigger}")
         };
-        let _ = writeln!(
-            out,
-            "\n- {} ({}) [{}{}]",
-            skill.name, trigger_label, scope, shadow_note
-        );
+        let _ = writeln!(out, "\n- {} ({})", skill.name, trigger_label);
         let _ = writeln!(out, "  description: {}", skill.description);
         if !skill.extends.is_empty() {
             let _ = writeln!(out, "  extends:     {}", skill.extends.join(", "));
@@ -871,30 +766,14 @@ fn execute_list(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     Ok(out.trim_end().to_string())
 }
 
-fn resolve_skill_for_read(
-    raw_name: &str,
-    scope: SkillScope,
-    ctx: &ToolContext,
-) -> Result<ResolvedSkill> {
-    let mut resolved = resolve_existing_skill(raw_name, scope, ctx)?;
+fn resolve_skill_for_read(raw_name: &str, ctx: &ToolContext) -> Result<ResolvedSkill> {
+    let mut resolved = resolve_existing_skill(raw_name, ctx)?;
     if resolved.definition.extends.is_empty() {
         return Ok(resolved);
     }
 
-    let (ws_dir, global_dir) = skill_roots(ctx);
-    let mut defs = scan_skills_dir(&global_dir);
-    if resolved.scope_label == "workspace" {
-        for ws in scan_skills_dir(&ws_dir) {
-            if let Some(existing) = defs
-                .iter_mut()
-                .find(|s| s.name.eq_ignore_ascii_case(&ws.name))
-            {
-                *existing = ws;
-            } else {
-                defs.push(ws);
-            }
-        }
-    }
+    let root_dir = skills_root(ctx);
+    let defs = scan_skills_dir(&root_dir);
     if let Some(effective) = resolve_skills_with_groups(defs, &ctx.config.tool_groups)
         .into_iter()
         .find(|s| {
@@ -908,7 +787,7 @@ fn resolve_skill_for_read(
 }
 
 fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
-    let resolved = resolve_skill_for_read(&args.name, args.scope, ctx)?;
+    let resolved = resolve_skill_for_read(&args.name, ctx)?;
 
     let display = format_tilde_path(&resolved.skill_md_path);
     let content = read_file_contents(
@@ -925,8 +804,8 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
         format!("@{}", resolved.definition.trigger())
     };
     let header = format!(
-        "# Skill: {} ({}) [{}]\n# Path: {}\n\n{}",
-        resolved.definition.name, trigger_label, resolved.scope_label, display, content
+        "# Skill: {} ({})\n# Path: {}\n\n{}",
+        resolved.definition.name, trigger_label, display, content
     );
     Ok(header)
 }
@@ -934,26 +813,13 @@ fn execute_read(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
 fn execute_check(args: &SkillArgs, ctx: &ToolContext) -> Result<String> {
     let filter = clean_skill_query(&args.name);
     let filter_opt = (!filter.is_empty()).then_some(filter);
-    let (ws_dir, global_dir) = skill_roots(ctx);
-
-    let report = match args.scope {
-        SkillScope::Workspace => {
-            skill_check::check_workspace_skills(&ws_dir, &global_dir, &ctx.config, true, filter_opt)
-        }
-        SkillScope::Global => {
-            skill_check::check_skills_in_dir(&global_dir, "global", &ctx.config, true, filter_opt)
-        }
-        SkillScope::Auto => {
-            skill_check::check_configured_skills(&ctx.config, filter_opt, None, false, true)
-        }
-    };
-
+    let report = skill_check::check_configured_skills(&ctx.config, filter_opt, None);
     Ok(report.format_report(false))
 }
 
 impl BlockingTool for Tool {
     const NAME: &'static str = "skill";
-    const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions) across workspace and global skill directories.";
+    const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions) in the configured skills directory.";
     const SUBACTIONS: &'static [&'static str] = &["list", "read", "create", "modify", "check"];
     const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str = "<list|read|create|modify|check> [name]";
@@ -1002,7 +868,7 @@ impl BlockingTool for Tool {
             SkillAction::Check => execute_check(&args, ctx),
             SkillAction::Create => {
                 let (target_path, display, rendered) = preview_create(&args, ctx)?;
-                let root_dir = create_root_dir(args.scope, ctx);
+                let root_dir = skills_root(ctx);
                 fs::create_dir_all(&root_dir).with_context(|| {
                     format!("Failed to create skills root {}", root_dir.display())
                 })?;

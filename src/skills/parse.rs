@@ -1,7 +1,7 @@
 //! Parsing, scanning, and discovery of `SKILL.md` files.
 
 use super::types::{KNOWN_FRONTMATTER_KEYS, SkillArgDef, SkillDefinition, SkillHook};
-use crate::config::{Config, MemoryScope, expand_tilde};
+use crate::config::{Config, expand_tilde};
 use serde::{Deserialize, Deserializer};
 use std::{
     fs,
@@ -214,8 +214,6 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
             prompt,
             dir_path: Some(dir_path.to_path_buf()),
             inherited_dirs: Vec::new(),
-            scope: MemoryScope::Global,
-            overrides_global: false,
             resolution_errors: Vec::new(),
         }),
         unclosed_frontmatter,
@@ -227,16 +225,15 @@ pub fn parse_skill_markdown_detailed(raw: &str, dir_path: &Path) -> DetailedSkil
     }
 }
 
-pub struct ScannedRawSkill {
-    pub(crate) scope_label: String,
-    pub(crate) scope: MemoryScope,
-    pub(crate) file_path: PathBuf,
-    pub(crate) skill_dir: PathBuf,
-    pub(crate) read_error: Option<String>,
-    pub(crate) parsed: Option<DetailedSkillParse>,
+pub(super) struct ScannedRawSkill {
+    pub(super) scope_label: String,
+    pub(super) file_path: PathBuf,
+    pub(super) skill_dir: PathBuf,
+    pub(super) read_error: Option<String>,
+    pub(super) parsed: Option<DetailedSkillParse>,
 }
 
-pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<ScannedRawSkill> {
+pub(super) fn scan_raw_dir(dir: &Path, scope_label: &str) -> Vec<ScannedRawSkill> {
     let Ok(rd) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -263,7 +260,6 @@ pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<Sc
                 let parsed = parse_skill_markdown_detailed(&raw, &skill_dir);
                 out.push(ScannedRawSkill {
                     scope_label: scope_label.to_string(),
-                    scope,
                     file_path: md_path,
                     skill_dir,
                     read_error: None,
@@ -273,7 +269,6 @@ pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<Sc
             Err(e) => {
                 out.push(ScannedRawSkill {
                     scope_label: scope_label.to_string(),
-                    scope,
                     file_path: md_path,
                     skill_dir,
                     read_error: Some(e.to_string()),
@@ -283,23 +278,6 @@ pub fn scan_raw_dir(dir: &Path, scope_label: &str, scope: MemoryScope) -> Vec<Sc
         }
     }
     out
-}
-
-/// Insert or replace a skill by name (case-insensitive).
-///
-/// When replacing, sets `overrides_global` on the incoming definition if it is
-/// a workspace-scoped entry overriding a global-scoped entry.
-pub fn upsert_skill_by_name(list: &mut Vec<SkillDefinition>, mut incoming: SkillDefinition) {
-    if let Some(existing) = list
-        .iter_mut()
-        .find(|s| s.name.eq_ignore_ascii_case(&incoming.name))
-    {
-        incoming.overrides_global =
-            existing.scope == MemoryScope::Global && incoming.scope == MemoryScope::Workspace;
-        *existing = incoming;
-    } else {
-        list.push(incoming);
-    }
 }
 
 pub fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinition> {
@@ -314,7 +292,7 @@ pub fn parse_skill_markdown(raw: &str, dir_path: &Path) -> Option<SkillDefinitio
 }
 
 pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
-    scan_raw_dir(dir, "", MemoryScope::Global)
+    scan_raw_dir(dir, "")
         .into_iter()
         .filter_map(|item| {
             if let Some(err) = item.read_error {
@@ -338,36 +316,11 @@ pub fn scan_skills_dir(dir: &Path) -> Vec<SkillDefinition> {
 
 pub fn discover_skills_with_groups(
     skills_dir: &str,
-    workspace_skills_dir: Option<&Path>,
     custom_groups: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Vec<SkillDefinition> {
-    let mut merged = Vec::new();
-
-    let global_dir = expand_tilde(skills_dir);
-    for mut skill in scan_skills_dir(&global_dir) {
-        skill.scope = MemoryScope::Global;
-        upsert_skill_by_name(&mut merged, skill);
-    }
-
-    if let Some(ws_dir) = workspace_skills_dir {
-        for mut skill in scan_skills_dir(ws_dir) {
-            skill.scope = MemoryScope::Workspace;
-            upsert_skill_by_name(&mut merged, skill);
-        }
-    }
-
-    super::resolve::resolve_skills_with_groups(merged, custom_groups)
-}
-
-pub fn discover_skills(
-    skills_dir: &str,
-    workspace_skills_dir: Option<&Path>,
-) -> Vec<SkillDefinition> {
-    discover_skills_with_groups(
-        skills_dir,
-        workspace_skills_dir,
-        &std::collections::BTreeMap::new(),
-    )
+    let dir = expand_tilde(skills_dir);
+    let raw = scan_skills_dir(&dir);
+    super::resolve::resolve_skills_with_groups(raw, custom_groups)
 }
 
 pub fn find_skill<'a>(config: &'a Config, name_or_cmd: &str) -> Option<&'a SkillDefinition> {

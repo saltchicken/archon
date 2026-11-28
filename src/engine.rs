@@ -202,7 +202,6 @@ impl CoreEngine {
     fn refresh_skills(&mut self) {
         self.config.skills = skills::discover_skills_with_groups(
             &self.config.app.skills_dir,
-            self.config.workspace_skills_dir.as_deref(),
             &self.config.tool_groups,
         );
         let _ = self

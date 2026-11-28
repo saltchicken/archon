@@ -1,6 +1,6 @@
 use super::{TuiApp, create_text_area, create_text_area_with};
 use crate::{
-    config::{Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file},
+    config::{Memory, MemoryScope, clean_memory_item, load_scoped_memory},
     engine::{EngineCommand, SessionToolsAction},
     session::ChatMessage,
     skills,
@@ -177,12 +177,8 @@ impl TuiApp {
             (MemoryScope::Global, args)
         };
 
-        let (mem_path, is_global) = match scope {
-            MemoryScope::Global => (global_memory_path(), true),
-            MemoryScope::Workspace => (self.config.workspace_memory_path(), false),
-        };
-        let mut mem = load_scoped_memory_file(&mem_path, is_global)
-            .map(|(_, m)| m)
+        let ws_key = self.config.workspace_key();
+        let mut mem = load_scoped_memory(scope, &self.config.app.history_dir, &ws_key)
             .unwrap_or_else(|_| self.config.scoped_memory(scope).clone());
         match sub_args.to_ascii_lowercase().as_str() {
             "clear" => {
@@ -377,7 +373,6 @@ impl TuiApp {
         let prompt = if let Some((cmd_token, args_str)) = skills::parse_at_command(&raw_prompt) {
             self.config.skills = skills::discover_skills_with_groups(
                 &self.config.app.skills_dir,
-                self.config.workspace_skills_dir.as_deref(),
                 &self.config.tool_groups,
             );
             match skills::apply_at_skill_to_turn(&raw_prompt, &mut turn, &self.config) {

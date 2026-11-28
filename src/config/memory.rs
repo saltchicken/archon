@@ -1,6 +1,7 @@
-//! Memory scope, item storage, file I/O, and path helpers.
+//! Memory scope, item storage, file/SQLite I/O, and path helpers.
 
 use anyhow::{Context, Result};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ pub enum MemoryScope {
     /// Global `~/.config/archon/MEMORY.md` (shared across all workspaces).
     #[default]
     Global,
-    /// Workspace-specific `~/.config/archon/workspaces/<ws>/MEMORY.md`.
+    /// Workspace-specific memory stored in `archon.db` (keyed by canonical workspace path).
     Workspace,
 }
 
@@ -34,10 +35,7 @@ pub struct Memory {
 
 impl Default for Memory {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            items: vec!["The user is running CachyOS.".into()],
-        }
+        Self::empty()
     }
 }
 
@@ -140,10 +138,6 @@ pub fn global_memory_path() -> PathBuf {
     archon_config_root().join("MEMORY.md")
 }
 
-pub fn workspace_memory_path(ws_dir: &Path) -> PathBuf {
-    ws_dir.join("MEMORY.md")
-}
-
 pub fn load_scoped_memory_file(mem_path: &Path, is_global: bool) -> Result<(String, Memory)> {
     if !mem_path.exists() {
         let mem = if is_global {
@@ -172,42 +166,179 @@ pub fn save_memory_file(mem_path: &Path, mem: &Memory) -> Result<String> {
     Ok(rendered)
 }
 
-pub fn save_scoped_memory(
-    scope: MemoryScope,
-    ws_dir: Option<&Path>,
-    mem: &Memory,
-) -> Result<String> {
-    let path = match scope {
-        MemoryScope::Global => global_memory_path(),
-        MemoryScope::Workspace => {
-            let dir = match ws_dir {
-                Some(d) => d.to_path_buf(),
-                None => {
-                    let cwd = std::env::current_dir().unwrap_or_default();
-                    super::workspace_config_dir_for(&cwd)
-                }
-            };
-            workspace_memory_path(&dir)
-        }
-    };
-    save_memory_file(&path, mem)
+fn init_memory_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workspace_memory (
+             workspace TEXT PRIMARY KEY,
+             enabled INTEGER NOT NULL DEFAULT 1,
+             updated_at TEXT NOT NULL
+         );
+
+         CREATE TABLE IF NOT EXISTS workspace_memory_items (
+             workspace TEXT NOT NULL,
+             position INTEGER NOT NULL,
+             content TEXT NOT NULL,
+             updated_at TEXT NOT NULL,
+             PRIMARY KEY (workspace, position),
+             FOREIGN KEY (workspace) REFERENCES workspace_memory(workspace) ON DELETE CASCADE
+         );",
+    )
+    .context("Failed to initialize workspace memory tables")?;
+    Ok(())
 }
 
-pub fn load_memories(ws_dir: Option<&Path>) -> (Memory, Memory) {
+fn open_memory_db(raw_history_dir: &str) -> Result<Connection> {
+    let conn = crate::db::open_archon_db(raw_history_dir)?;
+    init_memory_schema(&conn)?;
+    Ok(conn)
+}
+
+fn load_workspace_memory_from_conn(conn: &Connection, workspace_key: &str) -> Result<Memory> {
+    let enabled_opt: Option<i64> = conn
+        .query_row(
+            "SELECT enabled FROM workspace_memory WHERE workspace = ?1",
+            params![workspace_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let Some(enabled_int) = enabled_opt else {
+        return Ok(Memory::empty());
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT content FROM workspace_memory_items
+         WHERE workspace = ?1
+         ORDER BY position ASC",
+    )?;
+    let raw_items: Vec<String> = stmt
+        .query_map(params![workspace_key], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(Memory::new(raw_items, enabled_int != 0))
+}
+
+fn save_workspace_memory_to_conn(
+    conn: &Connection,
+    workspace_key: &str,
+    mem: &Memory,
+) -> Result<()> {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let tx = conn.unchecked_transaction()?;
+
+    tx.execute(
+        "INSERT INTO workspace_memory (workspace, enabled, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace) DO UPDATE SET
+             enabled = excluded.enabled,
+             updated_at = excluded.updated_at",
+        params![workspace_key, i64::from(mem.enabled), now],
+    )?;
+
+    tx.execute(
+        "DELETE FROM workspace_memory_items WHERE workspace = ?1",
+        params![workspace_key],
+    )?;
+
+    for (idx, item) in mem.items.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO workspace_memory_items (workspace, position, content, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![workspace_key, (idx + 1) as i64, item, now],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn load_workspace_memory_db(raw_history_dir: &str, workspace_key: &str) -> Result<Memory> {
+    let conn = open_memory_db(raw_history_dir)?;
+    load_workspace_memory_from_conn(&conn, workspace_key)
+}
+
+pub fn save_workspace_memory_db(
+    raw_history_dir: &str,
+    workspace_key: &str,
+    mem: &Memory,
+) -> Result<()> {
+    let conn = open_memory_db(raw_history_dir)?;
+    save_workspace_memory_to_conn(&conn, workspace_key, mem)
+}
+
+pub fn load_scoped_memory(
+    scope: MemoryScope,
+    history_dir: &str,
+    workspace_key: &str,
+) -> Result<Memory> {
+    match scope {
+        MemoryScope::Global => load_scoped_memory_file(&global_memory_path(), true).map(|(_, m)| m),
+        MemoryScope::Workspace => load_workspace_memory_db(history_dir, workspace_key),
+    }
+}
+
+pub fn save_scoped_memory(
+    scope: MemoryScope,
+    history_dir: &str,
+    workspace_key: &str,
+    mem: &Memory,
+) -> Result<()> {
+    match scope {
+        MemoryScope::Global => save_memory_file(&global_memory_path(), mem).map(|_| ()),
+        MemoryScope::Workspace => save_workspace_memory_db(history_dir, workspace_key, mem),
+    }
+}
+
+pub fn load_memories(history_dir: &str, workspace_key: &str) -> (Memory, Memory) {
     let global_path = global_memory_path();
     let (_, global_mem) = load_scoped_memory_file(&global_path, true)
         .unwrap_or_else(|_| (String::new(), Memory::default()));
 
-    let workspace_mem = ws_dir
-        .map(workspace_memory_path)
-        .and_then(|ws_path| load_scoped_memory_file(&ws_path, false).ok())
-        .map(|(_, m)| m)
-        .unwrap_or_else(Memory::empty);
+    let workspace_mem =
+        load_workspace_memory_db(history_dir, workspace_key).unwrap_or_else(|_| Memory::empty());
 
     (global_mem, workspace_mem)
 }
 
 pub fn reload_memories(current_config: &super::Config) -> (Memory, Memory) {
-    let ws_dir = current_config.workspace_config_dir();
-    load_memories(ws_dir.as_deref())
+    let ws_key = current_config.workspace_key();
+    load_memories(&current_config.app.history_dir, &ws_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_memory_roundtrip_and_isolation_in_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let history_dir = tmp.path().to_string_lossy().into_owned();
+
+        // Missing workspace defaults to empty & enabled.
+        let initial = load_workspace_memory_db(&history_dir, "/tmp/ws-a").unwrap();
+        assert_eq!(initial, Memory::empty());
+
+        let mem_a = Memory::new(
+            vec!["Fact one".into(), "Fact two".into(), "fact one".into()],
+            true,
+        );
+        save_workspace_memory_db(&history_dir, "/tmp/ws-a", &mem_a).unwrap();
+
+        let mem_b = Memory::new(vec!["Other workspace".into()], false);
+        save_workspace_memory_db(&history_dir, "/tmp/ws-b", &mem_b).unwrap();
+
+        let loaded_a = load_workspace_memory_db(&history_dir, "/tmp/ws-a").unwrap();
+        assert!(loaded_a.enabled);
+        assert_eq!(loaded_a.items, vec!["Fact one", "Fact two"]);
+
+        let loaded_b = load_workspace_memory_db(&history_dir, "/tmp/ws-b").unwrap();
+        assert!(!loaded_b.enabled);
+        assert_eq!(loaded_b.items, vec!["Other workspace"]);
+
+        // Clearing items preserves enabled = false.
+        save_workspace_memory_db(&history_dir, "/tmp/ws-b", &Memory::new(vec![], false)).unwrap();
+        let cleared_b = load_workspace_memory_db(&history_dir, "/tmp/ws-b").unwrap();
+        assert!(!cleared_b.enabled);
+        assert!(cleared_b.items.is_empty());
+    }
 }

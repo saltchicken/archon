@@ -17,13 +17,11 @@ pub use hooks::{
     collect_after_turn_hooks, collect_due_hooks, format_hook_summary, interpolate_hook_args,
 };
 pub use parse::{
-    DetailedSkillParse, ScannedRawSkill, discover_skills, discover_skills_with_groups, find_skill,
-    parse_at_command, parse_skill_markdown, parse_skill_markdown_detailed, scan_raw_dir,
-    scan_skills_dir, split_toml_frontmatter, upsert_skill_by_name,
+    DetailedSkillParse, discover_skills_with_groups, find_skill, parse_at_command,
+    parse_skill_markdown, parse_skill_markdown_detailed, scan_skills_dir, split_toml_frontmatter,
 };
 pub use resolve::{
-    check_skill_activation, missing_skill_tools, replace_super_placeholder, resolve_skills,
-    resolve_skills_with_groups,
+    check_skill_activation, replace_super_placeholder, resolve_skills, resolve_skills_with_groups,
 };
 pub use template::{TemplateContext, inspect_template, render_template};
 pub use types::{

@@ -2,7 +2,7 @@ use super::{
     ActiveModal, SessionView, TuiApp, chat_block, create_memory_area, render::sanitize_line, theme,
     titled_block,
 };
-use crate::config::{Memory, MemoryScope, global_memory_path, load_scoped_memory_file};
+use crate::config::{Memory, MemoryScope, load_scoped_memory};
 use crate::engine::{EngineCommand, TruncatedToolAction};
 use crate::session::SessionSummary;
 use ratatui::{
@@ -222,12 +222,16 @@ impl TuiApp {
     }
 
     pub(super) fn open_memory_modal(&mut self) {
-        let global_mem = load_scoped_memory_file(&global_memory_path(), true)
-            .map(|(_, m)| m)
-            .unwrap_or_else(|_| self.config.global_memory.clone());
-        let ws_mem = load_scoped_memory_file(&self.config.workspace_memory_path(), false)
-            .map(|(_, m)| m)
-            .unwrap_or_else(|_| self.config.workspace_memory.clone());
+        let ws_key = self.config.workspace_key();
+        let global_mem =
+            load_scoped_memory(MemoryScope::Global, &self.config.app.history_dir, &ws_key)
+                .unwrap_or_else(|_| self.config.global_memory.clone());
+        let ws_mem = load_scoped_memory(
+            MemoryScope::Workspace,
+            &self.config.app.history_dir,
+            &ws_key,
+        )
+        .unwrap_or_else(|_| self.config.workspace_memory.clone());
 
         self.config.global_memory = global_mem.clone();
         self.config.workspace_memory = ws_mem.clone();
@@ -633,11 +637,12 @@ impl TuiApp {
             theme::TAB_GLOBAL_ACTIVE,
             theme::TAB_WORKSPACE_ACTIVE,
         );
+        let header_title = match self.memory_scope {
+            MemoryScope::Global => "Persistent Memory (MEMORY.md) ",
+            MemoryScope::Workspace => "Persistent Memory (archon.db) ",
+        };
         let header = Line::from(vec![
-            Span::styled(
-                "Persistent Memory (MEMORY.md) ",
-                Style::default().fg(theme::MODAL_TITLE_ACCENT),
-            ),
+            Span::styled(header_title, Style::default().fg(theme::MODAL_TITLE_ACCENT)),
             Span::raw("│ Scope: ["),
             Span::styled("Global", global_style),
             Span::raw(" / "),

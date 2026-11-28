@@ -359,8 +359,6 @@ fn resolve_skill_at(
         prompt: final_prompt,
         dir_path: child.dir_path.clone(),
         inherited_dirs,
-        scope: child.scope,
-        overrides_global: child.overrides_global,
         resolution_errors: errors,
     };
 
@@ -438,7 +436,7 @@ pub fn resolve_skills(raw: Vec<SkillDefinition>) -> Vec<SkillDefinition> {
     resolve_skills_with_groups(raw, &BTreeMap::new())
 }
 
-pub fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
+fn missing_skill_tools(skill: &SkillDefinition, config: &Config) -> Vec<String> {
     let mut missing = Vec::new();
     for raw in skill
         .tools
