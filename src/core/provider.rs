@@ -817,7 +817,7 @@ mod tests {
                 .unwrap()
         };
 
-        for tool_name in ["task", "todo"] {
+        for tool_name in ["plan", "todo"] {
             for (provider, params) in [
                 ("ollama", find_ollama(tool_name)),
                 ("gemini", find_gemini(tool_name)),

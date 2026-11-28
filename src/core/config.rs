@@ -237,15 +237,18 @@ pub struct AppSettings {
     /// `http_allow_private` is ignored.
     pub http_allowed_cidrs: Vec<String>,
     /// When `true`, automatically continue into the next model turn when a
-    /// response finishes with no tool calls while active session tasks remain.
+    /// response finishes with no tool calls while active session plan tasks remain.
     /// Default is `false`.
-    pub task_autoloop: bool,
-    /// When `true`, `task_autoloop` ignores `blocked` tasks and keeps running
-    /// through the task list instead of pausing for user input. Default is `false`.
-    pub task_autoloop_ignore_blocked: bool,
-    /// Maximum number of consecutive auto-task-loop turns before the loop stops.
+    #[serde(alias = "task_autoloop")]
+    pub plan_autoloop: bool,
+    /// When `true`, `plan_autoloop` ignores `blocked` tasks and keeps running
+    /// through the plan instead of pausing for user input. Default is `false`.
+    #[serde(alias = "task_autoloop_ignore_blocked")]
+    pub plan_autoloop_ignore_blocked: bool,
+    /// Maximum number of consecutive auto-plan-loop turns before the loop stops.
     /// Default is `25`.
-    pub task_autoloop_max_turns: usize,
+    #[serde(alias = "task_autoloop_max_turns")]
+    pub plan_autoloop_max_turns: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -349,7 +352,7 @@ impl Default for AppSettings {
                 "create_file",
                 "search",
                 "repo_map",
-                "task",
+                "plan",
             ]
             .map(String::from)
             .into(),
@@ -399,7 +402,7 @@ impl Default for AppSettings {
                 "sqlite:tables",
                 "sqlite:schema",
                 "sqlite:query",
-                "task:*",
+                "plan:*",
                 "todo:*",
             ]
             .map(String::from)
@@ -407,9 +410,9 @@ impl Default for AppSettings {
             http_allow_private: false,
             read_roots: Vec::new(),
             http_allowed_cidrs: Vec::new(),
-            task_autoloop: false,
-            task_autoloop_ignore_blocked: false,
-            task_autoloop_max_turns: 25,
+            plan_autoloop: false,
+            plan_autoloop_ignore_blocked: false,
+            plan_autoloop_max_turns: 25,
         }
     }
 }
@@ -589,7 +592,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "# allow_hidden = false\n",
             "# http_allow_private = false\n",
             "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
-            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"task\", \"todo\", \"workspace_snapshot\"]\n\n",
+            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"plan\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"todo\", \"workspace_snapshot\"]\n\n",
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",

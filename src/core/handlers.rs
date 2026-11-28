@@ -171,7 +171,7 @@ impl CoreEngine {
                 self.abort_active_state();
                 self.session.auto_approve.clear();
                 self.session.executed_skill_hooks.clear();
-                self.session.auto_task_turns = 0;
+                self.session.auto_plan_turns = 0;
                 self.session.turns_since_auto_compact = u32::MAX;
                 self.session.tools.reset();
                 let _ = self
@@ -255,7 +255,7 @@ impl CoreEngine {
         self.abort_active_state();
         self.session.auto_approve.clear();
         self.session.executed_skill_hooks.clear();
-        self.session.auto_task_turns = 0;
+        self.session.auto_plan_turns = 0;
         self.session.turns_since_auto_compact = u32::MAX;
 
         self.session.messages.truncate(msg_idx + 1);
@@ -276,7 +276,7 @@ impl CoreEngine {
         let from_id = old_session_id.clone();
         let to_id = self.session.id.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::tools::task::clone_session_tasks(&cfg, &from_id, &to_id)
+            crate::tools::plan::clone_session_plan(&cfg, &from_id, &to_id)
         })
         .await;
 
@@ -365,7 +365,7 @@ impl CoreEngine {
         let cfg = self.config.clone();
         let del_id = session_id.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            crate::tools::task::delete_session_tasks(&cfg, &del_id)
+            crate::tools::plan::delete_session_plan(&cfg, &del_id)
         })
         .await;
         self.emit_sessions(Some(session_id)).await;

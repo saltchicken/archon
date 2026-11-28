@@ -96,9 +96,9 @@ pub fn compose_system_prompt_for_turn(
     }
 
     if let Some(sid) = session_id
-        && let Some(task_block) = crate::tools::task::format_active_tasks_for_prompt(config, sid)
+        && let Some(plan_block) = crate::tools::plan::format_active_plan_for_prompt(config, sid)
     {
-        sections.push(task_block);
+        sections.push(plan_block);
     }
 
     if let Some(skill_name) = active_skill

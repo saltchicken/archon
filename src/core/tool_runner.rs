@@ -182,7 +182,7 @@ impl CoreEngine {
             || matches!(
                 &source,
                 ToolExecSource::ManualTool { tool_name, .. }
-                    if matches!(tool_name.as_str(), "memory" | "task" | tools::LOAD_TOOLS_NAME)
+                    if matches!(tool_name.as_str(), "memory" | "plan" | tools::LOAD_TOOLS_NAME)
             );
         match source {
             ToolExecSource::Model {

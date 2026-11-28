@@ -213,7 +213,7 @@ impl CoreEngine {
         self.save_and_emit_chat(new_images).await;
         self.emit_estimated_token_usage();
         if has_valid_prompt {
-            self.session.auto_task_turns = 0;
+            self.session.auto_plan_turns = 0;
             let turn = self.turn.clone();
             self.start_user_turn(&turn).await;
         }
@@ -424,7 +424,7 @@ impl CoreEngine {
             warn!("Auto-declined {skipped} unresolved tool call(s) before new prompt");
         }
 
-        self.session.auto_task_turns = 0;
+        self.session.auto_plan_turns = 0;
         self.turn = turn.clone();
         self.session.messages.push(user_msg);
 
@@ -446,7 +446,7 @@ impl CoreEngine {
         }
 
         info!("User interrupted active turn");
-        self.session.auto_task_turns = 0;
+        self.session.auto_plan_turns = 0;
         self.inflight.pending_stream_done = None;
         self.inflight.last_preflight_raw_tokens = None;
         if had_task || had_pending_auto_compact {
@@ -563,39 +563,39 @@ impl CoreEngine {
             self.inflight.pending_tools = VecDeque::from(tool_calls);
             self.process_pending_tools().await;
         } else if has_response {
-            let max_turns = self.config.app.task_autoloop_max_turns;
-            if self.config.app.task_autoloop
+            let max_turns = self.config.app.plan_autoloop_max_turns;
+            if self.config.app.plan_autoloop
                 && self.turn.enable_tools
                 && tools::is_tool_enabled_for_turn(
-                    "task",
+                    "plan",
                     &self.config,
                     &self.session.tools,
                     self.active_turn_skill(),
                 )
                 && self.inflight.queued_interjections.is_empty()
-                && self.session.auto_task_turns < max_turns
+                && self.session.auto_plan_turns < max_turns
             {
                 let cfg = self.config.clone();
                 let sid = self.session.id.clone();
                 let should_continue =
-                    tokio::task::spawn_blocking(move || tools::task::should_autoloop(&cfg, &sid))
+                    tokio::task::spawn_blocking(move || tools::plan::should_autoloop(&cfg, &sid))
                         .await
                         .unwrap_or(false);
 
                 if should_continue {
-                    self.session.auto_task_turns += 1;
+                    self.session.auto_plan_turns += 1;
                     info!(
-                        "Active tasks remain; auto-continuing task loop ({}/{max_turns})",
-                        self.session.auto_task_turns
+                        "Active plan tasks remain; auto-continuing plan loop ({}/{max_turns})",
+                        self.session.auto_plan_turns
                     );
                     let reported_tokens = prompt_tokens.saturating_add(eval_tokens);
                     if reported_tokens > 0 {
                         self.emit_exact_token_usage(reported_tokens);
                     }
-                    let prompt = if self.config.app.task_autoloop_ignore_blocked {
-                        "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished."
+                    let prompt = if self.config.app.plan_autoloop_ignore_blocked {
+                        "Continue working through `<plan>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `plan` (`action: \"remove\"`) once finished."
                     } else {
-                        "Continue working through `<tasks>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `task` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
+                        "Continue working through `<plan>`. Move on to the next task, mark it `in_progress` while you work on it, and remove it with `plan` (`action: \"remove\"`) once finished. If you need user input before proceeding, mark the task `blocked` (`status: \"blocked\"`) and ask your question."
                     };
                     self.session.messages.push(ChatMessage::new("user", prompt));
                     self.save_and_emit_chat(Vec::new()).await;
@@ -604,7 +604,7 @@ impl CoreEngine {
                     return;
                 }
             }
-            self.session.auto_task_turns = 0;
+            self.session.auto_plan_turns = 0;
 
             let last_response = self
                 .session

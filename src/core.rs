@@ -49,7 +49,7 @@ struct ActiveSessionState {
     sent_images: HashSet<PathBuf>,
     auto_approve: HashSet<String>,
     executed_skill_hooks: HashSet<String>,
-    auto_task_turns: usize,
+    auto_plan_turns: usize,
     turns_since_auto_compact: u32,
     tools: SessionToolState,
 }
@@ -65,7 +65,7 @@ impl ActiveSessionState {
             sent_images: HashSet::new(),
             auto_approve: HashSet::new(),
             executed_skill_hooks: HashSet::new(),
-            auto_task_turns: 0,
+            auto_plan_turns: 0,
             turns_since_auto_compact: u32::MAX,
             tools: SessionToolState::default(),
         }

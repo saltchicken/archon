@@ -14,6 +14,7 @@ pub(crate) mod load_tools;
 mod manual;
 mod memory;
 mod notify;
+pub mod plan;
 mod process;
 pub(crate) mod progress;
 mod read_file;
@@ -25,7 +26,7 @@ mod skill;
 mod sqlite;
 mod subagent;
 mod system;
-pub mod task;
+pub mod tasks;
 pub mod todo;
 pub(crate) mod utils;
 pub mod workspace_snapshot;
@@ -1391,6 +1392,7 @@ register_tools! {
     async: github_repo,
     blocking: memory,
     async: notify,
+    blocking: plan,
     async: process,
     blocking: read_file,
     blocking: repo_map,
@@ -1401,7 +1403,6 @@ register_tools! {
     blocking: sqlite,
     async: subagent,
     async: system,
-    blocking: task,
     blocking: todo,
     blocking: workspace_snapshot,
 }

@@ -133,7 +133,7 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
         .insert("git".into(), vec!["git".into(), "github_repo".into()]);
     cfg.tool_groups.insert("rust".into(), vec!["cargo".into()]);
     cfg.tool_groups
-        .insert("planning".into(), vec!["task".into(), "todo".into()]);
+        .insert("planning".into(), vec!["plan".into(), "todo".into()]);
     cfg.tool_groups
         .insert("mycustom".into(), vec!["sqlite".into(), "@planning".into()]);
     cfg.tool_groups
@@ -145,7 +145,7 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
     assert!(archon::tools::is_tool_enabled("read_file", &cfg));
     assert!(archon::tools::is_tool_enabled("cargo", &cfg));
     assert!(archon::tools::is_tool_enabled("sqlite", &cfg));
-    assert!(archon::tools::is_tool_enabled("task", &cfg));
+    assert!(archon::tools::is_tool_enabled("plan", &cfg));
     assert!(archon::tools::is_tool_enabled("todo", &cfg));
     assert!(!archon::tools::is_tool_enabled("git", &cfg));
 
@@ -184,7 +184,7 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
 
     cfg.restrict_enabled_tools(&["@mycustom".into()]);
     assert!(archon::tools::is_tool_enabled("sqlite", &cfg));
-    assert!(archon::tools::is_tool_enabled("task", &cfg));
+    assert!(archon::tools::is_tool_enabled("plan", &cfg));
     assert!(!archon::tools::is_tool_enabled("read_file", &cfg));
     assert_eq!(
         cfg.tool_provenance("read_file"),
