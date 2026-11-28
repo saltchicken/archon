@@ -350,6 +350,10 @@ impl CoreEngine {
     }
 
     pub(super) async fn process_pending_tools(&mut self) {
+        // Ensure any in-flight background session save has completed before
+        // spawning the next tool, to avoid concurrent WAL write-lock contention.
+        self.flush_save_task().await;
+
         if self.flush_queued_interjections().await {
             return;
         }
@@ -400,6 +404,7 @@ impl CoreEngine {
                 self.save_and_emit_chat(Vec::new()).await;
                 self.emit_estimated_token_usage();
             }
+            self.flush_save_task().await;
             self.spawn_tool_execution(call, index, total, None);
             return;
         }
@@ -439,6 +444,9 @@ impl CoreEngine {
 
         let trimmed_fb = feedback.trim().to_string();
         if approved {
+            // Flush any pending background session save to release the WAL
+            // write lock before the next tool opens its own connection.
+            self.flush_save_task().await;
             self.spawn_tool_execution(
                 call,
                 index,
