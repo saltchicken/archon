@@ -191,3 +191,109 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
         ToolProvenance::CliDisabled
     );
 }
+
+#[test]
+fn config_load_applies_workspaces_toml_overrides_and_allows_unconfigured_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_cfg_path = tmp.path().join("config.toml");
+    let workspaces_path = tmp.path().join("workspaces.toml");
+    let history_dir = tmp.path().join("history");
+
+    let proj_dir = tmp.path().join("my-proj");
+    let other_dir = tmp.path().join("unconfigured-proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+
+    let canon_proj = dunce::canonicalize(&proj_dir).unwrap();
+    let canon_other = dunce::canonicalize(&other_dir).unwrap();
+
+    std::fs::write(
+        &base_cfg_path,
+        format!(
+            r#"
+            [app]
+            history_dir = "{}"
+            allow_hidden = false
+            enabled_tools = ["read_file", "git"]
+
+            [workspace_snapshot]
+            file = ["global.md"]
+
+            [[schedules]]
+            name = "global-job"
+            on_calendar = "daily"
+            prompt = "global"
+            "#,
+            history_dir.display()
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(
+        &workspaces_path,
+        format!(
+            r#"
+            [my-proj]
+            workspace = "{}"
+
+            [my-proj.app]
+            allow_hidden = true
+            enabled_tools = ["read_file", "cargo"]
+
+            [my-proj.workspace_snapshot]
+            include = ["**/*.rs"]
+            file = ["local.md"]
+
+            [[my-proj.schedules]]
+            name = "proj-job"
+            on_calendar = "hourly"
+            prompt = "local"
+            "#,
+            canon_proj.display()
+        ),
+    )
+    .unwrap();
+
+    // 1. Configured directory receives overrides, provenance, and workspace schedules.
+    let (cfg, err) = Config::load(&base_cfg_path, &workspaces_path, &proj_dir);
+    assert!(err.is_none(), "unexpected config err: {err:?}");
+    assert!(cfg.provenance.has_global_config);
+    assert!(cfg.provenance.has_workspace_config);
+    assert_eq!(
+        cfg.workspace.as_deref(),
+        Some(canon_proj.to_string_lossy().as_ref())
+    );
+    assert_eq!(cfg.workspace_name.as_deref(), Some("my-proj"));
+    assert!(cfg.app.allow_hidden);
+    assert_eq!(cfg.app.enabled_tools, vec!["read_file", "cargo"]);
+    assert_eq!(cfg.workspace_snapshot.include, vec!["**/*.rs"]);
+    assert_eq!(cfg.workspace_snapshot.file, vec!["local.md"]);
+    assert_eq!(cfg.workspace_snapshot.global_files, vec!["global.md"]);
+    assert_eq!(cfg.schedules.len(), 1);
+    assert_eq!(cfg.schedules[0].name, "proj-job");
+    assert_eq!(cfg.global_schedules.len(), 1);
+    assert_eq!(cfg.global_schedules[0].name, "global-job");
+    assert_eq!(
+        cfg.provenance.overwritten_keys,
+        vec![
+            "app.allow_hidden".to_string(),
+            "app.enabled_tools".to_string(),
+        ]
+    );
+
+    // 2. Unconfigured directory runs cleanly with global config without creating any workspace dir.
+    let (other_cfg, other_err) = Config::load(&base_cfg_path, &workspaces_path, &other_dir);
+    assert!(other_err.is_none(), "unexpected config err: {other_err:?}");
+    assert!(other_cfg.provenance.has_global_config);
+    assert!(!other_cfg.provenance.has_workspace_config);
+    assert_eq!(
+        other_cfg.workspace.as_deref(),
+        Some(canon_other.to_string_lossy().as_ref())
+    );
+    assert_eq!(other_cfg.workspace_name, None);
+    assert!(!other_cfg.app.allow_hidden);
+    assert_eq!(other_cfg.app.enabled_tools, vec!["read_file", "git"]);
+    assert!(other_cfg.schedules.is_empty());
+    assert_eq!(other_cfg.global_schedules.len(), 1);
+    assert!(!tmp.path().join("workspaces").exists());
+}

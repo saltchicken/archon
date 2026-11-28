@@ -1,6 +1,6 @@
 use crate::{
     cli::ScheduleCommand,
-    config::{Config, ScheduleConfig, workspace_config_dir_for},
+    config::{Config, ScheduleConfig, workspaces_config_path},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -64,10 +64,10 @@ pub fn sanitize_unit_component(raw: &str) -> String {
     }
 }
 
-/// Derive the scope label for a workspace from its config-dir name.
+/// Derive the scope label for a workspace from its project/directory name.
 ///
-/// Normally this is just the sanitized directory name, so the scope maps 1:1
-/// to `~/.config/archon/workspaces/<name>/`. If that would equal the reserved
+/// Normally this is just the sanitized project name (from `workspaces.toml`
+/// or the workspace directory name). If that would equal the reserved
 /// `global` scope label (a project literally named `global`), fall back to a
 /// `ws-`-prefixed label so its units (`archon-sched-ws-global--*`) can't
 /// collide with — or be pruned by — the real `global` scope's units
@@ -97,18 +97,17 @@ fn resolve_scope(
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let canon = dunce::canonicalize(&ws_path).unwrap_or(ws_path);
-    let ws_cfg_dir = workspace_config_dir_for(&canon);
-    let cfg_path = ws_cfg_dir.join("config.toml");
-    if require_ws_config && !cfg_path.exists() {
+    if require_ws_config && !config.provenance.has_workspace_config {
         bail!(
-            "No Archon workspace configuration found for '{}' (expected {}). Run from the workspace root or pass `--global`.",
+            "No Archon workspace configuration found for '{}' in {}. Add an entry in workspaces.toml or pass `--global`.",
             canon.display(),
-            cfg_path.display()
+            workspaces_config_path().display()
         );
     }
-    let raw_name = ws_cfg_dir
-        .file_name()
-        .and_then(|n| n.to_str())
+    let raw_name = config
+        .workspace_name
+        .as_deref()
+        .or_else(|| canon.file_name().and_then(|n| n.to_str()))
         .unwrap_or("workspace");
     Ok((workspace_scope(raw_name), canon))
 }

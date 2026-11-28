@@ -197,7 +197,7 @@ fn collect_overwritten_keys(global: Option<&toml::Table>, ws: Option<&toml::Tabl
     };
     let mut out = Vec::new();
     for (k, w_val) in w_table {
-        if matches!(k.as_str(), "workspace" | "schedules") {
+        if matches!(k.as_str(), "workspace" | "schedules" | "name" | "path") {
             continue;
         }
         let Some(g_val) = g_table.get(k) else {

@@ -20,8 +20,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -145,6 +144,8 @@ pub struct Config {
     pub skills: Vec<SkillDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    #[serde(skip)]
+    pub workspace_name: Option<String>,
     #[serde(skip)]
     pub provenance: ConfigProvenance,
 }
@@ -506,107 +507,154 @@ impl Default for Config {
             global_schedules: Vec::new(),
             skills: Vec::new(),
             workspace: None,
+            workspace_name: None,
             provenance: ConfigProvenance::default(),
         }
     }
 }
 
-fn read_bound_workspace(cfg_path: &Path) -> Option<PathBuf> {
-    let raw = fs::read_to_string(cfg_path).ok()?;
-    let val: toml::Value = toml::from_str(&raw).ok()?;
-    let ws = val.get("workspace")?.as_str()?;
-    let expanded = expand_tilde(ws);
-    Some(dunce::canonicalize(&expanded).unwrap_or(expanded))
+const DEFAULT_WORKSPACES_TOML: &str = concat!(
+    "# Archon per-project workspace configuration\n",
+    "# Declare project-specific overrides to ~/.config/archon/config.toml here.\n",
+    "# Directories without a matching entry use the global config.toml defaults.\n",
+    "#\n",
+    "# Example:\n",
+    "# [my-project]\n",
+    "# workspace = \"~/Projects/my-project\"\n",
+    "#\n",
+    "# [my-project.app]\n",
+    "# allow_hidden = false\n",
+    "# enabled_tools = [\"read_file\", \"edit_file\", \"create_file\", \"search\", \"repo_map\", \"plan\"]\n",
+    "#\n",
+    "# [my-project.workspace_snapshot]\n",
+    "# include = [\"**/*.rs\", \"**/*.toml\"]\n",
+    "# exclude = [\"target/**\", \"Cargo.lock\"]\n",
+    "#\n",
+    "# [[my-project.schedules]]\n",
+    "# name = \"daily-check\"\n",
+    "# on_calendar = \"daily\"\n",
+    "# prompt = \"Summarize recent changes\"\n",
+);
+
+pub fn workspaces_config_path() -> PathBuf {
+    archon_config_root().join("workspaces.toml")
 }
 
-pub fn workspace_config_dir_for(workspace: &Path) -> PathBuf {
-    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let base_root = archon_config_root().join("workspaces");
+#[derive(Debug, Clone)]
+struct WorkspaceEntry {
+    name: Option<String>,
+    path: PathBuf,
+    table: toml::Table,
+}
 
-    let name = canon
-        .file_name()
-        .and_then(|n| n.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("root");
+fn looks_like_path(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with('/')
+        || t.starts_with('~')
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t == "."
+}
 
-    let parent = canon
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
+fn canonicalize_workspace_path(raw: &str) -> PathBuf {
+    let expanded = expand_tilde(raw.trim());
+    dunce::canonicalize(&expanded).unwrap_or(expanded)
+}
+
+fn build_workspace_entry(key_name: Option<&str>, mut tbl: toml::Table) -> Result<WorkspaceEntry> {
+    let explicit_name = tbl
+        .remove("name")
+        .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty());
 
-    let candidates = std::iter::once(name.to_string())
-        .chain(parent.map(|p| format!("{p}-{name}")))
-        .chain((2..1000).map(|idx| format!("{name}-{idx}")));
+    let raw_ws = tbl
+        .get("workspace")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            tbl.remove("path")
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            key_name
+                .filter(|k| looks_like_path(k))
+                .map(|k| k.trim().to_string())
+        })
+        .with_context(|| match key_name {
+            Some(k) => {
+                format!(
+                    "Workspace entry '[{k}]' in workspaces.toml is missing `workspace = \"...\"`"
+                )
+            }
+            None => "A `[[workspaces]]` entry in workspaces.toml is missing `workspace = \"...\"`"
+                .to_string(),
+        })?;
 
-    for folder in candidates {
-        let dir = base_root.join(folder);
-        let cfg = dir.join("config.toml");
-        if !cfg.exists() || read_bound_workspace(&cfg).is_none_or(|bound| bound == canon) {
-            return dir;
+    tbl.insert("workspace".to_string(), toml::Value::String(raw_ws.clone()));
+
+    let name = explicit_name.or_else(|| {
+        key_name
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !looks_like_path(k))
+            .map(String::from)
+    });
+
+    Ok(WorkspaceEntry {
+        name,
+        path: canonicalize_workspace_path(&raw_ws),
+        table: tbl,
+    })
+}
+
+fn parse_workspaces_toml(raw: &str) -> Result<Vec<WorkspaceEntry>> {
+    let root: toml::Table = toml::from_str(raw).context("Failed to parse workspaces.toml")?;
+    let mut entries = Vec::new();
+
+    for (key, val) in root {
+        if key == "workspaces" {
+            match val {
+                toml::Value::Array(arr) => {
+                    for item in arr {
+                        let toml::Value::Table(tbl) = item else {
+                            bail!("Each `[[workspaces]]` item in workspaces.toml must be a table");
+                        };
+                        entries.push(build_workspace_entry(None, tbl)?);
+                    }
+                }
+                toml::Value::Table(tbl) => {
+                    if tbl.get("workspace").and_then(toml::Value::as_str).is_some()
+                        || tbl.get("path").and_then(toml::Value::as_str).is_some()
+                    {
+                        entries.push(build_workspace_entry(Some(&key), tbl)?);
+                    } else {
+                        for (sub_key, sub_val) in tbl {
+                            let toml::Value::Table(sub_tbl) = sub_val else {
+                                bail!(
+                                    "Entry 'workspaces.{sub_key}' in workspaces.toml must be a table"
+                                );
+                            };
+                            entries.push(build_workspace_entry(Some(&sub_key), sub_tbl)?);
+                        }
+                    }
+                }
+                _ => {
+                    bail!(
+                        "`workspaces` in workspaces.toml must be an array of tables (`[[workspaces]]`) or a table of project configs"
+                    );
+                }
+            }
+        } else {
+            let toml::Value::Table(tbl) = val else {
+                bail!("Top-level entry '{key}' in workspaces.toml must be a table (e.g. [{key}])");
+            };
+            entries.push(build_workspace_entry(Some(&key), tbl)?);
         }
     }
 
-    base_root.join(name)
-}
-
-pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
-    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let ws_dir = workspace_config_dir_for(&canon);
-    let cfg_path = ws_dir.join("config.toml");
-    if cfg_path.exists() {
-        return Ok(Some(ws_dir));
-    }
-
-    println!(
-        "No Archon workspace configuration found for '{}'.",
-        canon.display()
-    );
-    println!("Expected config at: {}", cfg_path.display());
-    print!("Would you like to create a workspace configuration here? [y/N]: ");
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let answer = input.trim().to_ascii_lowercase();
-    if answer != "y" && answer != "yes" {
-        return Ok(None);
-    }
-
-    fs::create_dir_all(&ws_dir)
-        .with_context(|| format!("Failed to create directory {}", ws_dir.display()))?;
-
-    let escaped_ws = canon
-        .to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
-    let default_ws_toml = format!(
-        concat!(
-            "# Archon workspace configuration\n",
-            "# Overrides ~/.config/archon/config.toml for this directory.\n",
-            "workspace = \"{escaped_ws}\"\n\n",
-            "[app]\n",
-            "# allow_hidden = false\n",
-            "# http_allow_private = false\n",
-            "# http_allowed_cidrs = [\"192.168.1.0/24\"]\n",
-            "enabled_tools = [\"cargo\", \"create_file\", \"edit_file\", \"fetch_url\", \"fs\", \"git\", \"memory\", \"notify\", \"plan\", \"read_file\", \"repo_map\", \"search\", \"skill\", \"todo\", \"workspace_snapshot\"]\n\n",
-            "[ui]\n",
-            "# chat_padding_left = 2\n",
-            "# chat_padding_right = 2\n",
-            "# fork_icon_hover_only = true\n\n",
-            "[workspace_snapshot]\n",
-            "# git_root = true\n",
-            "# tree_only = false\n",
-            "# include = [\"**/*\"]\n",
-            "# exclude = [\"target/**\", \"node_modules/**\", \"Cargo.lock\", \"!.gitignore\"]\n",
-        ),
-        escaped_ws = escaped_ws
-    );
-
-    fs::write(&cfg_path, default_ws_toml)
-        .with_context(|| format!("Failed to write workspace config to {}", cfg_path.display()))?;
-
-    Ok(Some(ws_dir))
+    Ok(entries)
 }
 
 impl Config {
@@ -778,7 +826,8 @@ impl Config {
 
     pub fn load(
         base_path: impl AsRef<Path>,
-        workspace_config_dir: impl AsRef<Path>,
+        workspaces_path: impl AsRef<Path>,
+        workspace_dir: impl AsRef<Path>,
     ) -> (Self, Option<String>) {
         let base_path = base_path.as_ref();
         if !base_path.exists() {
@@ -790,20 +839,62 @@ impl Config {
             }
         }
 
+        let workspaces_path = workspaces_path.as_ref();
+        if !workspaces_path.exists() {
+            if let Some(parent) = workspaces_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(workspaces_path, DEFAULT_WORKSPACES_TOML);
+        }
+
         let mem_path = global_memory_path();
         if !mem_path.exists() {
             let _ = save_memory_file(&mem_path, &Memory::default());
         }
 
-        let ws_dir = workspace_config_dir.as_ref();
-        let local_config_path = ws_dir.join("config.toml");
+        let canon_ws = dunce::canonicalize(workspace_dir.as_ref())
+            .unwrap_or_else(|_| workspace_dir.as_ref().to_path_buf());
+        let canon_ws_str = canon_ws.to_string_lossy().into_owned();
 
         let global_table = fs::read_to_string(base_path)
             .ok()
             .and_then(|s| toml::from_str::<toml::Table>(&s).ok());
-        let ws_table = fs::read_to_string(&local_config_path)
-            .ok()
-            .and_then(|s| toml::from_str::<toml::Table>(&s).ok());
+
+        let mut ws_parse_err: Option<String> = None;
+        let matched_ws = match fs::read_to_string(workspaces_path) {
+            Ok(raw) => match parse_workspaces_toml(&raw) {
+                Ok(entries) => entries.into_iter().find(|e| e.path == canon_ws),
+                Err(e) => {
+                    ws_parse_err = Some(format!(
+                        "workspaces.toml error (ignoring workspace overrides): {e}"
+                    ));
+                    None
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                ws_parse_err = Some(format!("Failed to read workspaces.toml: {e}"));
+                None
+            }
+        };
+
+        let (ws_name, ws_table, ws_toml_str) = match matched_ws {
+            Some(entry) => {
+                let serialized = match toml::to_string(&entry.table) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        ws_parse_err = Some(format!(
+                            "Failed to serialize workspace entry for '{}': {e}",
+                            canon_ws.display()
+                        ));
+                        None
+                    }
+                };
+                (entry.name, Some(entry.table), serialized)
+            }
+            None => (None, None, None),
+        };
+
         let provenance = build_provenance(global_table.as_ref(), ws_table.as_ref());
 
         let base_figment =
@@ -813,22 +904,23 @@ impl Config {
             .extract::<Self>()
             .map(|c| (c.workspace_snapshot.file, c.schedules))
             .unwrap_or_default();
-        let local_schedules = Figment::from(Serialized::defaults(Self::default()))
-            .merge(Toml::file(&local_config_path))
-            .extract::<Self>()
+        let local_schedules = ws_toml_str
+            .as_deref()
+            .and_then(|s| {
+                Figment::from(Serialized::defaults(Self::default()))
+                    .merge(Toml::string(s))
+                    .extract::<Self>()
+                    .ok()
+            })
             .map(|c| c.schedules)
             .unwrap_or_default();
 
-        let bound_ws = read_bound_workspace(&local_config_path)
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|p| dunce::canonicalize(&p).unwrap_or(p))
-            })
-            .map(|p| p.to_string_lossy().into_owned());
+        let mut merged_figment = base_figment;
+        if let Some(ref s) = ws_toml_str {
+            merged_figment = merged_figment.merge(Toml::string(s));
+        }
 
-        let (mut cfg, err) = match base_figment
-            .merge(Toml::file(&local_config_path))
+        let (mut cfg, figment_err) = match merged_figment
             .merge(Env::prefixed("ARCHON_"))
             .extract::<Self>()
         {
@@ -836,8 +928,9 @@ impl Config {
                 cfg.workspace_snapshot.global_files = global_files;
                 cfg.schedules = local_schedules;
                 cfg.global_schedules = global_schedules;
+                cfg.workspace_name = ws_name;
                 if cfg.workspace.as_deref().is_none_or(|s| s.trim().is_empty()) {
-                    cfg.workspace = bound_ws;
+                    cfg.workspace = Some(canon_ws_str);
                 } else if let Some(ref ws) = cfg.workspace {
                     let expanded = expand_tilde(ws);
                     cfg.workspace = Some(
@@ -851,11 +944,19 @@ impl Config {
             }
             Err(e) => (
                 Self {
-                    workspace: bound_ws,
+                    workspace: Some(canon_ws_str),
+                    workspace_name: ws_name,
                     ..Self::default()
                 },
                 Some(format!("Config error (using defaults): {e}")),
             ),
+        };
+
+        let err = match (figment_err, ws_parse_err) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
         };
 
         let ws_key = cfg.workspace_key();
@@ -958,5 +1059,84 @@ mod tests {
         cfg.app.enabled_tools = vec!["*".into(), "read_file".into(), "search".into()];
         cfg.app.core_tools = vec!["edit_file".into()];
         assert!(cfg.unresolved_group_refs().is_empty());
+    }
+
+    #[test]
+    fn parse_workspaces_toml_supports_named_array_nested_and_path_keyed_entries() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let dir_c = tempfile::tempdir().unwrap();
+        let dir_d = tempfile::tempdir().unwrap();
+
+        let a = dunce::canonicalize(dir_a.path()).unwrap();
+        let b = dunce::canonicalize(dir_b.path()).unwrap();
+        let c = dunce::canonicalize(dir_c.path()).unwrap();
+        let d = dunce::canonicalize(dir_d.path()).unwrap();
+
+        // 1. Top-level named project table + path-keyed table.
+        let toml_named = format!(
+            r#"
+            [proj-a]
+            workspace = "{}"
+            [proj-a.app]
+            allow_hidden = true
+
+            ["{}"]
+            [ "{}" .ui ]
+            chat_padding_left = 6
+            "#,
+            a.display(),
+            d.display(),
+            d.display(),
+        );
+        let entries = parse_workspaces_toml(&toml_named).unwrap();
+        assert_eq!(entries.len(), 2);
+        let ea = entries.iter().find(|e| e.path == a).unwrap();
+        assert_eq!(ea.name.as_deref(), Some("proj-a"));
+        assert_eq!(ea.table["app"]["allow_hidden"], toml::Value::Boolean(true));
+        let ed = entries.iter().find(|e| e.path == d).unwrap();
+        assert_eq!(ed.name, None);
+        assert_eq!(ed.table["ui"]["chat_padding_left"], toml::Value::Integer(6));
+
+        // 2. `[[workspaces]]` array of tables.
+        let toml_array = format!(
+            r#"
+            [[workspaces]]
+            name = "custom-b"
+            workspace = "{}"
+
+            [[workspaces]]
+            workspace = "{}"
+            "#,
+            b.display(),
+            c.display(),
+        );
+        let entries_arr = parse_workspaces_toml(&toml_array).unwrap();
+        assert_eq!(entries_arr.len(), 2);
+        assert_eq!(entries_arr[0].name.as_deref(), Some("custom-b"));
+        assert_eq!(entries_arr[0].path, b);
+        assert!(!entries_arr[0].table.contains_key("name"));
+        assert_eq!(entries_arr[1].name, None);
+        assert_eq!(entries_arr[1].path, c);
+
+        // 3. `[workspaces.<name>]` nested tables.
+        let toml_nested = format!(
+            r#"
+            [workspaces.proj-b]
+            workspace = "{}"
+            "#,
+            b.display(),
+        );
+        let entries_nested = parse_workspaces_toml(&toml_nested).unwrap();
+        assert_eq!(entries_nested.len(), 1);
+        assert_eq!(entries_nested[0].name.as_deref(), Some("proj-b"));
+        assert_eq!(entries_nested[0].path, b);
+    }
+
+    #[test]
+    fn parse_workspaces_toml_rejects_missing_workspace_path() {
+        let err =
+            parse_workspaces_toml("[broken]\n[broken.app]\nallow_hidden = true\n").unwrap_err();
+        assert!(err.to_string().contains("missing `workspace"), "{err}");
     }
 }

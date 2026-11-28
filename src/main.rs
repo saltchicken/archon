@@ -1,8 +1,6 @@
 use anyhow::Result;
 use archon::cli::{CliApp, CliArgs};
-use archon::config::{
-    Config, archon_config_root, ensure_workspace_config, load_dotenv, workspace_config_dir_for,
-};
+use archon::config::{Config, archon_config_root, load_dotenv, workspaces_config_path};
 use archon::engine::CoreEngine;
 use archon::provider::Provider;
 use archon::ui::TuiApp;
@@ -15,11 +13,16 @@ async fn main() -> Result<()> {
     let cli_args = CliArgs::parse()?;
 
     let cwd = env::current_dir()?;
-    let base_config_path = archon_config_root().join("config.toml");
+    let config_root = archon_config_root();
+    let base_config_path = config_root.join("config.toml");
+    let workspaces_path = workspaces_config_path();
+
+    // Load .env from the working directory or ~/.config/archon before reading config
+    load_dotenv(".env");
+    load_dotenv(config_root.join(".env"));
 
     if let Some(sched_cmd) = cli_args.schedule_cmd {
-        let ws_config_dir = workspace_config_dir_for(&cwd);
-        let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+        let (config, config_err) = Config::load(&base_config_path, &workspaces_path, &cwd);
         if let Some(cfg_err) = config_err {
             eprintln!("{cfg_err}");
             std::process::exit(1);
@@ -32,8 +35,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(skill_cmd) = cli_args.skill_cmd {
-        let ws_config_dir = workspace_config_dir_for(&cwd);
-        let (config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+        let (config, config_err) = Config::load(&base_config_path, &workspaces_path, &cwd);
         if let Some(cfg_err) = config_err {
             eprintln!("{cfg_err}");
             std::process::exit(1);
@@ -53,21 +55,7 @@ async fn main() -> Result<()> {
         }));
     }
 
-    let ws_config_dir = if cli_args.headless {
-        workspace_config_dir_for(&cwd)
-    } else {
-        let Some(dir) = ensure_workspace_config(&cwd)? else {
-            println!("Exiting Archon.");
-            std::process::exit(0);
-        };
-        dir
-    };
-
-    // Load .env from the workspace config directory or working directory before reading config
-    load_dotenv(ws_config_dir.join(".env"));
-    load_dotenv(".env");
-
-    let (mut config, config_err) = Config::load(&base_config_path, &ws_config_dir);
+    let (mut config, config_err) = Config::load(&base_config_path, &workspaces_path, &cwd);
     if let Some(ref allowed) = cli_args.allowed_tools {
         config.validate_allowed_tools(allowed)?;
         config.restrict_enabled_tools(allowed);

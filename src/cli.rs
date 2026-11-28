@@ -338,7 +338,7 @@ impl CliArgs {
         println!(
             "Usage: archon schedule <COMMAND> [OPTIONS]\n\n\
              Commands:\n  \
-               sync                    Generate and sync systemd user units from config.toml\n  \
+               sync                    Generate and sync systemd user units from config.toml / workspaces.toml\n  \
                list                    List configured schedules and active systemd timers\n  \
                run <NAME>              Trigger a scheduled service immediately\n  \
                logs [NAME]             Show journalctl logs for a schedule (or all in scope)\n  \
