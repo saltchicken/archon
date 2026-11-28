@@ -468,15 +468,15 @@ fn parse_test_result_line(trimmed: &str) -> Option<SuiteSummary> {
     for part in stats.split(';') {
         let p = part.trim();
         if let Some(n) = p.strip_suffix(" passed") {
-            summary.passed = n.trim().parse().ok()?;
+            summary.passed = n.trim().parse().unwrap_or(0);
         } else if let Some(n) = p.strip_suffix(" failed") {
-            summary.failed = n.trim().parse().ok()?;
+            summary.failed = n.trim().parse().unwrap_or(0);
         } else if let Some(n) = p.strip_suffix(" ignored") {
-            summary.ignored = n.trim().parse().ok()?;
+            summary.ignored = n.trim().parse().unwrap_or(0);
         } else if let Some(n) = p.strip_suffix(" measured") {
-            summary.measured = n.trim().parse().ok()?;
+            summary.measured = n.trim().parse().unwrap_or(0);
         } else if let Some(n) = p.strip_suffix(" filtered out") {
-            summary.filtered_out = n.trim().parse().ok()?;
+            summary.filtered_out = n.trim().parse().unwrap_or(0);
         } else if let Some(s) = p
             .strip_prefix("finished in ")
             .and_then(|s| s.strip_suffix('s'))
