@@ -1,11 +1,9 @@
 use super::{
     BlockingTool, ToolContext,
-    utils::{fs::read_utf8_capped, path::resolve_existing_under},
+    executor::utils::{fs::read_utf8_capped, path::resolve_existing_under},
 };
-use crate::core::{
-    config::{WorkspaceSnapshotSettings, expand_tilde, format_tilde_path},
-    session::truncate_str,
-};
+use crate::config::{WorkspaceSnapshotSettings, expand_tilde, format_tilde_path};
+use crate::session::truncate_str;
 use anyhow::{Result, bail};
 use ignore::WalkBuilder;
 use schemars::JsonSchema;
@@ -49,7 +47,7 @@ pub struct RepoMapArgs {
     /// Optional focus symbols or query terms when `action` is `map` (e.g. `["CoreEngine", "Provider"]`). Boosts PageRank personalization toward files defining or referencing these symbols.
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     focus_symbols: Vec<String>,
     /// Optional crate name (e.g. `"ratatui"`, `"ratatui-textarea"`, `"tree_sitter"`) to inspect an installed Rust crate's source inside `~/.cargo/registry/src` instead of the workspace. Automatically resolves the version matching `Cargo.lock` (or the latest installed version in the registry cache).
@@ -64,13 +62,13 @@ pub struct RepoMapArgs {
     /// Optional glob patterns to filter included files (e.g. `["src/**/*.rs", "**/*.ts"]`).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     include: Vec<String>,
     /// Optional glob patterns to exclude.
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     exclude: Vec<String>,
     /// When `action` is `map`, whether to include leading doc comments above AST symbol signatures (default: true).
@@ -1830,7 +1828,7 @@ bootstrap()
             active_skill: None,
             session_id: None,
             session_tools: crate::tools::SessionToolState::default(),
-            config: crate::core::config::Config::default(),
+            config: crate::config::Config::default(),
         };
         // Neutralize the default `!.gitignore` negation so the `.gitignore`
         // file itself stays hidden and out of the walk results.

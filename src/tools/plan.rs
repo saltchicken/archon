@@ -6,7 +6,7 @@
 
 use super::tasks::{self, Action, NewTask, TaskKind, TaskPriority, TaskStatus};
 use super::{BlockingTool, ToolContext};
-use crate::core::config::Config;
+use crate::config::Config;
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -187,7 +187,7 @@ impl BlockingTool for Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::Config;
+    use crate::config::Config;
 
     fn test_ctx(tmp: &tempfile::TempDir, session_id: &str) -> ToolContext {
         let mut cfg = Config::default();

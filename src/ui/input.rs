@@ -1,9 +1,9 @@
 use super::{
     ActiveModal, ContextMenu, ContextMenuAction, TuiApp, render::format_assistant_display,
 };
-use crate::core::{
-    EngineCommand, TruncatedToolAction, attachments::copy_text_to_clipboard, session::ChatMessage,
-};
+use crate::attachments::copy_text_to_clipboard;
+use crate::engine::{EngineCommand, TruncatedToolAction};
+use crate::session::ChatMessage;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
 use std::path::PathBuf;

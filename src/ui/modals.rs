@@ -2,11 +2,9 @@ use super::{
     ActiveModal, SessionView, TuiApp, chat_block, create_memory_area, render::sanitize_line, theme,
     titled_block,
 };
-use crate::core::{
-    EngineCommand, TruncatedToolAction,
-    config::{Memory, MemoryScope, global_memory_path, load_scoped_memory_file},
-    session::SessionSummary,
-};
+use crate::config::{Memory, MemoryScope, global_memory_path, load_scoped_memory_file};
+use crate::engine::{EngineCommand, TruncatedToolAction};
+use crate::session::SessionSummary;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},

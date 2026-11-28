@@ -6,11 +6,9 @@ use super::{
     theme, titled_block,
 };
 use crate::{
-    core::{
-        config::{ConfigSource, ToolProvenance},
-        session::{ChatMessage, truncate_str},
-        skills::{self, SkillDefinition},
-    },
+    config::{ConfigSource, ToolProvenance},
+    session::{ChatMessage, truncate_str},
+    skills::{self, SkillDefinition},
     tools::{self, ToolCall},
 };
 use ratatui::{
@@ -617,7 +615,7 @@ impl TuiApp {
         } else if let Some(rest) = first_trimmed.strip_prefix('@') {
             if let Some(ws_idx) = rest.find(char::is_whitespace) {
                 let cmd_token = &rest[..ws_idx];
-                crate::core::skills::find_skill(&self.config, cmd_token).map(|s| {
+                crate::skills::find_skill(&self.config, cmd_token).map(|s| {
                     if s.is_abstract {
                         format!(
                             " Prompt — Skill: {} (abstract base — cannot be invoked directly) ",
@@ -922,10 +920,10 @@ impl TuiApp {
             .config
             .workspace
             .as_deref()
-            .map(|ws| crate::core::config::format_tilde_path(std::path::Path::new(ws)))
+            .map(|ws| crate::config::format_tilde_path(std::path::Path::new(ws)))
             .unwrap_or_else(|| {
                 std::env::current_dir()
-                    .map(|p| crate::core::config::format_tilde_path(&p))
+                    .map(|p| crate::config::format_tilde_path(&p))
                     .unwrap_or_else(|_| "unknown".into())
             });
 
@@ -950,7 +948,7 @@ impl TuiApp {
             source_badge_span(prov.system_presets)
         };
 
-        let mem_badge = |m: &crate::core::config::Memory| {
+        let mem_badge = |m: &crate::config::Memory| {
             let color = if !m.enabled {
                 theme::STATUS_DISABLED
             } else if m.count() > 0 {
@@ -1027,7 +1025,7 @@ impl TuiApp {
             (format!("OFF ({df_dirs_label})"), theme::STATUS_DISABLED)
         };
 
-        let sched_badge = |list: &[crate::core::config::ScheduleConfig]| {
+        let sched_badge = |list: &[crate::config::ScheduleConfig]| {
             let tot = list.len();
             let on = list.iter().filter(|s| s.enabled).count();
             let color = if tot == 0 {

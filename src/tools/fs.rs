@@ -1,11 +1,13 @@
 use super::{
-    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
-    utils::{
+    BlockingTool, SessionToolState, ToolContext,
+    executor::approval,
+    executor::utils::{
         fs::{format_size, render_directory_listing},
         path::{ensure_parent_dir, has_git_dir_component},
     },
+    parse_args,
 };
-use crate::core::config::Config;
+use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;
 use schemars::JsonSchema;

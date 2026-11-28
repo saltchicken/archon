@@ -1,4 +1,14 @@
+pub mod attachments;
 pub mod cli;
-pub mod core;
+pub mod config;
+pub mod db;
+pub mod engine;
+pub mod logger;
+pub mod processes;
+pub mod provider;
+pub mod schedule;
+pub(crate) mod schema_utils;
+pub mod session;
+pub mod skills;
 pub mod tools;
 pub mod ui;

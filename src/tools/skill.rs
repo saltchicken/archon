@@ -1,19 +1,19 @@
 use super::{
-    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
-    utils::{
+    BlockingTool, SessionToolState, ToolContext,
+    executor::approval,
+    executor::utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
         path::ensure_parent_dir,
     },
+    parse_args,
 };
-use crate::core::{
-    config::{Config, expand_tilde, format_tilde_path, workspace_config_dir_for},
-    skill_check,
-    skills::{
-        HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
-        parse_skill_markdown_detailed, resolve_skills_with_groups, scan_skills_dir,
-        split_toml_frontmatter,
-    },
+use crate::config::{Config, expand_tilde, format_tilde_path, workspace_config_dir_for};
+use crate::skills::check as skill_check;
+use crate::skills::{
+    HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
+    parse_skill_markdown_detailed, resolve_skills_with_groups, scan_skills_dir,
+    split_toml_frontmatter,
 };
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
@@ -73,7 +73,7 @@ pub struct SkillArgs {
     /// Optional parent skill name(s) to inherit tools, hooks, typed args, and prompt from (e.g. `["base-rust"]`).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_optional_string_list"
     )]
     pub extends: Option<Vec<String>>,
     /// If true, marks this skill as a reusable base skill that can be extended via `extends` but not invoked directly via `@name`.
@@ -82,13 +82,13 @@ pub struct SkillArgs {
     /// Optional list of tool names enabled when this skill is active (for `create` or `modify` frontmatter, e.g. `["cargo", "git"]`; prefix with `!` to exclude an inherited tool).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_optional_string_list"
     )]
     pub tools: Option<Vec<String>>,
     /// Optional list of auto-approval rules active while this skill is running (for `create` or `modify` frontmatter, e.g. `["edit_file", "cargo:check"]`; prefix with `!` to negate an inherited rule).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_optional_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_optional_string_list"
     )]
     pub auto_approve: Option<Vec<String>>,
     /// Optional list of tool hooks executed automatically when this skill is used (for `create` or `modify` frontmatter, e.g. `[{"trigger": "on_activate", "tool": "workspace_snapshot", "args": {"tree_only": true}}]`; string values in `args` may reference `{{last_response}}`, `{{args}}`, or declared `{{arg_name}}` placeholders).

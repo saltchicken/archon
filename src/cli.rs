@@ -1,6 +1,6 @@
-use crate::core::{
-    EngineCommand, EngineEvent, TruncatedToolAction, TurnConfig, config::Config, skills,
-};
+use crate::config::Config;
+use crate::engine::{EngineCommand, EngineEvent, TruncatedToolAction, TurnConfig};
+use crate::skills;
 use anyhow::{Result, bail};
 use std::{
     collections::BTreeMap,

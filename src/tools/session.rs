@@ -1,5 +1,5 @@
 use super::{BlockingTool, ToolContext};
-use crate::core::session::{ChatMessage, SessionManager, truncate_str};
+use crate::session::{ChatMessage, SessionManager, truncate_str};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;

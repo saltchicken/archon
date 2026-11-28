@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    utils::http::{SsrfPolicy, build_pinned_client, validate_public_url},
+    executor::utils::http::{SsrfPolicy, build_pinned_client, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
@@ -74,7 +74,7 @@ pub struct CurlArgs {
     /// Request headers as `Name: value` strings (e.g. `["Content-Type: application/json", "Authorization: Bearer <token>"]`).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     headers: Vec<String>,
     /// Raw request body string. Pair it with an appropriate `Content-Type` header. Mutually exclusive with `json`.

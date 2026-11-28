@@ -1,6 +1,6 @@
 //! `process` tool: manage background jobs started by other tools.
 //!
-//! Delegates to the process-lifetime [`crate::core::processes::ProcessRegistry`],
+//! Delegates to the process-lifetime [`crate::processes::ProcessRegistry`],
 //! which owns the spawned children. This tool is **management-only** —
 //! the LLM can `list`, `output`, `poll`, `kill`, and `clean` jobs, but
 //! cannot start new ones. Spawning is reserved for purpose-built tools that
@@ -11,7 +11,7 @@
 //! are read-only / follow actions (auto-approved by default).
 
 use super::{AsyncTool, ToolContext};
-use crate::core::processes::ProcessRegistry;
+use crate::processes::ProcessRegistry;
 use anyhow::{Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;

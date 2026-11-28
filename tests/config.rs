@@ -1,4 +1,4 @@
-use archon::core::config::{Config, ConfigSource, ToolProvenance, build_provenance};
+use archon::config::{Config, ConfigSource, ToolProvenance, build_provenance};
 
 #[test]
 fn provenance_tracks_global_and_workspace_overrides() {

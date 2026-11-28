@@ -1,12 +1,10 @@
 use anyhow::Result;
 use archon::cli::{CliApp, CliArgs};
-use archon::core::{
-    CoreEngine,
-    config::{
-        Config, archon_config_root, ensure_workspace_config, load_dotenv, workspace_config_dir_for,
-    },
-    provider::Provider,
+use archon::config::{
+    Config, archon_config_root, ensure_workspace_config, load_dotenv, workspace_config_dir_for,
 };
+use archon::engine::CoreEngine;
+use archon::provider::Provider;
 use archon::ui::TuiApp;
 use std::env;
 use tokio::sync::mpsc;
@@ -26,7 +24,7 @@ async fn main() -> Result<()> {
             eprintln!("{cfg_err}");
             std::process::exit(1);
         }
-        if let Err(e) = archon::core::schedule::handle_command(sched_cmd, &config) {
+        if let Err(e) = archon::schedule::handle_command(sched_cmd, &config) {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -40,7 +38,7 @@ async fn main() -> Result<()> {
             eprintln!("{cfg_err}");
             std::process::exit(1);
         }
-        if let Err(e) = archon::core::skill_check::handle_command(skill_cmd, &config) {
+        if let Err(e) = archon::skills::check::handle_command(skill_cmd, &config) {
             eprintln!("{e}");
             std::process::exit(1);
         }
@@ -77,7 +75,7 @@ async fn main() -> Result<()> {
     if cli_args.model.is_some() {
         config.set_cli_model_override();
     }
-    let guard = archon::core::logger::init(&config.app.history_dir);
+    let guard = archon::logger::init(&config.app.history_dir);
     if let Some(ref err) = config_err {
         warn!("{err}");
     } else {

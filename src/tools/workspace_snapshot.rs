@@ -1,11 +1,11 @@
 use super::{
     BlockingTool, ToolContext,
-    utils::{
+    executor::utils::{
         fs::{FileOutcome, read_text_file_inspected},
         path::{build_globset, has_git_dir_component, partition_negated_patterns},
     },
 };
-use crate::core::config::{archon_config_root, expand_tilde, format_tilde_path};
+use crate::config::{archon_config_root, expand_tilde, format_tilde_path};
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;

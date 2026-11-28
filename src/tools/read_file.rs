@@ -1,4 +1,4 @@
-use super::{BlockingTool, ToolContext, utils::fs::read_file_contents};
+use super::{BlockingTool, ToolContext, executor::utils::fs::read_file_contents};
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;

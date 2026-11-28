@@ -5,9 +5,9 @@ use std::path::Path;
 
 use serde_json::json;
 
-use archon::core::config::{Config, MemoryScope};
-use archon::core::session::ChatMessage;
-use archon::core::skills::{
+use archon::config::{Config, MemoryScope};
+use archon::session::ChatMessage;
+use archon::skills::{
     HookTrigger, TemplateContext, check_skill_activation, collect_after_turn_hooks,
     collect_due_hooks, compose_system_prompt, discover_skills, inspect_template,
     parse_skill_markdown, render_template, replace_super_placeholder, resolve_skill_inputs,

@@ -1,8 +1,6 @@
 use super::{ActiveModal, MsgUiState, PendingTruncatedUi, SessionView, TuiApp};
-use crate::core::{
-    EngineEvent,
-    session::{ChatMessage, SessionSummary, ThoughtPart},
-};
+use crate::engine::EngineEvent;
+use crate::session::{ChatMessage, SessionSummary, ThoughtPart};
 
 impl TuiApp {
     pub(super) fn handle_engine_event(&mut self, ev: EngineEvent) {

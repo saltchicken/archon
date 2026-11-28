@@ -5,7 +5,7 @@
 
 use super::tasks::{self, Action, NewTask, TaskKind, TaskPriority, TaskStatus};
 use super::{BlockingTool, ToolContext};
-use crate::core::config::{Config, expand_tilde};
+use crate::config::{Config, expand_tilde};
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;

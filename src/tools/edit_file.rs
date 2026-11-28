@@ -1,11 +1,13 @@
 use super::{
-    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
-    utils::{
+    BlockingTool, SessionToolState, ToolContext,
+    executor::approval,
+    executor::utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::atomic_write_file,
     },
+    parse_args,
 };
-use crate::core::config::Config;
+use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;

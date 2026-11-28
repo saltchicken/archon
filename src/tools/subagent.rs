@@ -1,5 +1,5 @@
-use crate::core::provider::Provider;
-use crate::core::skills::compose_system_prompt_for_turn;
+use crate::provider::Provider;
+use crate::skills::compose_system_prompt_for_turn;
 use crate::tools::{AsyncTool, ToolContext};
 use anyhow::Result;
 use schemars::JsonSchema;

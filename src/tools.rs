@@ -1,22 +1,19 @@
-mod approval;
 pub(crate) mod browser;
 mod cargo;
 mod create_file;
 mod curl;
 mod dotfiles;
 mod edit_file;
+pub(crate) mod executor;
 mod fetch_url;
 pub mod fs;
 mod git;
 mod github_repo;
-pub mod groups;
-pub(crate) mod load_tools;
 mod manual;
 mod memory;
 mod notify;
 pub mod plan;
 mod process;
-pub(crate) mod progress;
 mod read_file;
 mod repo_map;
 mod schedule;
@@ -28,19 +25,19 @@ mod subagent;
 mod system;
 pub mod tasks;
 pub mod todo;
-pub(crate) mod utils;
 pub mod workspace_snapshot;
 
-pub use approval::format_approval;
-pub use groups::{
+pub use executor::approval::format_approval;
+pub use executor::groups::{
     all_group_names, expand_tool_list, expand_tool_spec_checked, format_valid_tools_and_groups,
     is_known_tool_or_group, resolve_tool_group,
 };
+use executor::load_tools;
 pub use manual::parse_manual_tool_call;
 
-pub const LOAD_TOOLS_NAME: &str = load_tools::Tool::NAME;
+pub const LOAD_TOOLS_NAME: &str = executor::load_tools::Tool::NAME;
 
-use crate::core::config::{Config, expand_tilde};
+use crate::config::{Config, expand_tilde};
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
 use ignore::{DirEntry, WalkBuilder};
@@ -49,6 +46,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use executor::utils::{
+    fs::read_capped,
+    path::{
+        build_ancestor_dir_globset, build_globset, ensure_ancestor_within_root, ensure_within_root,
+        has_git_dir_component, has_hidden_component, partition_negated_patterns,
+        resolve_existing_under, validate_relative_path, workspace_root,
+    },
+};
 use std::{
     ffi::OsStr,
     fmt::Write as _,
@@ -58,17 +63,9 @@ use std::{
 };
 use tokio::{process::Command, time::timeout};
 use tracing::{debug, error, info};
-use utils::{
-    fs::read_capped,
-    path::{
-        build_ancestor_dir_globset, build_globset, ensure_ancestor_within_root, ensure_within_root,
-        has_git_dir_component, has_hidden_component, partition_negated_patterns,
-        resolve_existing_under, validate_relative_path, workspace_root,
-    },
-};
 
 #[cfg(unix)]
-use crate::core::processes::kill_process_group;
+use crate::processes::kill_process_group;
 
 const COMMAND_TIMEOUT_SECS: u64 = 30;
 
@@ -192,7 +189,7 @@ pub trait BlockingTool {
         _config: &Config,
         _active_skill: Option<&str>,
     ) {
-        approval::format_generic_approval(out, obj);
+        executor::approval::format_generic_approval(out, obj);
     }
 }
 
@@ -233,7 +230,7 @@ pub trait AsyncTool {
         _config: &Config,
         _active_skill: Option<&str>,
     ) {
-        approval::format_generic_approval(out, obj);
+        executor::approval::format_generic_approval(out, obj);
     }
 }
 
@@ -550,7 +547,7 @@ impl ToolContext {
             let allowed = self
                 .active_skill
                 .as_deref()
-                .and_then(|name| crate::core::skills::find_skill(&self.config, name))
+                .and_then(|name| crate::skills::find_skill(&self.config, name))
                 .is_some_and(|s| {
                     s.all_dirs().filter(|d| d.is_dir()).any(|dir| {
                         let abs_dir = if dir.is_absolute() {
@@ -1038,11 +1035,11 @@ where
 }
 
 pub fn is_tool_enabled(name: &str, config: &Config) -> bool {
-    crate::core::config::tool_list_contains(&config.app.enabled_tools, name, &config.tool_groups)
+    crate::config::tool_list_contains(&config.app.enabled_tools, name, &config.tool_groups)
 }
 
 pub fn is_core_tool(name: &str, config: &Config) -> bool {
-    crate::core::config::tool_list_contains(&config.app.core_tools, name, &config.tool_groups)
+    crate::config::tool_list_contains(&config.app.core_tools, name, &config.tool_groups)
 }
 
 pub fn is_tool_session_enabled(
@@ -1070,7 +1067,7 @@ pub fn is_tool_enabled_for_turn(
     if !is_tool_session_enabled(name, config, session_tools) {
         return false;
     }
-    let Some(skill) = active_skill.and_then(|s| crate::core::skills::find_skill(config, s)) else {
+    let Some(skill) = active_skill.and_then(|s| crate::skills::find_skill(config, s)) else {
         return true;
     };
     skill.allows_tool(name)
@@ -1083,7 +1080,7 @@ pub fn core_regular_tools_for_turn(
     session_tools: &SessionToolState,
     active_skill: Option<&str>,
 ) -> Vec<String> {
-    let skill = active_skill.and_then(|s| crate::core::skills::find_skill(config, s));
+    let skill = active_skill.and_then(|s| crate::skills::find_skill(config, s));
     ALL_TOOL_NAMES
         .iter()
         .filter(|&&name| {
@@ -1254,7 +1251,7 @@ macro_rules! register_tools {
                 $( $mod::Tool::NAME => register_tools!(
                     @format_approval $kind, $mod, out, args, obj, config, active_skill
                 ), )*
-                _ => approval::format_generic_approval(out, obj),
+                _ => executor::approval::format_generic_approval(out, obj),
             }
         }
 
@@ -1610,7 +1607,7 @@ pub async fn execute_manual(
 #[cfg(test)]
 mod tests {
     use super::{SessionToolState, ToolContext, diff_paths};
-    use crate::core::config::Config;
+    use crate::config::Config;
     use std::path::Path;
 
     fn test_tool_ctx(config: &Config) -> ToolContext {
@@ -1851,17 +1848,17 @@ mod tests {
         ];
         cfg.app.core_tools = vec!["read_file".into()];
 
-        let explicit_skill = crate::core::skills::parse_skill_markdown(
+        let explicit_skill = crate::skills::parse_skill_markdown(
             "+++\nname = \"git-cargo\"\ntools = [\"git\", \"cargo\"]\n+++\nUse git and cargo.",
             Path::new("/tmp/git-cargo"),
         )
         .unwrap();
-        let prompt_only_skill = crate::core::skills::parse_skill_markdown(
+        let prompt_only_skill = crate::skills::parse_skill_markdown(
             "+++\nname = \"helper\"\n+++\nBe helpful.",
             Path::new("/tmp/helper"),
         )
         .unwrap();
-        cfg.skills = crate::core::skills::resolve_skills(vec![explicit_skill, prompt_only_skill]);
+        cfg.skills = crate::skills::resolve_skills(vec![explicit_skill, prompt_only_skill]);
 
         let st = SessionToolState::default();
 
@@ -1873,7 +1870,7 @@ mod tests {
         assert_eq!(names, vec!["cargo", "git"]);
         assert!(super::deferred_tool_names_for_turn(&cfg, &st, Some("git-cargo")).is_empty());
 
-        let sys_explicit = crate::core::skills::compose_system_prompt_for_turn(
+        let sys_explicit = crate::skills::compose_system_prompt_for_turn(
             "",
             Some("git-cargo"),
             None,
@@ -1906,7 +1903,7 @@ mod tests {
         let empty = std::collections::BTreeMap::new();
 
         // Initially both `cargo` and `git` appear in `<deferred_tools>`, while core `read_file` does not.
-        let sys1 = crate::core::skills::compose_system_prompt_for_turn(
+        let sys1 = crate::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
         assert!(sys1.contains("<deferred_tools>"));
@@ -1917,7 +1914,7 @@ mod tests {
         assert!(!sys1.contains("- sqlite: ")); // disabled
 
         // When `enable_tools = false`, no `<deferred_tools>` block is injected.
-        let sys_no_tools = crate::core::skills::compose_system_prompt_for_turn(
+        let sys_no_tools = crate::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, false, &st,
         );
         assert!(!sys_no_tools.contains("<deferred_tools>"));
@@ -1929,7 +1926,7 @@ mod tests {
             super::deferred_tool_names_for_turn(&cfg, &st, None),
             vec!["cargo"]
         );
-        let sys2 = crate::core::skills::compose_system_prompt_for_turn(
+        let sys2 = crate::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
         assert_eq!(sys2, sys1);
@@ -1937,7 +1934,7 @@ mod tests {
         // After loading `cargo` too, UI deferred list is empty while system prompt remains stable.
         st.apply_loaded(&["cargo".into()], 1, cfg.app.max_loaded_tools);
         assert!(super::deferred_tool_names_for_turn(&cfg, &st, None).is_empty());
-        let sys3 = crate::core::skills::compose_system_prompt_for_turn(
+        let sys3 = crate::skills::compose_system_prompt_for_turn(
             "Base.", None, None, None, &empty, None, &cfg, true, &st,
         );
         assert_eq!(sys3, sys1);

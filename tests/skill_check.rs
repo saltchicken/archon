@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use archon::core::config::{Config, MemoryScope};
-use archon::core::skill_check::{
+use archon::config::{Config, MemoryScope};
+use archon::skills::check::{
     check_scanned_registry, check_skills_in_dir, check_workspace_skills, scan_raw_dir,
 };
 
@@ -383,11 +383,8 @@ fn skill_check_and_resolve_support_tool_groups() {
         report.format_report(true)
     );
 
-    let skills = archon::core::skills::discover_skills_with_groups(
-        &dir.to_string_lossy(),
-        None,
-        &cfg.tool_groups,
-    );
+    let skills =
+        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), None, &cfg.tool_groups);
     let git_helper = skills.iter().find(|s| s.name == "git-helper").unwrap();
     assert!(git_helper.allows_tool("git"));
     assert!(git_helper.allows_tool("github_repo"));
@@ -447,11 +444,8 @@ fn skill_check_and_resolve_support_custom_tool_groups_and_catch_bad_members() {
         "Expected broken nested custom group to fail skill check"
     );
 
-    let skills = archon::core::skills::discover_skills_with_groups(
-        &dir.to_string_lossy(),
-        None,
-        &cfg.tool_groups,
-    );
+    let skills =
+        archon::skills::discover_skills_with_groups(&dir.to_string_lossy(), None, &cfg.tool_groups);
     let custom_ok = skills.iter().find(|s| s.name == "custom-ok").unwrap();
     assert!(custom_ok.allows_tool("git"));
     assert!(custom_ok.allows_tool("cargo"));

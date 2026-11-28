@@ -1,12 +1,13 @@
 use super::{
-    AsyncTool, ToolContext, run_captured_command,
-    utils::{
+    AsyncTool, ToolContext,
+    executor::utils::{
         fs::{read_file_contents, read_utf8_capped, render_directory_listing},
         path::{build_globset, has_git_dir_component, resolve_existing_under},
         search::{SearchExecutionParams, search_candidate_files},
     },
+    run_captured_command,
 };
-use crate::core::config::format_tilde_path;
+use crate::config::format_tilde_path;
 use anyhow::{Context, Result, bail};
 use ignore::WalkBuilder;
 use pathdiff::diff_paths;
@@ -76,13 +77,13 @@ pub struct GithubRepoArgs {
     /// Optional glob patterns to filter included files when `action` is `search` (e.g. `["*.rs", "src/**/*.ts"]`).
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     pub include: Vec<String>,
     /// Optional glob patterns to exclude when `action` is `search`.
     #[serde(
         default,
-        deserialize_with = "super::utils::serde_helpers::deserialize_string_list"
+        deserialize_with = "super::executor::utils::serde_helpers::deserialize_string_list"
     )]
     pub exclude: Vec<String>,
     /// If true during `search`, treats `pattern` as a literal string instead of a regular expression.

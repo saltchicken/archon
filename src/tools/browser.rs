@@ -1,6 +1,6 @@
 use super::{
     AsyncTool, ToolContext,
-    utils::http::{SsrfPolicy, validate_public_url},
+    executor::utils::http::{SsrfPolicy, validate_public_url},
 };
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
@@ -23,8 +23,8 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
-use crate::core::config::expand_tilde;
-use crate::core::processes::{ProcessRegistry, SpawnOptions};
+use crate::config::expand_tilde;
+use crate::processes::{ProcessRegistry, SpawnOptions};
 
 const DEFAULT_WAIT_SECS: u64 = 10;
 /// How long to wait for a spawned CDP Chrome to become ready.
@@ -1567,7 +1567,7 @@ impl AsyncTool for Tool {
                     }
                     (None, None | Some(PasteSource::Clipboard)) => {
                         let clip = tokio::task::spawn_blocking(
-                            crate::core::attachments::read_text_from_clipboard,
+                            crate::attachments::read_text_from_clipboard,
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("Clipboard task panicked: {e}"))??;

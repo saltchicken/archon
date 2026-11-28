@@ -9,7 +9,7 @@
 //! The `plan` tool additionally drives autoloop and system-prompt injection via
 //! the helpers in [`crate::tools::plan`].
 
-use crate::core::config::Config;
+use crate::config::Config;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use rusqlite::{Connection, params};
@@ -172,7 +172,7 @@ pub struct ExecParams {
 
 /// Opens the shared database and ensures the unified `tasks` table exists.
 pub fn open_tasks_db(config: &Config) -> Result<Connection> {
-    let conn = crate::core::db::open_archon_db(&config.app.history_dir)?;
+    let conn = crate::db::open_archon_db(&config.app.history_dir)?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (

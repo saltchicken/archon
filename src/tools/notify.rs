@@ -1,5 +1,5 @@
 use super::{AsyncTool, ToolContext};
-use crate::core::processes::{ProcessRegistry, SpawnOptions};
+use crate::processes::{ProcessRegistry, SpawnOptions};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;

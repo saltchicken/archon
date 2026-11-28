@@ -1,5 +1,5 @@
-use super::{BlockingTool, SessionToolState, ToolContext, approval, parse_args};
-use crate::core::config::{
+use super::{BlockingTool, SessionToolState, ToolContext, executor::approval, parse_args};
+use crate::config::{
     Config, Memory, MemoryScope, clean_memory_item, format_tilde_path, global_memory_path,
     load_scoped_memory_file, save_memory_file, workspace_config_dir_for, workspace_memory_path,
 };

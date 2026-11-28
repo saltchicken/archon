@@ -1,14 +1,9 @@
 use super::{TuiApp, create_text_area, create_text_area_with};
 use crate::{
-    core::{
-        EngineCommand, SessionToolsAction,
-        config::{
-            Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file,
-        },
-        session::ChatMessage,
-        skills,
-    },
-    tools,
+    config::{Memory, MemoryScope, clean_memory_item, global_memory_path, load_scoped_memory_file},
+    engine::{EngineCommand, SessionToolsAction},
+    session::ChatMessage,
+    skills,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -136,7 +131,7 @@ impl TuiApp {
                 .map(|r| ("##", r))
                 .or_else(|| line.strip_prefix('#').map(|r| ("#", r)))
         {
-            tools::matching_tool_triggers(prefix_mark, rest)
+            crate::tools::matching_tool_triggers(prefix_mark, rest)
                 .into_iter()
                 .next()
                 .map(|m| format!("{m} "))
@@ -358,7 +353,9 @@ impl TuiApp {
             return false;
         }
 
-        if let Some((include_in_context, tool_input)) = tools::parse_hash_tool_prefix(&raw_prompt) {
+        if let Some((include_in_context, tool_input)) =
+            crate::tools::parse_hash_tool_prefix(&raw_prompt)
+        {
             self.dispatch_manual_tool(&raw_prompt, tool_input, include_in_context);
             return false;
         }

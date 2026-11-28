@@ -1,5 +1,5 @@
 use super::{BlockingTool, ToolContext};
-use crate::{cli::ScheduleCommand, core::schedule};
+use crate::{cli::ScheduleCommand, schedule};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::Deserialize;

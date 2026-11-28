@@ -1,6 +1,7 @@
 use super::{
-    BlockingTool, ToolContext, approval, parse_args,
-    utils::{
+    BlockingTool, ToolContext,
+    executor::approval,
+    executor::utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents, render_directory_listing},
         path::{
@@ -9,12 +10,11 @@ use super::{
         },
         search::{SearchExecutionParams, search_candidate_files},
     },
+    parse_args,
 };
-use crate::core::{
-    config::{Config, expand_tilde},
-    provider::Provider,
-    session::truncate_str,
-};
+use crate::config::{Config, expand_tilde};
+use crate::provider::Provider;
+use crate::session::truncate_str;
 use anyhow::{Context, Result, bail};
 use globset::GlobSet;
 use ignore::WalkBuilder;

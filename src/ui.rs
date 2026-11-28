@@ -9,12 +9,10 @@ pub mod theme;
 use commands::SlashCommand;
 
 use crate::{
-    core::{
-        EngineCommand, EngineEvent, TurnConfig,
-        attachments::ImageAttachment,
-        config::{Config, Memory, MemoryScope, Preset},
-        session::{ChatMessage, SessionSummary},
-    },
+    attachments::ImageAttachment,
+    config::{Config, Memory, MemoryScope, Preset},
+    engine::{EngineCommand, EngineEvent, TurnConfig},
+    session::{ChatMessage, SessionSummary},
     tools::SessionToolState,
 };
 use anyhow::Result;

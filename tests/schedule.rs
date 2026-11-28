@@ -1,5 +1,5 @@
-use archon::core::config::ScheduleConfig;
-use archon::core::schedule::{
+use archon::config::ScheduleConfig;
+use archon::schedule::{
     quote_systemd_arg, render_service, render_timer, sanitize_unit_component, unit_base_name,
     workspace_scope,
 };
