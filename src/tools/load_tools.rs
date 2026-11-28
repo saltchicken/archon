@@ -180,6 +180,15 @@ impl BlockingTool for Tool {
     const SHORT_SUMMARY: &'static str = "Activate deferred tools or @groups on demand so their full schemas are loaded on the next turn.";
     type Args = LoadToolsArgs;
 
+    fn apply_positional_arg(token: &str, map: &mut serde_json::Map<String, serde_json::Value>) {
+        let entry = map
+            .entry("names".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let serde_json::Value::Array(arr) = entry {
+            arr.push(serde_json::Value::String(token.to_string()));
+        }
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let res = resolve_load_tools_request(
             &args.names,

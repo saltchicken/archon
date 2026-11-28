@@ -1,5 +1,5 @@
 use super::{
-    BlockingTool, ToolContext,
+    BlockingTool, ToolContext, approval, parse_args,
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents, render_directory_listing},
@@ -982,7 +982,7 @@ fn run_git_sync(commit_msg: &str, config: &Config) -> Result<String> {
     Ok(report.join("\n"))
 }
 
-pub fn preview_edit(
+fn preview_edit(
     args: &DotfilesArgs,
     config: &Config,
 ) -> Result<(PathBuf, String, String, String, usize)> {
@@ -995,12 +995,12 @@ pub fn preview_edit(
     Ok((target_path, display, original, updated, args.edits.len()))
 }
 
-pub fn preview_create(args: &DotfilesArgs, config: &Config) -> Result<(PathBuf, String)> {
+fn preview_create(args: &DotfilesArgs, config: &Config) -> Result<(PathBuf, String)> {
     let (_, target_path, display) = resolve_new_config_path(&args.path, config)?;
     Ok((target_path, display))
 }
 
-pub fn preview_restore(args: &DotfilesArgs, config: &Config) -> Result<(usize, String)> {
+fn preview_restore(args: &DotfilesArgs, config: &Config) -> Result<(usize, String)> {
     let root = config_root()?;
     let git_dir = bare_repo_dir();
     let (scoped_display, changed_files) =
@@ -1033,11 +1033,63 @@ impl BlockingTool for Tool {
     const SUBACTIONS: &'static [&'static str] = &[
         "list", "read", "search", "edit", "create", "validate", "status", "diff", "restore", "sync",
     ];
+    const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str =
         "<list|read|search|edit|create|validate|status|diff|restore|sync> [path] [pattern]";
     const SHORT_SUMMARY: &'static str =
         "Read, search, edit, validate, diff, restore, and git-sync personal configs in ~/.config.";
     type Args = DotfilesArgs;
+
+    fn positional_keys(
+        _token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if map.get("action").and_then(serde_json::Value::as_str) == Some("sync") {
+            &["content"]
+        } else {
+            &["action", "path", "pattern"]
+        }
+    }
+
+    fn format_approval(
+        out: &mut String,
+        args: &serde_json::Value,
+        obj: &serde_json::Map<String, serde_json::Value>,
+        config: &Config,
+        _active_skill: Option<&str>,
+    ) {
+        approval::append_filtered_kvs(out, obj, &["edits", "content"]);
+
+        if let Ok(parsed) = parse_args::<DotfilesArgs>(args, Self::NAME) {
+            match parsed.action {
+                DotfilesAction::Edit => approval::append_diff_result(
+                    out,
+                    preview_edit(&parsed, config).map(|(_, d, o, u, n)| (d, o, u, Some(n.max(1)))),
+                ),
+                DotfilesAction::Create => approval::append_diff_result(
+                    out,
+                    preview_create(&parsed, config)
+                        .map(|(_, d)| (d, String::new(), parsed.content, None)),
+                ),
+                DotfilesAction::Restore => match preview_restore(&parsed, config) {
+                    Ok((file_count, diff)) => {
+                        let _ = writeln!(out, "  files: {file_count}");
+                        out.push_str("\n--- UNIFIED DIFF ---\n");
+                        out.push_str(if diff.trim().is_empty() {
+                            "(No differences)\n"
+                        } else {
+                            &diff
+                        });
+                        if !out.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    Err(e) => approval::append_warning(out, &e),
+                },
+                _ => {}
+            }
+        }
+    }
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {

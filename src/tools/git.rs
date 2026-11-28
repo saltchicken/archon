@@ -121,9 +121,29 @@ impl AsyncTool for Tool {
         "merge",
         "branch_delete",
     ];
+    const DEFAULT_ACTION: Option<&'static str> = Some("status");
     const PARAM_HINT: &'static str = "<status|diff|log|show|blame|branch|add|unstage|commit|stash|stash_pop|switch|merge|branch_delete> [target|path]";
     const SHORT_SUMMARY: &'static str = "Run workspace git operations (status, diff, log, show, blame, branch, add, unstage, commit, stash, switch, merge).";
     type Args = GitArgs;
+
+    fn positional_keys(
+        _token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") {
+            &["action"]
+        } else {
+            match map
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+            {
+                "blame" | "add" | "unstage" => &["path"],
+                "commit" => &["message", "target", "path"],
+                _ => &["target", "path"],
+            }
+        }
+    }
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let mut cmd_args: Vec<String> = vec!["--no-pager".into()];

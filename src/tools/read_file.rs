@@ -27,6 +27,23 @@ impl BlockingTool for Tool {
         "Read a workspace, active-skill, or read_roots file with optional 1-based line range.";
     type Args = ReadFileArgs;
 
+    fn apply_positional_arg(token: &str, map: &mut serde_json::Map<String, serde_json::Value>) {
+        if map.contains_key("file_path") {
+            if let Ok(n) = token.parse::<usize>()
+                && let Some(&k) = ["start_line", "end_line"]
+                    .iter()
+                    .find(|&&k| !map.contains_key(k))
+            {
+                map.insert(k.into(), serde_json::Value::Number(n.into()));
+            }
+        } else {
+            map.insert(
+                "file_path".into(),
+                serde_json::Value::String(token.to_string()),
+            );
+        }
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let target_path = ctx.resolve_readable_path(&args.file_path)?;
         read_file_contents(

@@ -1396,6 +1396,29 @@ impl AsyncTool for Tool {
     const SHORT_SUMMARY: &'static str = "Control a visible Chrome browser via CDP (navigate, read, click, type, paste, eval, extract, screenshot, snapshot).";
     type Args = BrowserArgs;
 
+    fn positional_keys(
+        token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") && Self::SUBACTIONS.contains(&token) {
+            &["action"]
+        } else {
+            match map
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+            {
+                "goto" => &["url", "selector"],
+                "read" | "click" => &["selector"],
+                "type" => &["selector", "text"],
+                "paste" => &["selector", "text", "source"],
+                "eval" => &["script"],
+                "screenshot" => &["selector", "path"],
+                _ => &[],
+            }
+        }
+    }
+
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let reg = BrowserRegistry::global();
         let wait_secs = args.wait_secs.unwrap_or(DEFAULT_WAIT_SECS).clamp(1, 60);

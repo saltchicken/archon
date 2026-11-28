@@ -1,14 +1,15 @@
 use super::{
-    BlockingTool, ToolContext,
+    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::atomic_write_file,
     },
 };
+use crate::core::config::Config;
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use std::{fmt::Write as _, fs, path::PathBuf};
 
 pub struct Tool;
 
@@ -20,7 +21,7 @@ pub struct EditFileArgs {
     edits: Vec<EditHunk>,
 }
 
-pub fn preview_edits(
+fn preview_edits(
     args: &EditFileArgs,
     ctx: &ToolContext,
 ) -> Result<(PathBuf, String, String, usize)> {
@@ -35,7 +36,7 @@ pub fn preview_edits(
     Ok((target_path, original, updated, args.edits.len()))
 }
 
-pub fn fallback_hunk_preview(args: &EditFileArgs) -> (String, String) {
+fn fallback_hunk_preview(args: &EditFileArgs) -> (String, String) {
     let join_field = |f: fn(&EditHunk) -> &str| {
         args.edits
             .iter()
@@ -56,6 +57,42 @@ impl BlockingTool for Tool {
     const SHORT_SUMMARY: &'static str =
         "Apply exact search/replace edits to an existing workspace file.";
     type Args = EditFileArgs;
+
+    fn format_approval(
+        out: &mut String,
+        args: &serde_json::Value,
+        obj: &serde_json::Map<String, serde_json::Value>,
+        config: &Config,
+        active_skill: Option<&str>,
+    ) {
+        let file_path = obj
+            .get("file_path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let _ = writeln!(out, "  file_path: {file_path}");
+        approval::append_filtered_kvs(out, obj, &["file_path", "edits"]);
+
+        let preview = parse_args::<EditFileArgs>(args, Self::NAME).and_then(|parsed| {
+            preview_edits(
+                &parsed,
+                &ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)?,
+            )
+        });
+
+        match preview {
+            Ok((_, original, updated, hunk_count)) => {
+                let _ = writeln!(out, "  hunks: {hunk_count}");
+                approval::append_unified_diff(out, file_path, &original, &updated);
+            }
+            Err(e) => {
+                approval::append_warning(out, &e);
+                let (raw_search, raw_replace) = parse_args::<EditFileArgs>(args, Self::NAME)
+                    .map(|parsed| fallback_hunk_preview(&parsed))
+                    .unwrap_or_default();
+                approval::append_unified_diff(out, file_path, &raw_search, &raw_replace);
+            }
+        }
+    }
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let (target_path, _, updated, hunk_count) = preview_edits(&args, ctx)?;

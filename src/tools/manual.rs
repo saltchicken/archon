@@ -1,7 +1,10 @@
 //! Manual tool invocation parsing: converts `#tool args` user input into a
 //! `ToolCall` with positional argument mapping.
 
-use super::{ALL_TOOL_NAMES, LOAD_TOOLS_NAME, ToolCall, ToolFunction, format_call_summary};
+use super::{
+    ALL_TOOL_NAMES, LOAD_TOOLS_NAME, ToolCall, ToolFunction, apply_positional_manual_arg,
+    format_call_summary, tool_default_action,
+};
 use anyhow::{Context, bail};
 use serde_json::{Map, Value};
 
@@ -27,131 +30,6 @@ fn parse_manual_arg_value(raw: &str) -> Value {
                 Value::String(raw.to_string())
             }
         }
-    }
-}
-
-fn apply_positional_manual_arg(tool_name: &str, token: &str, map: &mut Map<String, Value>) {
-    if tool_name == "read_file" && map.contains_key("file_path") {
-        if let Ok(n) = token.parse::<usize>()
-            && let Some(&k) = ["start_line", "end_line"]
-                .iter()
-                .find(|&&k| !map.contains_key(k))
-        {
-            map.insert(k.into(), Value::Number(n.into()));
-        }
-        return;
-    }
-    if tool_name == "workspace_snapshot" {
-        if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
-            map.insert("tree_only".into(), Value::Bool(true));
-        }
-        return;
-    }
-    if tool_name == LOAD_TOOLS_NAME {
-        let entry = map
-            .entry("names".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(arr) = entry {
-            arr.push(Value::String(token.to_string()));
-        }
-        return;
-    }
-
-    let keys: &[&str] = match tool_name {
-        "repo_map" if matches!(token, "map" | "definition" | "references") => {
-            &["action", "symbol", "target_path"]
-        }
-        "repo_map" => &["symbol", "target_path"],
-        "cargo" => &["action", "package"],
-        "clipboard"
-            if !map.contains_key("action")
-                && matches!(
-                    token,
-                    "read" | "write" | "read_image" | "write_image" | "clear"
-                ) =>
-        {
-            &["action"]
-        }
-        "clipboard" => match map.get("action").and_then(Value::as_str).unwrap_or("read") {
-            "write" => &["text"],
-            "read_image" | "write_image" => &["file_path"],
-            _ => &[],
-        },
-        "git" if !map.contains_key("action") => &["action"],
-        "git" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
-            "blame" | "add" | "unstage" => &["path"],
-            "commit" => &["message", "target", "path"],
-            _ => &["target", "path"],
-        },
-        "fs" => &["action", "path", "destination"],
-        "github_repo"
-            if !map.contains_key("action")
-                && matches!(token, "fetch" | "list" | "read" | "search") =>
-        {
-            &["action"]
-        }
-        "github_repo" => match map.get("action").and_then(Value::as_str).unwrap_or("fetch") {
-            "fetch" => &["repo", "git_ref"],
-            "search" => &["repo", "pattern", "path"],
-            _ => &["repo", "path"],
-        },
-        "dotfiles" if map.get("action").and_then(Value::as_str) == Some("sync") => &["content"],
-        "dotfiles" => &["action", "path", "pattern"],
-        "skill" => &["action", "name"],
-        "memory" if !map.contains_key("action") => &["action"],
-        "memory" if matches!(token, "global" | "workspace") => &["scope", "item"],
-        "memory" => &["item"],
-        "notify" if matches!(token, "low" | "normal" | "critical") => {
-            &["urgency", "summary", "body"]
-        }
-        "notify" => &["summary", "body"],
-        "system" => &["action", "query", "target"],
-        "read_file" => &["file_path"],
-        "search" => &["pattern", "path"],
-        "fetch_url" => &["url"],
-        "curl" => &["url", "method", "body", "json"],
-        "process"
-            if !map.contains_key("action")
-                && matches!(token, "list" | "output" | "poll" | "kill" | "clean") =>
-        {
-            &["action"]
-        }
-        "process" => &["id"],
-        "browser"
-            if !map.contains_key("action")
-                && matches!(
-                    token,
-                    "goto"
-                        | "read"
-                        | "click"
-                        | "type"
-                        | "paste"
-                        | "eval"
-                        | "extract"
-                        | "find"
-                        | "screenshot"
-                        | "snapshot"
-                        | "status"
-                        | "close"
-                ) =>
-        {
-            &["action"]
-        }
-        "browser" => match map.get("action").and_then(Value::as_str).unwrap_or("") {
-            "goto" => &["url", "selector"],
-            "read" | "click" => &["selector"],
-            "type" => &["selector", "text"],
-            "paste" => &["selector", "text", "source"],
-            "eval" => &["script"],
-            "screenshot" => &["selector", "path"],
-            _ => &[],
-        },
-        "create_file" => &["file_path", "content"],
-        _ => &[],
-    };
-
-    if let Some(&k) = keys.iter().find(|&&k| !map.contains_key(k)) {
-        map.insert(k.into(), Value::String(token.to_string()));
     }
 }
 
@@ -216,18 +94,10 @@ pub fn parse_manual_tool_call(raw_after_hash: &str) -> Result<(ToolCall, String)
             .or_insert_with(|| Value::String(act.to_string()));
     }
 
-    if !map.contains_key("action") {
-        let default_action = match tool_name {
-            "git" => Some("status"),
-            "cargo" => Some("check"),
-            "fs" | "memory" | "skill" | "dotfiles" | "process" => Some("list"),
-            "github_repo" => Some("fetch"),
-            "system" => Some("overview"),
-            _ => None,
-        };
-        if let Some(act) = default_action {
-            map.insert("action".into(), Value::String(act.into()));
-        }
+    if !map.contains_key("action")
+        && let Some(act) = tool_default_action(tool_name)
+    {
+        map.insert("action".into(), Value::String(act.into()));
     }
 
     let call = ToolCall {

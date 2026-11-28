@@ -1,5 +1,5 @@
 use super::{
-    BlockingTool, ToolContext,
+    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
     utils::{
         edit::{EditHunk, apply_hunks_to_str},
         fs::{atomic_write_file, read_file_contents},
@@ -7,7 +7,7 @@ use super::{
     },
 };
 use crate::core::{
-    config::{expand_tilde, format_tilde_path, workspace_config_dir_for},
+    config::{Config, expand_tilde, format_tilde_path, workspace_config_dir_for},
     skill_check,
     skills::{
         HookTrigger, SkillArgDef, SkillDefinition, SkillHook, format_hook_summary,
@@ -552,7 +552,7 @@ fn append_unknown_tools_note(
     }
 }
 
-pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, String, String)> {
+fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, String, String)> {
     let slug = validate_skill_slug(&args.name, "name")?;
     let root_dir = create_root_dir(args.scope, ctx);
     let skill_dir = root_dir.join(&slug);
@@ -656,7 +656,7 @@ pub fn preview_create(args: &SkillArgs, ctx: &ToolContext) -> Result<(PathBuf, S
     Ok((target_path, display, rendered))
 }
 
-pub fn preview_modify(
+fn preview_modify(
     args: &SkillArgs,
     ctx: &ToolContext,
 ) -> Result<(PathBuf, String, String, String, usize)> {
@@ -955,10 +955,45 @@ impl BlockingTool for Tool {
     const NAME: &'static str = "skill";
     const DESCRIPTION: &'static str = "List, read, create, modify, and check/validate Archon skills (`SKILL.md` definitions) across workspace and global skill directories.";
     const SUBACTIONS: &'static [&'static str] = &["list", "read", "create", "modify", "check"];
+    const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str = "<list|read|create|modify|check> [name]";
     const SHORT_SUMMARY: &'static str =
         "List, read, create, modify, and validate Archon SKILL.md definitions.";
     type Args = SkillArgs;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["action", "name"]
+    }
+
+    fn format_approval(
+        out: &mut String,
+        args: &serde_json::Value,
+        obj: &serde_json::Map<String, serde_json::Value>,
+        config: &Config,
+        active_skill: Option<&str>,
+    ) {
+        approval::append_filtered_kvs(out, obj, &["edits", "content", "prompt"]);
+
+        if let Ok(parsed) = parse_args::<SkillArgs>(args, Self::NAME)
+            && let Ok(ctx) =
+                ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)
+        {
+            match parsed.action {
+                SkillAction::Modify => approval::append_diff_result(
+                    out,
+                    preview_modify(&parsed, &ctx).map(|(_, d, o, u, n)| (d, o, u, Some(n))),
+                ),
+                SkillAction::Create => approval::append_diff_result(
+                    out,
+                    preview_create(&parsed, &ctx).map(|(_, d, r)| (d, String::new(), r, None)),
+                ),
+                _ => {}
+            }
+        }
+    }
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {

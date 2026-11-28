@@ -206,6 +206,13 @@ impl AsyncTool for Tool {
     const SHORT_SUMMARY: &'static str = "Send custom HTTP/HTTPS requests (method, headers, raw/JSON body) and inspect status, headers, and body.";
     type Args = CurlArgs;
 
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["url", "method", "body", "json"]
+    }
+
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         if args.body.is_some() && args.json.is_some() {
             bail!("Provide either `body` or `json`, not both.");

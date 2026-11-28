@@ -788,10 +788,18 @@ impl AsyncTool for Tool {
         "btrfs",
         "packages",
     ];
+    const DEFAULT_ACTION: Option<&'static str> = Some("overview");
     const PARAM_HINT: &'static str =
         "<overview|journal|services|processes|fish|hyprland|btrfs|packages> [query] [target]";
     const SHORT_SUMMARY: &'static str = "Inspect CachyOS system state: hardware/scx/PSI, journal, services, processes, Fish, Hyprland, Btrfs, and packages.";
     type Args = SystemArgs;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["action", "query", "target"]
+    }
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {

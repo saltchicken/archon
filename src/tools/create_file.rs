@@ -24,6 +24,13 @@ impl BlockingTool for Tool {
         "Create a brand-new file in the workspace (fails if it already exists).";
     type Args = CreateFileArgs;
 
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["file_path", "content"]
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let target_path = ctx.resolve_new_path(&args.file_path)?;
         ensure_parent_dir(&target_path, &ctx.root, "created path")?;

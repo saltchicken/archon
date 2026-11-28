@@ -1,15 +1,17 @@
 use super::{
-    BlockingTool, ToolContext,
+    BlockingTool, SessionToolState, ToolContext, approval, parse_args,
     utils::{
         fs::{format_size, render_directory_listing},
         path::{ensure_parent_dir, has_git_dir_component},
     },
 };
+use crate::core::config::Config;
 use anyhow::{Context, Result, bail};
 use pathdiff::diff_paths;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
 };
@@ -203,10 +205,7 @@ fn resolve_remove_target(raw: &str, ctx: &ToolContext) -> Result<PathBuf> {
     Ok(target)
 }
 
-pub fn preview_action(
-    args: &FsArgs,
-    ctx: &ToolContext,
-) -> Result<(String, Option<(String, String)>)> {
+fn preview_action(args: &FsArgs, ctx: &ToolContext) -> Result<(String, Option<(String, String)>)> {
     match args.action {
         FsAction::List => {
             let target = ctx.resolve_existing_under_root(&args.path, "path escapes workspace")?;
@@ -267,10 +266,43 @@ impl BlockingTool for Tool {
     const NAME: &'static str = "fs";
     const DESCRIPTION: &'static str = "Performs workspace filesystem operations: list directory contents, rename/move paths, copy files/directories, or remove files/directories.";
     const SUBACTIONS: &'static [&'static str] = &["list", "rename", "copy", "remove"];
+    const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str = "<list|rename|copy|remove> [path] [destination]";
     const SHORT_SUMMARY: &'static str =
         "List directory contents or rename, copy, and remove files/directories in the workspace.";
     type Args = FsArgs;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["action", "path", "destination"]
+    }
+
+    fn format_approval(
+        out: &mut String,
+        args: &serde_json::Value,
+        obj: &serde_json::Map<String, serde_json::Value>,
+        config: &Config,
+        active_skill: Option<&str>,
+    ) {
+        approval::append_filtered_kvs(out, obj, &[]);
+        let preview = parse_args::<FsArgs>(args, Self::NAME).and_then(|parsed| {
+            preview_action(
+                &parsed,
+                &ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)?,
+            )
+        });
+        match preview {
+            Ok((summary, maybe_diff)) => {
+                let _ = write!(out, "\n--- OPERATION ---\n{summary}\n");
+                if let Some((file_path, deleted_content)) = maybe_diff {
+                    approval::append_unified_diff(out, &file_path, &deleted_content, "");
+                }
+            }
+            Err(e) => approval::append_warning(out, &e),
+        }
+    }
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let src_str = args.path.trim();

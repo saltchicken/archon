@@ -60,10 +60,22 @@ impl AsyncTool for Tool {
     const NAME: &'static str = "process";
     const DESCRIPTION: &'static str = "Manage background jobs started by purpose-built tools (list, peek at output, poll for new output, kill, clean). This tool cannot start new processes.";
     const SUBACTIONS: &'static [&'static str] = &["list", "output", "poll", "kill", "clean"];
+    const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str = "<list|output|poll|kill|clean> [id]";
     const SHORT_SUMMARY: &'static str =
         "List, peek output, poll, kill, or clean up background jobs started by other tools.";
     type Args = ProcessArgs;
+
+    fn positional_keys(
+        token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") && Self::SUBACTIONS.contains(&token) {
+            &["action"]
+        } else {
+            &["id"]
+        }
+    }
 
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {
         let reg = ProcessRegistry::global();

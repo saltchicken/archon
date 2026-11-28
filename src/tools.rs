@@ -162,17 +162,45 @@ pub trait BlockingTool {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     const SUBACTIONS: &'static [&'static str] = &[];
+    const DEFAULT_ACTION: Option<&'static str> = None;
     const PARAM_HINT: &'static str = "[key=value | JSON]";
     const SHORT_SUMMARY: &'static str;
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String>;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, Value>,
+    ) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn apply_positional_arg(token: &str, map: &mut serde_json::Map<String, Value>) {
+        if let Some(&k) = Self::positional_keys(token, map)
+            .iter()
+            .find(|&&k| !map.contains_key(k))
+        {
+            map.insert(k.into(), Value::String(token.to_string()));
+        }
+    }
+
+    fn format_approval(
+        out: &mut String,
+        _args: &Value,
+        obj: &serde_json::Map<String, Value>,
+        _config: &Config,
+        _active_skill: Option<&str>,
+    ) {
+        approval::format_generic_approval(out, obj);
+    }
 }
 
 pub trait AsyncTool {
     const NAME: &'static str;
     const DESCRIPTION: &'static str;
     const SUBACTIONS: &'static [&'static str] = &[];
+    const DEFAULT_ACTION: Option<&'static str> = None;
     const PARAM_HINT: &'static str = "[key=value | JSON]";
     const SHORT_SUMMARY: &'static str;
     type Args: DeserializeOwned + JsonSchema + Send + 'static;
@@ -181,6 +209,32 @@ pub trait AsyncTool {
         args: Self::Args,
         ctx: &ToolContext,
     ) -> impl std::future::Future<Output = Result<String>> + Send;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, Value>,
+    ) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn apply_positional_arg(token: &str, map: &mut serde_json::Map<String, Value>) {
+        if let Some(&k) = Self::positional_keys(token, map)
+            .iter()
+            .find(|&&k| !map.contains_key(k))
+        {
+            map.insert(k.into(), Value::String(token.to_string()));
+        }
+    }
+
+    fn format_approval(
+        out: &mut String,
+        _args: &Value,
+        obj: &serde_json::Map<String, Value>,
+        _config: &Config,
+        _active_skill: Option<&str>,
+    ) {
+        approval::format_generic_approval(out, obj);
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1164,6 +1218,47 @@ macro_rules! register_tools {
             }
         }
 
+        pub(super) fn tool_default_action(tool_name: &str) -> Option<&'static str> {
+            match tool_name {
+                LOAD_TOOLS_NAME => register_tools!(@default_action blocking, load_tools),
+                $( $mod::Tool::NAME => register_tools!(@default_action $kind, $mod), )*
+                _ => None,
+            }
+        }
+
+        pub(super) fn apply_positional_manual_arg(
+            tool_name: &str,
+            token: &str,
+            map: &mut serde_json::Map<String, Value>,
+        ) {
+            match tool_name {
+                LOAD_TOOLS_NAME => {
+                    register_tools!(@apply_positional blocking, load_tools, token, map)
+                }
+                $( $mod::Tool::NAME => register_tools!(@apply_positional $kind, $mod, token, map), )*
+                _ => {}
+            }
+        }
+
+        pub(super) fn format_tool_approval_body(
+            tool_name: &str,
+            out: &mut String,
+            args: &Value,
+            obj: &serde_json::Map<String, Value>,
+            config: &Config,
+            active_skill: Option<&str>,
+        ) {
+            match tool_name {
+                LOAD_TOOLS_NAME => register_tools!(
+                    @format_approval blocking, load_tools, out, args, obj, config, active_skill
+                ),
+                $( $mod::Tool::NAME => register_tools!(
+                    @format_approval $kind, $mod, out, args, obj, config, active_skill
+                ), )*
+                _ => approval::format_generic_approval(out, obj),
+            }
+        }
+
         pub fn tool_schema_by_name(name: &str) -> Option<Value> {
             match name {
                 LOAD_TOOLS_NAME => Some(register_tools!(@schema blocking, load_tools)),
@@ -1235,6 +1330,12 @@ macro_rules! register_tools {
     (@subactions async, $mod:ident) => {
         <$mod::Tool as AsyncTool>::SUBACTIONS
     };
+    (@default_action blocking, $mod:ident) => {
+        <$mod::Tool as BlockingTool>::DEFAULT_ACTION
+    };
+    (@default_action async, $mod:ident) => {
+        <$mod::Tool as AsyncTool>::DEFAULT_ACTION
+    };
     (@param_hint blocking, $mod:ident) => {
         <$mod::Tool as BlockingTool>::PARAM_HINT
     };
@@ -1246,6 +1347,18 @@ macro_rules! register_tools {
     };
     (@short_summary async, $mod:ident) => {
         <$mod::Tool as AsyncTool>::SHORT_SUMMARY
+    };
+    (@apply_positional blocking, $mod:ident, $token:ident, $map:ident) => {
+        <$mod::Tool as BlockingTool>::apply_positional_arg($token, $map)
+    };
+    (@apply_positional async, $mod:ident, $token:ident, $map:ident) => {
+        <$mod::Tool as AsyncTool>::apply_positional_arg($token, $map)
+    };
+    (@format_approval blocking, $mod:ident, $out:ident, $args:ident, $obj:ident, $config:ident, $active_skill:ident) => {
+        <$mod::Tool as BlockingTool>::format_approval($out, $args, $obj, $config, $active_skill)
+    };
+    (@format_approval async, $mod:ident, $out:ident, $args:ident, $obj:ident, $config:ident, $active_skill:ident) => {
+        <$mod::Tool as AsyncTool>::format_approval($out, $args, $obj, $config, $active_skill)
     };
     (@schema blocking, $mod:ident) => {
         auto_schema::<<$mod::Tool as BlockingTool>::Args>($mod::Tool::NAME, $mod::Tool::DESCRIPTION)

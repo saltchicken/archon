@@ -50,6 +50,25 @@ impl BlockingTool for Tool {
         "Read, write, or clear text and images on the system clipboard.";
     type Args = ClipboardArgs;
 
+    fn positional_keys(
+        token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") && Self::SUBACTIONS.contains(&token) {
+            &["action"]
+        } else {
+            match map
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("read")
+            {
+                "write" => &["text"],
+                "read_image" | "write_image" => &["file_path"],
+                _ => &[],
+            }
+        }
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {
             ClipboardAction::Read => read_text_from_clipboard(),

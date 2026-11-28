@@ -200,6 +200,12 @@ impl BlockingTool for Tool {
         "Generate a workspace directory tree and optionally dump configured file contents.";
     type Args = WorkspaceSnapshotArgs;
 
+    fn apply_positional_arg(token: &str, map: &mut serde_json::Map<String, serde_json::Value>) {
+        if matches!(token, "tree" | "tree_only") && !map.contains_key("tree_only") {
+            map.insert("tree_only".into(), serde_json::Value::Bool(true));
+        }
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let settings = &ctx.config.workspace_snapshot;
         let tree_only = args.tree_only.unwrap_or(settings.tree_only);

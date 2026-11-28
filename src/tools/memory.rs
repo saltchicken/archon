@@ -1,6 +1,6 @@
-use super::{BlockingTool, ToolContext};
+use super::{BlockingTool, SessionToolState, ToolContext, approval, parse_args};
 use crate::core::config::{
-    Memory, MemoryScope, clean_memory_item, format_tilde_path, global_memory_path,
+    Config, Memory, MemoryScope, clean_memory_item, format_tilde_path, global_memory_path,
     load_scoped_memory_file, save_memory_file, workspace_config_dir_for, workspace_memory_path,
 };
 use anyhow::{Result, bail};
@@ -73,7 +73,7 @@ fn collect_input_items(args: &MemoryArgs) -> Vec<String> {
     Memory::new(raw, true).items
 }
 
-pub(super) fn preview_mutation(
+fn preview_mutation(
     args: &MemoryArgs,
     ctx: &ToolContext,
 ) -> Result<(PathBuf, String, String, String, Memory)> {
@@ -139,11 +139,46 @@ impl BlockingTool for Tool {
     const SUBACTIONS: &'static [&'static str] = &[
         "list", "read", "add", "remove", "set", "clear", "enable", "disable",
     ];
+    const DEFAULT_ACTION: Option<&'static str> = Some("list");
     const PARAM_HINT: &'static str =
         "<list|read|add|remove|set|clear|enable|disable> [global|workspace] [item]";
     const SHORT_SUMMARY: &'static str =
         "Read or update persistent global and workspace memory (MEMORY.md).";
     type Args = MemoryArgs;
+
+    fn positional_keys(
+        token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") {
+            &["action"]
+        } else if matches!(token, "global" | "workspace") {
+            &["scope", "item"]
+        } else {
+            &["item"]
+        }
+    }
+
+    fn format_approval(
+        out: &mut String,
+        args: &serde_json::Value,
+        obj: &serde_json::Map<String, serde_json::Value>,
+        config: &Config,
+        active_skill: Option<&str>,
+    ) {
+        approval::append_filtered_kvs(out, obj, &[]);
+
+        if let Ok(parsed) = parse_args::<MemoryArgs>(args, Self::NAME)
+            && let Ok(ctx) =
+                ToolContext::new(config, active_skill, None, &SessionToolState::default(), 0)
+            && !matches!(parsed.action, MemoryAction::List | MemoryAction::Read)
+        {
+            approval::append_diff_result(
+                out,
+                preview_mutation(&parsed, &ctx).map(|(_, d, o, u, _)| (d, o, u, None)),
+            );
+        }
+    }
 
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         match args.action {

@@ -122,10 +122,18 @@ impl AsyncTool for Tool {
         "add",
         "update",
     ];
+    const DEFAULT_ACTION: Option<&'static str> = Some("check");
     const PARAM_HINT: &'static str =
         "<check|clippy|test|fmt|fmt_check|doc|metadata|info|tree|build|add|update> [package]";
     const SHORT_SUMMARY: &'static str = "Run Cargo commands (check, clippy, test, fmt, doc, build, add, update, metadata, info, tree).";
     type Args = CargoArgs;
+
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["action", "package"]
+    }
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let (cmd_args, empty_msg) = build_command_args(&args)?;

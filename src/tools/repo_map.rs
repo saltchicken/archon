@@ -1642,6 +1642,17 @@ impl BlockingTool for Tool {
     const SHORT_SUMMARY: &'static str = "Tree-sitter AST code intelligence: PageRank repo map, symbol definitions, and call-site references.";
     type Args = RepoMapArgs;
 
+    fn positional_keys(
+        token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if Self::SUBACTIONS.contains(&token) {
+            &["action", "symbol", "target_path"]
+        } else {
+            &["symbol", "target_path"]
+        }
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let candidate_files = collect_candidate_files(&args, ctx)?;
         if candidate_files.is_empty() {

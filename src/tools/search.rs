@@ -52,6 +52,13 @@ impl BlockingTool for Tool {
         "Search workspace or read_roots file contents with regex or literal strings.";
     type Args = SearchArgs;
 
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["pattern", "path"]
+    }
+
     fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         if args.pattern.is_empty() {
             bail!("'pattern' cannot be empty");

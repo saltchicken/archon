@@ -151,6 +151,13 @@ impl AsyncTool for Tool {
         "Fetch a public HTTP/HTTPS URL and convert HTML to readable text or compact JSON.";
     type Args = FetchUrlArgs;
 
+    fn positional_keys(
+        _token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        &["url"]
+    }
+
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let max_output_size = ctx.max_output_size;
         let mut target_url = Url::parse(args.url.trim())

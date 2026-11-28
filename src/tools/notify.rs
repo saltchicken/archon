@@ -65,6 +65,17 @@ impl AsyncTool for Tool {
     const SHORT_SUMMARY: &'static str = "Send a desktop notification via notify-send (dunst), optionally with interactive action buttons.";
     type Args = NotifyArgs;
 
+    fn positional_keys(
+        token: &str,
+        _map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if matches!(token, "low" | "normal" | "critical") {
+            &["urgency", "summary", "body"]
+        } else {
+            &["summary", "body"]
+        }
+    }
+
     async fn execute(args: Self::Args, _ctx: &ToolContext) -> Result<String> {
         let summary = args
             .summary

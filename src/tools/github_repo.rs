@@ -476,10 +476,30 @@ impl AsyncTool for Tool {
     const NAME: &'static str = "github_repo";
     const DESCRIPTION: &'static str = "Fetch, browse, read, and search external GitHub repositories in a local cache (`~/.cache/archon/repos/`) to study their architecture, integrate them into a project, or prepare contributions. Supports `fetch` (shallow-clone + orientation bundle), `list` (directory listing), `read` (file/line-range reading), and `search` (regex/literal content search). After fetching, pair with `repo_map` (`github_repo: \"owner/repo\"`) for AST maps, symbol definitions, and references.";
     const SUBACTIONS: &'static [&'static str] = &["fetch", "list", "read", "search"];
+    const DEFAULT_ACTION: Option<&'static str> = Some("fetch");
     const PARAM_HINT: &'static str = "<fetch|list|read|search> <owner/repo> [path|pattern|git_ref]";
     const SHORT_SUMMARY: &'static str =
         "Shallow-clone, browse, read, and search external GitHub repositories in local cache.";
     type Args = GithubRepoArgs;
+
+    fn positional_keys(
+        token: &str,
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> &'static [&'static str] {
+        if !map.contains_key("action") && Self::SUBACTIONS.contains(&token) {
+            &["action"]
+        } else {
+            match map
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("fetch")
+            {
+                "fetch" => &["repo", "git_ref"],
+                "search" => &["repo", "pattern", "path"],
+                _ => &["repo", "path"],
+            }
+        }
+    }
 
     async fn execute(args: Self::Args, ctx: &ToolContext) -> Result<String> {
         let (owner, name) = parse_repo_slug(&args.repo)?;
