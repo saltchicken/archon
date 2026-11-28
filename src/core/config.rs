@@ -289,6 +289,14 @@ pub struct ModelPreset {
     pub name: String,
     pub context: u32,
     pub max_tool_output_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_predict: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_batch: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,11 +449,19 @@ impl Default for Config {
                     name: "qwen3.8:27b".into(),
                     context: 32768,
                     max_tool_output_size: 131_072,
+                    num_predict: None,
+                    temperature: None,
+                    repeat_penalty: None,
+                    num_batch: None,
                 },
                 ModelPreset {
                     name: "gemini-4-hydrogen".into(),
                     context: 1_048_576,
                     max_tool_output_size: 524_288,
+                    num_predict: None,
+                    temperature: None,
+                    repeat_penalty: None,
+                    num_batch: None,
                 },
             ],
             system_presets: vec![
@@ -693,7 +709,7 @@ impl Config {
         workspace_memory_path(&ws_dir)
     }
 
-    fn find_model(&self, model: &str) -> Option<&ModelPreset> {
+    pub fn find_model(&self, model: &str) -> Option<&ModelPreset> {
         self.models.iter().find(|m| m.name == model)
     }
 

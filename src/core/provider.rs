@@ -304,6 +304,7 @@ impl Provider {
                 &sanitized_messages,
                 &effective_system_prompt,
                 turn.num_ctx,
+                config.find_model(model),
                 tools_schema,
             ),
             Self::Gemini => {
@@ -348,7 +349,14 @@ impl Provider {
     ) -> std::result::Result<(String, u64, u64), String> {
         let messages = vec![ChatMessage::new("user", user_prompt)];
         let payload = match self {
-            Self::Ollama => ollama::build_payload(&model, &messages, system_prompt, num_ctx, None),
+            Self::Ollama => ollama::build_payload(
+                &model,
+                &messages,
+                system_prompt,
+                num_ctx,
+                config.find_model(&model),
+                None,
+            ),
             Self::Gemini => gemini::build_payload(&messages, system_prompt, None),
         };
 
@@ -448,6 +456,7 @@ impl Provider {
                     &messages,
                     system_prompt,
                     num_ctx,
+                    config.find_model(&model),
                     tools_schema.clone(),
                 ),
                 Self::Gemini => {
@@ -770,7 +779,7 @@ mod tests {
         assert_eq!(raw_schemas.len(), expected_count);
 
         let ollama_payload =
-            ollama::build_payload("test-model", &[], "", 4096, Some(raw_schemas.clone()));
+            ollama::build_payload("test-model", &[], "", 4096, None, Some(raw_schemas.clone()));
         let ollama_tools = ollama_payload["tools"].as_array().unwrap();
         assert_eq!(ollama_tools.len(), expected_count);
 

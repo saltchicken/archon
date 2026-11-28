@@ -1,7 +1,7 @@
 use crate::{
     core::{
         EngineEvent,
-        config::Config,
+        config::{Config, ModelPreset},
         provider::open_line_stream,
         session::{ChatMessage, ThoughtPart},
     },
@@ -137,6 +137,7 @@ pub fn build_payload(
     messages: &[ChatMessage],
     system_prompt: &str,
     num_ctx: u32,
+    preset: Option<&ModelPreset>,
     tools: Option<Vec<Value>>,
 ) -> Value {
     let mut api_msgs = Vec::new();
@@ -168,16 +169,27 @@ pub fn build_payload(
         api_msgs.push(msg_obj);
     }
 
+    let num_predict = preset.and_then(|p| p.num_predict).unwrap_or(16_384);
+    let temperature = preset
+        .and_then(|p| p.temperature)
+        .unwrap_or(0.2)
+        .clamp(0.0, 2.0);
+    let repeat_penalty = preset
+        .and_then(|p| p.repeat_penalty)
+        .unwrap_or(1.05)
+        .max(0.1);
+    let num_batch = preset.and_then(|p| p.num_batch).unwrap_or(256);
+
     let mut payload = json!({
         "model": model,
         "messages": api_msgs,
         "stream": true,
         "options": {
             "num_ctx": num_ctx,
-            "num_predict": 16384,
-            "num_batch": 256,
-            "temperature": 0.2,
-            "repeat_penalty": 1.05
+            "num_predict": num_predict,
+            "num_batch": num_batch,
+            "temperature": temperature,
+            "repeat_penalty": repeat_penalty
         }
     });
     if let Some(raw_tools) = tools {
@@ -348,5 +360,81 @@ mod tests {
         assert!(status.get("anyOf").is_none());
         assert!(status.get("nullable").is_none());
         assert!(status.get("default").is_none());
+    }
+
+    fn assert_close(actual: &Value, expected: f64) {
+        let a = actual.as_f64().unwrap();
+        assert!((a - expected).abs() < 1e-6, "expected {expected}, got {a}");
+    }
+
+    #[test]
+    fn build_payload_uses_defaults_when_preset_is_none() {
+        let payload = build_payload("m", &[], "", 4096, None, None);
+        let opts = &payload["options"];
+        assert_eq!(opts["num_predict"], 16_384);
+        assert_close(&opts["temperature"], 0.2);
+        assert_close(&opts["repeat_penalty"], 1.05);
+        assert_eq!(opts["num_batch"], 256);
+    }
+
+    #[test]
+    fn build_payload_respects_preset_overrides() {
+        let preset = ModelPreset {
+            name: "test".into(),
+            context: 4096,
+            max_tool_output_size: 1024,
+            num_predict: Some(512),
+            temperature: Some(0.7),
+            repeat_penalty: Some(1.3),
+            num_batch: Some(128),
+        };
+        let payload = build_payload("m", &[], "", 4096, Some(&preset), None);
+        let opts = &payload["options"];
+        assert_eq!(opts["num_predict"], 512);
+        assert_close(&opts["temperature"], 0.7);
+        assert_close(&opts["repeat_penalty"], 1.3);
+        assert_eq!(opts["num_batch"], 128);
+    }
+
+    #[test]
+    fn build_payload_clamps_out_of_range_values() {
+        let preset = ModelPreset {
+            name: "test".into(),
+            context: 4096,
+            max_tool_output_size: 1024,
+            num_predict: Some(1),
+            temperature: Some(99.0),
+            repeat_penalty: Some(0.0),
+            num_batch: Some(1),
+        };
+        let payload = build_payload("m", &[], "", 4096, Some(&preset), None);
+        let opts = &payload["options"];
+        // temperature clamped to [0.0, 2.0]
+        assert_close(&opts["temperature"], 2.0);
+        // repeat_penalty clamped to min 0.1
+        assert_close(&opts["repeat_penalty"], 0.1);
+        // num_predict and num_batch pass through (u32 can't be negative)
+        assert_eq!(opts["num_predict"], 1);
+        assert_eq!(opts["num_batch"], 1);
+    }
+
+    #[test]
+    fn build_payload_partial_preset_falls_back_per_field() {
+        let preset = ModelPreset {
+            name: "test".into(),
+            context: 4096,
+            max_tool_output_size: 1024,
+            num_predict: Some(2048),
+            temperature: None,
+            repeat_penalty: None,
+            num_batch: None,
+        };
+        let payload = build_payload("m", &[], "", 4096, Some(&preset), None);
+        let opts = &payload["options"];
+        assert_eq!(opts["num_predict"], 2048);
+        // Unset fields fall back to defaults
+        assert_close(&opts["temperature"], 0.2);
+        assert_close(&opts["repeat_penalty"], 1.05);
+        assert_eq!(opts["num_batch"], 256);
     }
 }
