@@ -116,6 +116,22 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
     };
     cfg.app.enabled_tools = vec!["@code".into(), "@rust".into(), "@mycustom".into()];
     cfg.app.core_tools = vec!["@code".into()];
+    // Explicitly define the groups referenced above (no compiled-in defaults).
+    cfg.tool_groups.insert(
+        "code".into(),
+        vec![
+            "read_file".into(),
+            "edit_file".into(),
+            "create_file".into(),
+            "search".into(),
+            "repo_map".into(),
+            "fs".into(),
+            "workspace_snapshot".into(),
+        ],
+    );
+    cfg.tool_groups.insert("git".into(), vec!["git".into(), "github_repo".into()]);
+    cfg.tool_groups.insert("rust".into(), vec!["cargo".into()]);
+    cfg.tool_groups.insert("planning".into(), vec!["task".into(), "todo".into()]);
     cfg.tool_groups
         .insert("mycustom".into(), vec!["sqlite".into(), "@planning".into()]);
     cfg.tool_groups
@@ -123,7 +139,7 @@ fn tool_groups_expand_in_enabled_core_provenance_and_cli() {
     cfg.tool_groups
         .insert("cyclic_b".into(), vec!["@cyclic_a".into(), "cargo".into()]);
 
-    // Enabled tools expanded through built-in and nested custom groups.
+    // Enabled tools expanded through top-level and nested custom groups.
     assert!(archon::tools::is_tool_enabled("read_file", &cfg));
     assert!(archon::tools::is_tool_enabled("cargo", &cfg));
     assert!(archon::tools::is_tool_enabled("sqlite", &cfg));

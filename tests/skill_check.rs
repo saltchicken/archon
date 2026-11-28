@@ -369,7 +369,12 @@ fn skill_check_and_resolve_support_tool_groups() {
     )
     .unwrap();
 
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    cfg.tool_groups.insert("git".into(), vec!["git".into(), "github_repo".into()]);
+    cfg.tool_groups.insert(
+        "web".into(),
+        vec!["fetch_url".into(), "curl".into(), "browser".into()],
+    );
     let report = check_skills_in_dir(dir, "test", &cfg, true, None);
     assert!(
         report.is_ok(true),

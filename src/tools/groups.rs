@@ -4,47 +4,6 @@
 use super::ALL_TOOL_NAMES;
 use std::collections::{BTreeMap, HashSet};
 
-/// Returns the default tool groups that are seeded into `Config::default()`.
-/// Users can override or remove any of these via `[tool_groups]` in their config.
-pub fn default_tool_groups() -> BTreeMap<String, Vec<String>> {
-    let mut m = BTreeMap::new();
-    m.insert(
-        "code".into(),
-        vec![
-            "read_file".into(),
-            "edit_file".into(),
-            "create_file".into(),
-            "search".into(),
-            "repo_map".into(),
-            "fs".into(),
-            "workspace_snapshot".into(),
-        ],
-    );
-    m.insert("rust".into(), vec!["cargo".into()]);
-    m.insert("git".into(), vec!["git".into(), "github_repo".into()]);
-    m.insert(
-        "web".into(),
-        vec!["fetch_url".into(), "curl".into(), "browser".into()],
-    );
-    m.insert(
-        "sysadmin".into(),
-        vec![
-            "system".into(),
-            "dotfiles".into(),
-            "process".into(),
-            "schedule".into(),
-            "notify".into(),
-        ],
-    );
-    m.insert(
-        "data".into(),
-        vec!["sqlite".into(), "memory".into(), "session".into()],
-    );
-    m.insert("planning".into(), vec!["task".into(), "todo".into()]);
-    m.insert("agent".into(), vec!["skill".into(), "subagent".into()]);
-    m
-}
-
 fn normalize_group_key(raw: &str) -> &str {
     raw.trim().trim_start_matches('@').trim()
 }
