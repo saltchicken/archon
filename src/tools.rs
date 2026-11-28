@@ -21,7 +21,6 @@ mod search;
 mod session;
 mod skill;
 mod sqlite;
-mod subagent;
 mod system;
 pub mod tasks;
 pub mod todo;
@@ -1398,7 +1397,6 @@ register_tools! {
     blocking: session,
     blocking: skill,
     blocking: sqlite,
-    async: subagent,
     async: system,
     blocking: todo,
     blocking: workspace_snapshot,
