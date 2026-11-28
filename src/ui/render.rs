@@ -517,7 +517,8 @@ impl TuiApp {
             }
 
             if self.stream_dirty {
-                self.stream_cache.update(&self.streaming_text, options, false);
+                self.stream_cache
+                    .update(&self.streaming_text, options, false);
                 self.stream_dirty = false;
             }
 

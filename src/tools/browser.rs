@@ -33,6 +33,64 @@ const MAX_EXTRACT_ELEMENTS: usize = 200;
 /// Max number of rendered lines for `snapshot` accessibility-tree output.
 const MAX_AX_TREE_LINES: usize = 500;
 
+/// Returns a pseudo-random duration in `[min_ms, max_ms]` milliseconds.
+///
+/// Uses the current system-time nanosecond component mixed with a golden-ratio
+/// multiplier to produce a well-distributed value without requiring a `rand`
+/// dependency. Sufficient for simulating human-like timing variation.
+fn human_delay(min_ms: u64, max_ms: u64) -> Duration {
+    let range = max_ms.saturating_sub(min_ms);
+    if range == 0 {
+        return Duration::from_millis(min_ms);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    // Mix with a large odd constant to spread the low bits.
+    let seed = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(nanos << 32);
+    let offset = seed % (range + 1);
+    Duration::from_millis(min_ms + offset)
+}
+
+/// Returns a pseudo-random pixel offset in `[-max_px, +max_px]`.
+///
+/// Used to add small positional jitter so clicks don't always land on the
+/// exact center pixel of an element (which is a strong bot fingerprint).
+fn jitter_px(max_px: f64) -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let seed = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(nanos << 32);
+    // Map to [-max_px, +max_px]
+    let unit = (seed % 2001) as f64 / 1000.0; // [0, 2]
+    (unit - 1.0) * max_px
+}
+
+/// Returns a randomized window size string from common desktop resolutions.
+///
+/// Avoids always launching with the same fixed viewport, which is a detectable
+/// bot fingerprint.
+fn random_window_size() -> &'static str {
+    let sizes: [&str; 4] = ["1366,768", "1440,900", "1536,864", "1920,1080"];
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let seed = nanos
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(nanos << 32);
+    sizes[(seed % sizes.len() as u64) as usize]
+}
+
+/// A realistic modern Chrome user-agent string for Linux.
+const REALISTIC_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 pub struct Tool;
 
 #[derive(Deserialize, JsonSchema)]
@@ -311,6 +369,12 @@ impl CdpSession {
         loop {
             let state = self.evaluate_raw("document.readyState").await?;
             if state.as_str() == Some("complete") {
+                // Human-like settle delay: a real user doesn't act the instant
+                // the spinner disappears. Randomize 300–800 ms so consecutive
+                // navigations don't produce an identical cadence.
+                let settle = human_delay(300, 800);
+                debug!("goto: page loaded, settling for {} ms", settle.as_millis());
+                sleep(settle).await;
                 return Ok(());
             }
             if Instant::now() > deadline {
@@ -469,7 +533,7 @@ impl CdpSession {
                 if (!el) return null;
                 el.scrollIntoView({{block:'center'}});
                 const r = el.getBoundingClientRect();
-                return {{x: r.x + r.width/2, y: r.y + r.height/2}};
+                return {{x: r.x + r.width/2, y: r.y + r.height/2, w: r.width, h: r.height}};
             }})()"#
         );
         let coords = self.evaluate_raw(&expr).await?;
@@ -481,19 +545,52 @@ impl CdpSession {
             .get("y")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| anyhow::anyhow!("Element '{sel}' is no longer available to click"))?;
+        let w = coords
+            .get("w")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let h = coords
+            .get("h")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        // Add small positional jitter so we don't always hit the exact center,
+        // but clamp it to stay within the element bounds (leave 1 px margin).
+        let max_jitter = (f64::min(w, h) / 2.0 - 1.0).max(0.0);
+        let jx = jitter_px(max_jitter);
+        let jy = jitter_px(max_jitter);
+        let cx = x + jx;
+        let cy = y + jy;
+
+        // Simulate cursor movement to the target before clicking.
+        self.send_cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+                "type": "mouseMoved", "x": cx, "y": cy,
+                "button": "none", "clickCount": 0
+            }),
+        )
+        .await?;
+
+        // Brief pause between cursor arrival and press (human micro-hesitation).
+        sleep(human_delay(30, 80)).await;
 
         self.send_cmd(
             "Input.dispatchMouseEvent",
             serde_json::json!({
-                "type": "mousePressed", "x": x, "y": y,
+                "type": "mousePressed", "x": cx, "y": cy,
                 "button": "left", "clickCount": 1
             }),
         )
         .await?;
+
+        // Randomized press duration (50-150 ms) instead of instant release.
+        sleep(human_delay(50, 150)).await;
+
         self.send_cmd(
             "Input.dispatchMouseEvent",
             serde_json::json!({
-                "type": "mouseReleased", "x": x, "y": y,
+                "type": "mouseReleased", "x": cx, "y": cy,
                 "button": "left", "clickCount": 1
             }),
         )
@@ -537,9 +634,28 @@ impl CdpSession {
             .await?;
         }
 
-        // Insert text via CDP Input domain.
-        self.send_cmd("Input.insertText", serde_json::json!({"text": text}))
-            .await?;
+        // Insert text via CDP Input domain with human-like pacing.
+        // Short text (≤200 chars): per-character with 30-120 ms gaps.
+        // Long text (>200 chars): word-chunked with 80-200 ms gaps to
+        // keep total time reasonable while still looking organic.
+        if text.len() <= 200 {
+            for ch in text.chars() {
+                self.send_cmd(
+                    "Input.insertText",
+                    serde_json::json!({"text": ch.to_string()}),
+                )
+                .await?;
+                sleep(human_delay(30, 120)).await;
+            }
+        } else {
+            // Word-chunked: split on spaces, insert each word + trailing space.
+            let words = text.split_inclusive(' ');
+            for word in words {
+                self.send_cmd("Input.insertText", serde_json::json!({"text": word}))
+                    .await?;
+                sleep(human_delay(80, 200)).await;
+            }
+        }
         Ok(())
     }
 
@@ -816,7 +932,8 @@ impl BrowserRegistry {
             "--remote-allow-origins=*".into(),
             "--no-first-run".into(),
             "--no-default-browser-check".into(),
-            "--window-size=1440,900".into(),
+            format!("--window-size={}", random_window_size()),
+            format!("--user-agent={REALISTIC_UA}"),
             "about:blank".into(),
         ];
 
@@ -1317,6 +1434,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Read => {
+                sleep(human_delay(200, 600)).await;
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let sel = args
                     .selector
@@ -1336,6 +1454,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Click => {
+                sleep(human_delay(200, 600)).await;
                 let sel = args
                     .selector
                     .as_deref()
@@ -1349,6 +1468,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Type => {
+                sleep(human_delay(200, 600)).await;
                 let sel = args
                     .selector
                     .as_deref()
@@ -1451,6 +1571,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Extract => {
+                sleep(human_delay(200, 600)).await;
                 let selector = args
                     .selector
                     .as_deref()
@@ -1464,6 +1585,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Find => {
+                sleep(human_delay(200, 600)).await;
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let elements = session.list_interactive_elements(30).await?;
                 let url = session.current_url().await.unwrap_or_default();
@@ -1478,6 +1600,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Screenshot => {
+                sleep(human_delay(200, 600)).await;
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let sel = args
                     .selector
@@ -1513,6 +1636,7 @@ impl AsyncTool for Tool {
             }
 
             BrowserAction::Snapshot => {
+                sleep(human_delay(200, 600)).await;
                 let session = reg.get_or_init(cdp_port, profile_dir).await?;
                 let url = session.current_url().await.unwrap_or_default();
                 let title = session.title().await.unwrap_or_default();
@@ -1876,6 +2000,38 @@ mod tests {
 
     // ── CDP integration tests ─────────────────────────────────────────────
     // Requires Chrome installed.
+
+    #[test]
+    fn human_delay_within_range() {
+        for _ in 0..100 {
+            let d = human_delay(100, 300);
+            assert!(d >= Duration::from_millis(100), "got {:?}", d);
+            assert!(d <= Duration::from_millis(300), "got {:?}", d);
+        }
+    }
+
+    #[test]
+    fn human_delay_zero_range_returns_min() {
+        let d = human_delay(250, 250);
+        assert_eq!(d, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn jitter_px_within_bounds() {
+        for _ in 0..100 {
+            let j = jitter_px(8.0);
+            assert!((-8.0..=8.0).contains(&j), "got {j}");
+        }
+    }
+
+    #[test]
+    fn random_window_size_returns_known_value() {
+        let valid = ["1366,768", "1440,900", "1536,864", "1920,1080"];
+        for _ in 0..50 {
+            let s = random_window_size();
+            assert!(valid.contains(&s), "unexpected size: {s}");
+        }
+    }
 
     #[tokio::test]
     async fn cdp_backend_full_lifecycle() {

@@ -1544,10 +1544,7 @@ pub(super) fn render_markdown(
 }
 
 #[cfg(test)]
-fn render_thought_markdown(
-    content: &str,
-    options: &textwrap::Options<'_>,
-) -> Vec<Line<'static>> {
+fn render_thought_markdown(content: &str, options: &textwrap::Options<'_>) -> Vec<Line<'static>> {
     render_markdown_with_mode(content, options, true)
 }
 
