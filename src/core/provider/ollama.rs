@@ -172,7 +172,13 @@ pub fn build_payload(
         "model": model,
         "messages": api_msgs,
         "stream": true,
-        "options": { "num_ctx": num_ctx, "num_predict": -1, "num_batch": 256 }
+        "options": {
+            "num_ctx": num_ctx,
+            "num_predict": 16384,
+            "num_batch": 256,
+            "temperature": 0.2,
+            "repeat_penalty": 1.05
+        }
     });
     if let Some(raw_tools) = tools {
         let flattened: Vec<Value> = raw_tools
