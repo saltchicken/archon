@@ -2,7 +2,7 @@ use crate::config::expand_tilde;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -102,21 +102,9 @@ impl Write for BoundedFileWriter {
     }
 }
 
-/// Removes legacy daily `archon.log.YYYY-MM-DD` files left by `Rotation::DAILY`.
-fn cleanup_legacy_daily_logs(log_dir: &Path) {
-    for entry in fs::read_dir(log_dir).into_iter().flatten().flatten() {
-        if let Some(name) = entry.file_name().to_str()
-            && name.starts_with("archon.log.")
-        {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-}
-
 pub fn init(history_dir: &str) -> tracing_appender::non_blocking::WorkerGuard {
     let log_dir = expand_tilde(history_dir).join("logs");
     let _ = fs::create_dir_all(&log_dir);
-    cleanup_legacy_daily_logs(&log_dir);
 
     let log_path = log_dir.join("archon.log");
     let writer = BoundedFileWriter::new(log_path);
