@@ -1,4 +1,8 @@
-use archon::config::{Config, ConfigSource, ToolProvenance, build_provenance};
+use archon::config::{
+    Config, ConfigSource, ToolProvenance, WorkspaceEnsureOutcome, build_provenance,
+    ensure_workspace_config_with_io,
+};
+use std::io::Cursor;
 
 #[test]
 fn provenance_tracks_global_and_workspace_overrides() {
@@ -296,4 +300,160 @@ fn config_load_applies_workspaces_toml_overrides_and_allows_unconfigured_dirs() 
     assert!(other_cfg.schedules.is_empty());
     assert_eq!(other_cfg.global_schedules.len(), 1);
     assert!(!tmp.path().join("workspaces").exists());
+}
+
+#[test]
+fn ensure_workspace_config_defaults_to_no_and_exits_without_adding_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_cfg_path = tmp.path().join("config.toml");
+    let workspaces_path = tmp.path().join("workspaces.toml");
+    let proj_dir = tmp.path().join("new-proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+
+    // Empty Enter (default = No)
+    let mut out = Vec::new();
+    let mut reader = Cursor::new(b"\n".as_slice());
+    let outcome =
+        ensure_workspace_config_with_io(&workspaces_path, &proj_dir, Some(&mut reader), &mut out)
+            .unwrap();
+    assert_eq!(outcome, WorkspaceEnsureOutcome::Declined);
+    let printed = String::from_utf8(out).unwrap();
+    assert!(printed.contains("[y/N]:"), "{printed}");
+    let (cfg, _) = Config::load(&base_cfg_path, &workspaces_path, &proj_dir);
+    assert!(!cfg.provenance.has_workspace_config);
+
+    // Explicit "n"
+    let mut out2 = Vec::new();
+    let mut reader2 = Cursor::new(b"n\n".as_slice());
+    let outcome2 =
+        ensure_workspace_config_with_io(&workspaces_path, &proj_dir, Some(&mut reader2), &mut out2)
+            .unwrap();
+    assert_eq!(outcome2, WorkspaceEnsureOutcome::Declined);
+    let (cfg2, _) = Config::load(&base_cfg_path, &workspaces_path, &proj_dir);
+    assert!(!cfg2.provenance.has_workspace_config);
+}
+
+#[test]
+fn ensure_workspace_config_adds_entry_on_yes_and_skips_prompt_when_already_configured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_cfg_path = tmp.path().join("config.toml");
+    let workspaces_path = tmp.path().join("workspaces.toml");
+    let proj_dir = tmp.path().join("my.proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+    let canon_proj = dunce::canonicalize(&proj_dir).unwrap();
+
+    let mut out = Vec::new();
+    let mut reader = Cursor::new(b"y\n".as_slice());
+    let outcome =
+        ensure_workspace_config_with_io(&workspaces_path, &proj_dir, Some(&mut reader), &mut out)
+            .unwrap();
+    assert_eq!(outcome, WorkspaceEnsureOutcome::Configured);
+
+    let (cfg, err) = Config::load(&base_cfg_path, &workspaces_path, &proj_dir);
+    assert!(err.is_none(), "unexpected config err: {err:?}");
+    assert!(cfg.provenance.has_workspace_config);
+    assert_eq!(
+        cfg.workspace.as_deref(),
+        Some(canon_proj.to_string_lossy().as_ref())
+    );
+    assert_eq!(cfg.workspace_name.as_deref(), Some("my.proj"));
+
+    // Subsequent call (even non-interactive with reader = None) succeeds silently.
+    let mut out2 = Vec::new();
+    let outcome2 = ensure_workspace_config_with_io::<Cursor<&[u8]>, _>(
+        &workspaces_path,
+        &proj_dir,
+        None,
+        &mut out2,
+    )
+    .unwrap();
+    assert_eq!(outcome2, WorkspaceEnsureOutcome::Configured);
+    assert!(out2.is_empty());
+}
+
+#[test]
+fn ensure_workspace_config_handles_collisions_reserved_names_and_non_interactive_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base_cfg_path = tmp.path().join("config.toml");
+    let workspaces_path = tmp.path().join("workspaces.toml");
+
+    let work_api = tmp.path().join("work").join("api");
+    let personal_api = tmp.path().join("personal").join("api");
+    let reserved_dir = tmp.path().join("workspaces");
+    let unconfigured = tmp.path().join("unconfigured");
+    std::fs::create_dir_all(&work_api).unwrap();
+    std::fs::create_dir_all(&personal_api).unwrap();
+    std::fs::create_dir_all(&reserved_dir).unwrap();
+    std::fs::create_dir_all(&unconfigured).unwrap();
+
+    // Non-interactive call on an unconfigured directory must refuse without modifying workspaces.toml.
+    let mut out_no_tty = Vec::new();
+    let outcome_no_tty = ensure_workspace_config_with_io::<Cursor<&[u8]>, _>(
+        &workspaces_path,
+        &unconfigured,
+        None,
+        &mut out_no_tty,
+    )
+    .unwrap();
+    assert_eq!(
+        outcome_no_tty,
+        WorkspaceEnsureOutcome::NoInteractiveTerminal
+    );
+    let (cfg_unconf, _) = Config::load(&base_cfg_path, &workspaces_path, &unconfigured);
+    assert!(!cfg_unconf.provenance.has_workspace_config);
+
+    // Add work/api -> [api]
+    let mut out1 = Vec::new();
+    let mut r1 = Cursor::new(b"yes\n".as_slice());
+    assert_eq!(
+        ensure_workspace_config_with_io(&workspaces_path, &work_api, Some(&mut r1), &mut out1)
+            .unwrap(),
+        WorkspaceEnsureOutcome::Configured
+    );
+
+    // Add personal/api -> must not collide with [api]
+    let mut out2 = Vec::new();
+    let mut r2 = Cursor::new(b"y\n".as_slice());
+    assert_eq!(
+        ensure_workspace_config_with_io(&workspaces_path, &personal_api, Some(&mut r2), &mut out2)
+            .unwrap(),
+        WorkspaceEnsureOutcome::Configured
+    );
+
+    // Add directory literally named `workspaces` -> must not collide with reserved key `workspaces`
+    let mut out3 = Vec::new();
+    let mut r3 = Cursor::new(b"y\n".as_slice());
+    assert_eq!(
+        ensure_workspace_config_with_io(&workspaces_path, &reserved_dir, Some(&mut r3), &mut out3)
+            .unwrap(),
+        WorkspaceEnsureOutcome::Configured
+    );
+
+    let (c1, e1) = Config::load(&base_cfg_path, &workspaces_path, &work_api);
+    let (c2, e2) = Config::load(&base_cfg_path, &workspaces_path, &personal_api);
+    let (c3, e3) = Config::load(&base_cfg_path, &workspaces_path, &reserved_dir);
+    assert!(e1.is_none(), "{e1:?}");
+    assert!(e2.is_none(), "{e2:?}");
+    assert!(e3.is_none(), "{e3:?}");
+    assert_eq!(c1.workspace_name.as_deref(), Some("api"));
+    assert_eq!(c2.workspace_name.as_deref(), Some("personal-api"));
+    assert_ne!(c3.workspace_name.as_deref(), Some("workspaces"));
+}
+
+#[test]
+fn ensure_workspace_config_errors_without_mutating_invalid_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspaces_path = tmp.path().join("workspaces.toml");
+    let proj_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj_dir).unwrap();
+
+    let broken = "[broken\nworkspace = \"/tmp\"\n";
+    std::fs::write(&workspaces_path, broken).unwrap();
+
+    let mut out = Vec::new();
+    let mut r = Cursor::new(b"y\n".as_slice());
+    let err = ensure_workspace_config_with_io(&workspaces_path, &proj_dir, Some(&mut r), &mut out)
+        .unwrap_err();
+    assert!(err.to_string().contains("parse error"), "{err}");
+    assert_eq!(std::fs::read_to_string(&workspaces_path).unwrap(), broken);
 }

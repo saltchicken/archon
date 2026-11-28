@@ -1,6 +1,9 @@
 use anyhow::Result;
 use archon::cli::{CliApp, CliArgs};
-use archon::config::{Config, archon_config_root, load_dotenv, workspaces_config_path};
+use archon::config::{
+    Config, WorkspaceEnsureOutcome, archon_config_root, ensure_workspace_config, load_dotenv,
+    workspaces_config_path,
+};
 use archon::engine::CoreEngine;
 use archon::provider::Provider;
 use archon::ui::TuiApp;
@@ -45,6 +48,17 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
         std::process::exit(0);
+    }
+
+    match ensure_workspace_config(&workspaces_path, &cwd)? {
+        WorkspaceEnsureOutcome::Configured => {}
+        WorkspaceEnsureOutcome::Declined => {
+            eprintln!("Exiting Archon.");
+            std::process::exit(0);
+        }
+        WorkspaceEnsureOutcome::NoInteractiveTerminal => {
+            std::process::exit(1);
+        }
     }
 
     if !cli_args.headless {

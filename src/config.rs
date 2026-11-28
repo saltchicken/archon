@@ -19,8 +19,9 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    fs, io,
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -655,6 +656,198 @@ fn parse_workspaces_toml(raw: &str) -> Result<Vec<WorkspaceEntry>> {
     }
 
     Ok(entries)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceEnsureOutcome {
+    Configured,
+    Declined,
+    NoInteractiveTerminal,
+}
+
+fn format_toml_key(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        key.to_string()
+    } else {
+        toml::Value::String(key.to_string()).to_string()
+    }
+}
+
+fn next_workspace_entry_key(canon: &Path, raw_toml: &str, entries: &[WorkspaceEntry]) -> String {
+    let root_keys: BTreeSet<String> = toml::from_str::<toml::Table>(raw_toml)
+        .map(|t| t.into_iter().map(|(k, _)| k).collect())
+        .unwrap_or_default();
+
+    let is_available = |candidate: &str| {
+        !candidate.is_empty()
+            && candidate != "workspaces"
+            && !looks_like_path(candidate)
+            && !root_keys.contains(candidate)
+            && !entries.iter().any(|e| e.name.as_deref() == Some(candidate))
+    };
+
+    let base = canon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("workspace");
+    let parent = canon
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut candidates = Vec::new();
+    candidates.push(base.to_string());
+    if let Some(p) = parent {
+        candidates.push(format!("{p}-{base}"));
+    }
+    for idx in 2..1000 {
+        candidates.push(format!("{base}-{idx}"));
+    }
+
+    for candidate in candidates {
+        if is_available(&candidate) {
+            return candidate;
+        }
+    }
+
+    format!(
+        "workspace-{}",
+        canon.to_string_lossy().bytes().fold(0u64, |acc, b| acc
+            .wrapping_mul(31)
+            .wrapping_add(u64::from(b)))
+    )
+}
+
+fn ensure_workspaces_file_exists(workspaces_path: &Path) -> Result<()> {
+    if !workspaces_path.exists() {
+        if let Some(parent) = workspaces_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+        }
+        fs::write(workspaces_path, DEFAULT_WORKSPACES_TOML).with_context(|| {
+            format!(
+                "Failed to write default workspaces config to {}",
+                workspaces_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn ensure_workspace_config_with_io<R: BufRead, W: Write>(
+    workspaces_path: &Path,
+    workspace: &Path,
+    reader: Option<&mut R>,
+    writer: &mut W,
+) -> Result<WorkspaceEnsureOutcome> {
+    let canon = dunce::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    ensure_workspaces_file_exists(workspaces_path)?;
+
+    let raw = fs::read_to_string(workspaces_path)
+        .with_context(|| format!("Failed to read {}", workspaces_path.display()))?;
+    let entries = parse_workspaces_toml(&raw).with_context(|| {
+        format!(
+            "Cannot verify workspace configuration in {} due to a parse error",
+            workspaces_path.display()
+        )
+    })?;
+
+    if entries.iter().any(|e| e.path == canon) {
+        return Ok(WorkspaceEnsureOutcome::Configured);
+    }
+
+    let Some(reader) = reader else {
+        writeln!(
+            writer,
+            "No Archon workspace configuration found for '{}' in {}.",
+            canon.display(),
+            workspaces_path.display()
+        )?;
+        writeln!(
+            writer,
+            "No interactive terminal is available to confirm adding a workspace entry."
+        )?;
+        return Ok(WorkspaceEnsureOutcome::NoInteractiveTerminal);
+    };
+
+    writeln!(
+        writer,
+        "No Archon workspace configuration found for '{}'.",
+        canon.display()
+    )?;
+    writeln!(writer, "Config file: {}", workspaces_path.display())?;
+    write!(
+        writer,
+        "Would you like to add a default workspace entry here? [y/N]: "
+    )?;
+    writer.flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if answer != "y" && answer != "yes" {
+        return Ok(WorkspaceEnsureOutcome::Declined);
+    }
+
+    let key = next_workspace_entry_key(&canon, &raw, &entries);
+    let header_key = format_toml_key(&key);
+    let ws_value = toml::Value::String(canon.to_string_lossy().into_owned()).to_string();
+
+    let mut updated = raw;
+    if !updated.is_empty() {
+        if !updated.ends_with('\n') {
+            updated.push_str("\n\n");
+        } else if !updated.ends_with("\n\n") {
+            updated.push('\n');
+        }
+    }
+    updated.push_str(&format!("[{header_key}]\nworkspace = {ws_value}\n"));
+
+    fs::write(workspaces_path, updated).with_context(|| {
+        format!(
+            "Failed to write workspace entry to {}",
+            workspaces_path.display()
+        )
+    })?;
+
+    writeln!(
+        writer,
+        "Added workspace '{}' to {}.",
+        key,
+        workspaces_path.display()
+    )?;
+
+    Ok(WorkspaceEnsureOutcome::Configured)
+}
+
+pub fn ensure_workspace_config(
+    workspaces_path: &Path,
+    workspace: &Path,
+) -> Result<WorkspaceEnsureOutcome> {
+    let mut stderr = io::stderr();
+    if io::stdin().is_terminal() {
+        let stdin = io::stdin();
+        let mut lock = stdin.lock();
+        ensure_workspace_config_with_io(workspaces_path, workspace, Some(&mut lock), &mut stderr)
+    } else if let Ok(tty) = fs::File::open("/dev/tty") {
+        let mut reader = io::BufReader::new(tty);
+        ensure_workspace_config_with_io(workspaces_path, workspace, Some(&mut reader), &mut stderr)
+    } else {
+        ensure_workspace_config_with_io::<io::BufReader<fs::File>, _>(
+            workspaces_path,
+            workspace,
+            None,
+            &mut stderr,
+        )
+    }
 }
 
 impl Config {
