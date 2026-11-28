@@ -13,7 +13,6 @@ use crate::{
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum SlashCommand {
-    Codeblocks,
     Compact,
     Exit,
     Fork,
@@ -27,7 +26,6 @@ pub(super) enum SlashCommand {
 
 impl SlashCommand {
     pub const ALL: &[(&str, Self)] = &[
-        ("codeblocks", Self::Codeblocks),
         ("compact", Self::Compact),
         ("exit", Self::Exit),
         ("fork", Self::Fork),
@@ -291,26 +289,6 @@ impl TuiApp {
                     (false, args)
                 };
                 self.dispatch_shell_command(raw_prompt, cmd_args, include_in_context);
-                false
-            }
-            Some(SlashCommand::Codeblocks) => {
-                self.record_prompt_and_clear(raw_prompt);
-                let next_val = match args.to_ascii_lowercase().as_str() {
-                    "" => Some(!self.config.ui.style_code_blocks),
-                    "on" | "true" | "enable" => Some(true),
-                    "off" | "false" | "disable" => Some(false),
-                    _ => None,
-                };
-                if let Some(enabled) = next_val {
-                    self.config.ui.style_code_blocks = enabled;
-                    self.styled_messages.clear();
-                    self.stream_cache.clear();
-                    self.stream_thought_cache.clear();
-                    self.stream_dirty = true;
-                    self.stream_thought_dirty = true;
-                } else {
-                    self.push_error_message("Usage: /codeblocks [on|off]".into());
-                }
                 false
             }
             Some(SlashCommand::Memory) => {

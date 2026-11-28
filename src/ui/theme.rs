@@ -79,15 +79,6 @@ pub const DIFF_CONTEXT: Color = Color::Cyan;
 pub const MD_INLINE_CODE: Color = Color::Yellow;
 pub const MD_CODE_BORDER: Color = Color::Blue;
 pub const MD_CODE_TEXT: Color = Color::Cyan;
-pub const MD_CODE_KEYWORD: Color = Color::Green;
-pub const MD_CODE_TYPE: Color = Color::Yellow;
-pub const MD_CODE_FUNCTION: Color = Color::Blue;
-pub const MD_CODE_STRING: Color = Color::Cyan;
-pub const MD_CODE_NUMBER: Color = Color::Magenta;
-pub const MD_CODE_COMMENT: Color = Color::DarkGray;
-pub const MD_CODE_KEY: Color = Color::Blue;
-pub const MD_CODE_MACRO: Color = Color::Magenta;
-pub const MD_CODE_PUNCT: Color = Color::Green;
 
 pub const MD_TABLE_HEADER: Color = Color::Cyan;
 pub const MD_TABLE_BORDER: Color = Color::LightGreen;

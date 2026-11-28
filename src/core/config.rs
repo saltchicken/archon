@@ -244,7 +244,6 @@ pub struct UiSettings {
     pub chat_padding_left: u16,
     pub chat_padding_right: u16,
     pub fork_icon_hover_only: bool,
-    pub style_code_blocks: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,7 +387,6 @@ impl Default for UiSettings {
             chat_padding_left: 2,
             chat_padding_right: 2,
             fork_icon_hover_only: true,
-            style_code_blocks: true,
         }
     }
 }
@@ -554,7 +552,7 @@ pub fn ensure_workspace_config(workspace: &Path) -> Result<Option<PathBuf>> {
             "[ui]\n",
             "# chat_padding_left = 2\n",
             "# chat_padding_right = 2\n",
-            "# fork_icon_hover_only = true\n# style_code_blocks = true\n\n",
+            "# fork_icon_hover_only = true\n\n",
             "[workspace_snapshot]\n",
             "# git_root = true\n",
             "# tree_only = false\n",
